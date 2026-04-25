@@ -61,6 +61,7 @@
       </ul>
     </li>
     <li><a href="#project-layout">Project layout</a></li>
+    <li><a href="#api-reference">API Reference</a></li>
     <li><a href="#roadmap">Roadmap</a></li>
     <li><a href="#contributing">Contributing</a></li>
     <li><a href="#license">License</a></li>
@@ -387,6 +388,195 @@ anuna-imago/
 │   └── CHECKING.md                   :clean t audit checklist
 ├── plan.spl                          implementation plan (hence)
 └── .github/workflows/ci.yml          matrix CI + LOC-budget gate
+```
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+
+
+<!-- API REFERENCE -->
+## API Reference
+
+Compact signature reference for the surface a user-facing agent author
+calls. The full export list is in [`src/packages.lisp`](./src/packages.lisp);
+docstrings live with the definitions in `src/`.
+
+### Agents & supervision
+
+```lisp
+(make-instance 'agent :id …  :capability …  :provider …  :system-prompt …
+                      :tools '(…))                      → agent
+(agent-id|agent-capability|agent-mailbox|agent-provider
+ |agent-tools|agent-system-prompt|agent-theory|agent-state) agent
+*current-agent*                                  ; bound during a turn
+
+(make-supervisor id &key max-restarts within-seconds parent) → supervisor
+(add-child! supervisor id start-fn)              → id
+(start-supervisor! supervisor)                   → supervisor
+(spawn-agent! supervisor agent)                  → agent
+(drain-supervisor! supervisor &key timeout)      → supervisor
+(force-restart! supervisor child-id)             → child-id | nil
+(list-children supervisor)                       → ((:id … :state … :restarts …) …)
+(child-state-of supervisor child-id)             → keyword | nil
+(sup-state supervisor)            → :stopped | :running | :draining | :failed
+```
+
+### Mailboxes & messaging
+
+```lisp
+(make-mailbox)                                   → mailbox
+(send! target message)                           → message      ; defgeneric
+(receive! mailbox &key timeout)        → message | :timeout | :closed
+(peek-mailbox mailbox)                           → message | nil
+(mailbox-depth mailbox)                          → integer
+(close-mailbox! mailbox)
+;; SEND! is a generic; default method is on MAILBOX. GATEWAY adds a method
+;; that forwards as a reply over the wire — same call site, two backends.
+
+(make-ask content &key reply-to meta)            → ask-plist
+(ask-message-p msg)                              → boolean
+(ask-content msg)                                → string
+(ask-reply-to msg)                               → mailbox-or-gateway
+(make-reply text &key tool-results meta)         → reply-plist
+(ask-agent agent content &key timeout)           → reply-plist  ; convenience
+```
+
+### Hooks
+
+```lisp
+(register-hook key handler)                      → handle
+(remove-hook handle)                             → t | nil
+(run-hook key agent &rest args)                  → value | :veto | nil
+(list-hooks &optional key)
+(clear-all-hooks)
+*hook-keys*           ; :on-user-input :on-tool-call :on-tool-result
+                      ; :on-turn-complete :on-agent-spawn :on-agent-crash
+*excluded-hook-keys*  ; :on-prompt-build :on-stream-token (registration errors)
+```
+
+### Tools
+
+```lisp
+;; Registration
+(define-tool name :description … :permission … :schema … :handler …)
+(register-tool! tool)                            → name
+(unregister-tool! name)                          → t | nil
+(find-tool name)                                 → tool | nil
+(list-tools)                                     → (name …)
+(clear-all-tools)
+(dispatch-tool! name args-plist)                 → handler-return
+
+;; Schema → provider format
+(schema->json-schema schema)                     → CL alist tree
+(json-schema->schema json-data)                  → schema     ; round-trip
+(tool->anthropic-descriptor tool)
+                  → ((:name … :description … :input_schema …))
+
+;; Built-ins (auto-registered when imago loads)
+*builtin-tool-names*  ; harness-list-tools, harness-describe-tool,
+                      ; harness-list-hooks, harness-version, harness-now,
+                      ; harness-describe-agent, harness-query-receipts,
+                      ; harness-uuid, harness-stats, harness-query-theory
+(install-builtin-tools!)                         ; idempotent re-install
+
+;; Fileops (opt-in)
+*fileops-tool-names*  ; harness-read-file, harness-write-file,
+                      ; harness-list-directory
+*fileops-max-read-chars*                         ; default 1048576
+(install-fileops-tools!)
+(uninstall-fileops-tools!)
+```
+
+### Providers
+
+```lisp
+(provider-name provider)                         → string
+(provider-stream! provider agent message)        → stream-handle
+(stream-next-frame! stream)
+   → (:text STRING) | (:tool-use ID NAME ARGS) | (:error PLIST) | :done
+
+;; Stub (canned responses for tests)
+(make-stub-provider &key responder)              → provider
+
+;; Anthropic
+(make-anthropic-provider &key api-key model base-url max-tokens)  → provider
+(build-request provider message agent)           → hash-table
+(auth-headers provider)                          → ((header . value) …)
+*anthropic-http-post* (url &key headers content) → string  ; mockable
+```
+
+### Gateway & transport
+
+```lisp
+(make-gateway :id … :transport … :identity … :capability …
+              :agent … :receipt-log … :heartbeat-interval …)  → gateway
+(gateway-connect! gateway &key timeout)          → t
+(gateway-start-pumps! gateway)                   ; recv + heartbeat threads
+(gateway-disconnect! gateway)
+(gateway-state gateway)
+   → :disconnected | :authenticating | :ready | :draining | :failed
+
+;; Transport protocol (defgenerics; specialise to add new transports)
+(transport-open! tr)
+(transport-send! tr string)
+(transport-recv! tr &key timeout)        → string | :timeout | :closed
+(transport-close! tr)
+(transport-connected-p tr)                       → boolean
+
+(make-wss-transport url &key headers)            → wss-transport
+*wss-open-timeout-seconds*                       ; default 10
+
+(make-mock-transport)                            → mock-transport
+(mock-feed! tr string)             ; inject inbound (for tests)
+(mock-drain! tr &key timeout)      ; read what gateway sent
+```
+
+### Reasoner
+
+```lisp
+*reasoner-ipc-call* (op &rest args)              ; injectable IPC; tests stub
+*active-theory-handle*                           ; bound by install-…!
+
+(load-theory text-or-path)                       → handle
+(assert-fact! handle fact)                       → ack
+(retract-fact! handle fact)                      → ack
+(query handle goal)
+   → (:tag :+delta|:+partial-delta|:-delta|:-partial-delta
+      :derivation … :time-ms …)
+(what-if handle goal facts)                      → proof-result
+(why-not handle goal)                            → counter-derivation
+(proof-result-positive-p result)                 → generalised-boolean
+
+(install-invariant-filter! :theory-handle handle)  → hook-handle
+(uninstall-invariant-filter!)
+;; Wires invariant-filter-hook on :on-tool-call. Reasoner verdicts of
+;; +Δ or +∂ on (forbidden TOOL ARGS) → :VETO before dispatch.
+```
+
+### Receipt log
+
+```lisp
+(open-receipt-log path)                          → log
+(append-receipt! log &key receipt-id direction dialect verb body
+                       agent-id producer-id status)        → entry-plist
+(read-receipts path)                             → (entry-plist …)
+(close-receipt-log! log)
+(content-hash body)                              → hex-string  ; sb-md5
+(iso-8601-now)                                   → "YYYY-MM-DDTHH:MM:SSZ"
+(register-receipt-log-for-clean! log)            ; for :clean t flush
+```
+
+### Image distribution
+
+```lisp
+(save-image! path &key toplevel clean executable)  ; DOES NOT RETURN
+(pre-save-clean!)                                ; manually trigger checklist
+*clean-checklist*  ; :close-receipt-log :shutdown-hook-async-pool
+                   ; :drop-credentials :force-gc
+(register-credential-eraser! thunk)
+*boot-time*                                      ; universal-time at load
+*version*                                        ; "0.1.0"
+(agent-main)                                     ; toplevel for saved images
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
