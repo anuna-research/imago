@@ -158,6 +158,12 @@
    #:make-mock-transport
    #:mock-feed!
    #:mock-drain!
+   ;; M7 production transport
+   #:wss-transport
+   #:make-wss-transport
+   #:wss-transport-url
+   #:wss-transport-headers
+   #:*wss-open-timeout-seconds*
 
    ;; --- M10 / reasoner ---
    #:*reasoner-ipc-call*

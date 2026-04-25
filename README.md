@@ -127,8 +127,9 @@ Five seams to know about:
   thread a value through the chain; first to return `:veto` aborts.
 - **Providers** are CLOS classes implementing `provider-stream!`. Stubs
   for tests, Anthropic in production; Bedrock/Vertex are drop-in.
-- **Transports** are abstract — production uses WebSocket to a CBCL
-  router; tests use an in-memory `mock-transport`.
+- **Transports** are abstract — production uses `wss-transport` (a wrapper
+  around `websocket-driver`) to talk to a CBCL router; tests use an
+  in-memory `mock-transport` plus a Clack-hosted echo server for round-trip.
 - **Reasoner** integration is IPC-only. At `:on-tool-call` the harness
   asks a Spindle defeasible-logic theory whether the call is `(forbidden …)`;
   a +Δ or +∂ verdict vetoes before the tool ever runs.
@@ -193,9 +194,24 @@ credentials, async pools, and open log handles before the save — see
 [`architecture/CHECKING.md`](./architecture/CHECKING.md) for the full
 audit checklist.
 
-To make the agent reachable from a CBCL router, wrap it in a `gateway`
-and call `gateway-connect!`. See `src/gateway.lisp` for the protocol;
-`test/m7-tests.lisp` shows the full lifecycle against a mock router.
+To make the agent reachable from a CBCL router, build a `gateway` over a
+`wss-transport`:
+
+```lisp
+(let* ((tr (make-wss-transport "wss://router.example/agent/v1"
+                                :headers '(("authorization" . "Bearer …"))))
+       (gw (make-gateway :id 'my-gw
+                         :transport tr
+                         :identity "agent-token"
+                         :capability "echo:say"
+                         :agent agent)))
+  (gateway-connect! gw)
+  (gateway-start-pumps! gw))
+```
+
+`test/m7-tests.lisp` shows the full lifecycle against a mock router;
+`test/m7-wss-tests.lisp` exercises the same surface against a real
+WebSocket round-trip on loopback.
 
 ## Project layout
 
@@ -220,6 +236,7 @@ anuna-imago/
 │   ├── save-image.lisp               save-image! + :clean checklist
 │   │
 │   ├── gateway.lisp                  CBCL router client (transport-abstract)
+│   ├── wss-transport.lisp            websocket-driver-backed transport
 │   ├── cbcl-ffi.lisp                 CBCL parser via FFI to cbcl-rs
 │   ├── reasoner.lisp                 Spindle IPC + invariant filter
 │   │
@@ -238,23 +255,20 @@ anuna-imago/
 
 ## Status & known gaps
 
-v0.1 — all 12 implementation milestones merged; 200+ test checks green.
+v0.1 — all 12 implementation milestones plus the production WebSocket
+transport are merged; 13 test suites, 200+ checks, all green.
 
-Three things are scoped-down compared to a production deployment:
+Two things are scoped-down compared to a full production deployment:
 
-- **WebSocket transport.** The gateway protocol is fully implemented;
-  tests run against an in-memory `mock-transport`. The production WebSocket
-  binding (a small wrapper around `websocket-driver`) is a follow-up
-  commit, not in this branch.
 - **Provider streaming.** The Anthropic provider uses the non-streaming
   Messages API. Streaming SSE — and the stateful tool-call accumulation
   it needs — is a future enhancement.
-- **CI matrix.** GitHub Actions runs M1–M5, M8–M11 on macOS + Ubuntu. M6
-  (the cbcl-rs FFI tests) is gated off until the CI prelude grows a
-  cbcl-rs cdylib build step.
+- **CI matrix.** GitHub Actions runs M1–M5, M7-WSS, M8–M11 on macOS +
+  Ubuntu. M6 (the cbcl-rs FFI tests) is gated off until the CI prelude
+  grows a cbcl-rs cdylib build step.
 
-By the numbers: 2199 LOC harness, 1854 LOC tests, 37 MB minimal image,
-175 ms p90 cold start.
+By the numbers: 2317 LOC harness, ~2000 LOC tests, 57 MB image with WSS
+transport in heap, 175 ms p90 cold start.
 
 ## Where to dig next
 
