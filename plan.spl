@@ -426,3 +426,20 @@
 (claims agent:impl
   :at "2026-04-25T10:22:33Z"
   (given completed-m8-anthropic))
+
+(claims agent:impl
+  :at "2026-04-25T10:24:39Z"
+  (given claim-v1-m6-cbcl-ffi)
+  (normally r-cl-state-v1-m6-cbcl-ffi claim-v1-m6-cbcl-ffi state-claimed-v1-m6-cbcl-ffi)
+  (normally r-cl-chain-v1-m6-cbcl-ffi state-claimed-v1-m6-cbcl-ffi claimed-m6-cbcl-ffi)
+)
+
+;; Propagation rules: failures in 'm6-cbcl-ffi' block downstream tasks
+(normally r-propagate-m7-gateway-from-m6-cbcl-ffi-failed failed-m6-cbcl-ffi upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m6-cbcl-ffi-permanently-failed permanently-failed-m6-cbcl-ffi upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m6-cbcl-ffi-stale-v1 stale-v1-m6-cbcl-ffi upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m6-cbcl-ffi-timeout-v1 timeout-v1-m6-cbcl-ffi upstream-blocked-m7-gateway)
+
+(claims agent:impl
+  :at "2026-04-25T10:29:28Z"
+  (given completed-m6-cbcl-ffi))

@@ -18,14 +18,16 @@
 (defvar *failures* 0)
 
 (defmacro check (form &optional msg)
-  `(handler-case
-       (let ((result ,form))
-         (cond (result (format t "  ok    ~S~@[ — ~A~]~%" ',form ,msg))
-               (t (incf *failures*)
-                  (format t "  FAIL  ~S~@[ — ~A~]~%" ',form ,msg))))
-     (error (c)
-       (incf *failures*)
-       (format t "  ERROR ~S — ~A~@[ — ~A~]~%" ',form c ,msg))))
+  ;; Use a gensym so the macro doesn't shadow caller variables named RESULT.
+  (let ((r (gensym "CHECK-")))
+    `(handler-case
+         (let ((,r ,form))
+           (cond (,r (format t "  ok    ~S~@[ — ~A~]~%" ',form ,msg))
+                 (t (incf *failures*)
+                    (format t "  FAIL  ~S~@[ — ~A~]~%" ',form ,msg))))
+       (error (c)
+         (incf *failures*)
+         (format t "  ERROR ~S — ~A~@[ — ~A~]~%" ',form c ,msg)))))
 
 ;; ----------------------------------------------------------- mailbox ---
 

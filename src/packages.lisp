@@ -128,4 +128,11 @@
    #:anthropic-version
    #:build-request
    #:auth-headers
-   #:*anthropic-http-post*))
+   #:*anthropic-http-post*
+
+   ;; --- M6 / cbcl FFI ---
+   #:*cbcl-ffi-library-path*
+   #:ensure-cbcl-ffi-loaded
+   #:parse-message
+   #:verify-dialect
+   #:message-canonical-p))

@@ -11,7 +11,7 @@
   :license "Apache-2.0"
   :homepage "https://codeberg.org/anuna/anuna-imago"
   :source-control (:git "https://codeberg.org/anuna/anuna-imago.git")
-  :depends-on (#:dexador #:com.inuoe.jzon)  ; M8 deps; load-time only when used.
+  :depends-on (#:dexador #:com.inuoe.jzon #:cffi #:cffi-libffi)  ; cffi-libffi for struct-by-value
   :components
   ((:module "src"
     :components ((:file "packages")
@@ -21,6 +21,7 @@
                  (:file "hooks"      :depends-on ("packages" "mailbox"))
                  (:file "tools"      :depends-on ("packages"))
                  (:file "receipt-log" :depends-on ("packages"))
+                 (:file "cbcl-ffi"   :depends-on ("packages"))
                  (:file "turn-loop"  :depends-on ("packages" "agent" "mailbox"
                                                   "hooks" "tools"))
                  (:module "providers"
@@ -49,5 +50,6 @@
                  (:file "m3-tests" :depends-on ("m1-tests"))
                  (:file "m4-tests" :depends-on ("m1-tests"))
                  (:file "m5-tests" :depends-on ("m1-tests"))
+                 (:file "m6-tests" :depends-on ("m1-tests"))
                  (:file "m8-tests" :depends-on ("m1-tests"))
                  (:file "m9-tests" :depends-on ("m1-tests"))))))
