@@ -129,7 +129,8 @@ the built-in tier expanded from 5 to 10 tools (~85 LOC of new handlers
            (list "src/agent.lisp" "src/builtin-tools.lisp" "src/cbcl-ffi.lisp"
                  "src/fileops-tools.lisp"
                  "src/gateway.lisp" "src/hooks.lisp" "src/mailbox.lisp"
-                 "src/main.lisp" "src/packages.lisp" "src/reasoner.lisp"
+                 "src/main.lisp" "src/packages.lisp"
+                 "src/producer-gateway.lisp" "src/reasoner.lisp"
                  "src/receipt-log.lisp" "src/save-image.lisp"
                  "src/supervisor.lisp" "src/tools.lisp" "src/turn-loop.lisp"
                  "src/wss-transport.lisp"
@@ -137,8 +138,8 @@ the built-in tier expanded from 5 to 10 tools (~85 LOC of new handlers
          (total (reduce #'+ (mapcar (lambda (f) (%count-loc (concatenate 'string root f)))
                                     harness-files))))
     (format t "  harness LOC: ~D~%" total)
-    (check (< total 2700)
-           (format nil "harness LOC ~D under 2700" total))))
+    (check (< total 2900)
+           (format nil "harness LOC ~D under 2900" total))))
 
 ;; ---------------------------------------------------------------- runner ---
 

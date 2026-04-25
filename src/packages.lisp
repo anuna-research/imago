@@ -166,6 +166,21 @@
    #:wss-transport-headers
    #:*wss-open-timeout-seconds*
 
+   ;; --- Producer gateway (cross-process composition) ---
+   #:producer-gateway
+   #:make-producer-gateway
+   #:producer-gateway-id
+   #:producer-gateway-transport
+   #:producer-gateway-identity
+   #:producer-state
+   #:producer-heartbeat-interval
+   #:producer-connect!
+   #:producer-start-pumps!
+   #:producer-disconnect!
+   #:producer-ask!
+   #:producer-call!
+   #:producer-in-flight-count
+
    ;; --- Built-in tools (post-spec; introspection only) ---
    #:install-builtin-tools!
    #:*builtin-tool-names*

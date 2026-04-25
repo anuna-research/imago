@@ -21,6 +21,7 @@ case "${TARGET}" in
                        (anuna-imago.test:run-m6-tests)
                        (anuna-imago.test:run-m7-tests)
                        (anuna-imago.test:run-m7-wss-tests)
+                       (anuna-imago.test:run-m7-producer-tests)
                        (anuna-imago.test:run-m8-tests)
                        (anuna-imago.test:run-m9-tests)
                        (anuna-imago.test:run-m10-tests)
@@ -35,6 +36,7 @@ case "${TARGET}" in
   m6)   RUNS='(anuna-imago.test:run-m6-tests)' ;;
   m7)   RUNS='(anuna-imago.test:run-m7-tests)' ;;
   m7-wss) RUNS='(anuna-imago.test:run-m7-wss-tests)' ;;
+  m7-producer) RUNS='(anuna-imago.test:run-m7-producer-tests)' ;;
   m8)   RUNS='(anuna-imago.test:run-m8-tests)' ;;
   m9)   RUNS='(anuna-imago.test:run-m9-tests)' ;;
   m10)  RUNS='(anuna-imago.test:run-m10-tests)' ;;

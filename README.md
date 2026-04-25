@@ -371,7 +371,8 @@ anuna-imago/
 │   ├── receipt-log.lisp              content-addressed audit log
 │   ├── save-image.lisp               save-image! + :clean checklist
 │   │
-│   ├── gateway.lisp                  CBCL Router Client (transport-abstract)
+│   ├── gateway.lisp                  CBCL Router Client — receiver side
+│   ├── producer-gateway.lisp         CBCL Router Client — producer side
 │   ├── wss-transport.lisp            websocket-driver-backed transport
 │   ├── cbcl-ffi.lisp                 CBCL parser via FFI to cbcl-rs
 │   ├── reasoner.lisp                 Spindle IPC + invariant filter
@@ -508,6 +509,7 @@ docstrings live with the definitions in `src/`.
 ### Gateway & transport
 
 ```lisp
+;; Receiver gateway — agent serves asks for its registered capability.
 (make-gateway :id … :transport … :identity … :capability …
               :agent … :receipt-log … :heartbeat-interval …)  → gateway
 (gateway-connect! gateway &key timeout)          → t
@@ -515,6 +517,18 @@ docstrings live with the definitions in `src/`.
 (gateway-disconnect! gateway)
 (gateway-state gateway)
    → :disconnected | :authenticating | :ready | :draining | :failed
+
+;; Producer gateway — agent issues asks via the router and awaits replies.
+(make-producer-gateway :id … :transport … :identity …
+                       :heartbeat-interval …)             → producer-gateway
+(producer-connect! gw &key timeout)              → t
+(producer-start-pumps! gw)
+(producer-ask! gw capability body)               → (values mailbox receipt-id)
+(producer-call! gw capability body &key timeout)
+   → reply-string | :timeout | (:error :rejected …)
+(producer-disconnect! gw)
+(producer-state gw) → :disconnected | :authenticating | :ready | :draining | :failed
+(producer-in-flight-count gw)                    → integer
 
 ;; Transport protocol (defgenerics; specialise to add new transports)
 (transport-open! tr)
@@ -606,9 +620,9 @@ docstrings live with the definitions in `src/`.
 - [ ] Bedrock provider driver
 - [ ] Vertex provider driver
 
-By the numbers: **2677 LOC** harness, **~2400 LOC** tests, **57 MB** image
-with the WSS transport in heap, **175 ms** p90 cold start, **15 test
-suites** × **240+ checks**, all green.
+By the numbers: **2890 LOC** harness, **~2600 LOC** tests, **57 MB** image
+with the WSS transport in heap, **175 ms** p90 cold start, **16 test
+suites** × **250+ checks**, all green.
 
 See the [open issues](https://codeberg.org/anuna/anuna-imago/issues) for
 proposed features and known issues.
@@ -696,9 +710,9 @@ Further reading, in roughly the order you'd want to read them:
 [cl-url]:           https://common-lisp.net/
 [sbcl-shield]:      https://img.shields.io/badge/SBCL-2.6%2B-darkgreen.svg?style=for-the-badge
 [sbcl-url]:         https://www.sbcl.org/
-[tests-shield]:     https://img.shields.io/badge/tests-15_suites_green-success.svg?style=for-the-badge
+[tests-shield]:     https://img.shields.io/badge/tests-16_suites_green-success.svg?style=for-the-badge
 [tests-url]:        ./test/
-[loc-shield]:       https://img.shields.io/badge/LOC-2677-informational.svg?style=for-the-badge
+[loc-shield]:       https://img.shields.io/badge/LOC-2890-informational.svg?style=for-the-badge
 [loc-url]:          ./src/
 
 [sbcl-tile]:        https://img.shields.io/badge/SBCL-image_runtime-darkgreen?style=flat-square

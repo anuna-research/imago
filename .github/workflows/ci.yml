@@ -68,14 +68,14 @@ jobs:
             src/agent.lisp src/builtin-tools.lisp src/cbcl-ffi.lisp \
             src/fileops-tools.lisp \
             src/gateway.lisp src/hooks.lisp src/mailbox.lisp src/main.lisp \
-            src/packages.lisp src/reasoner.lisp src/receipt-log.lisp \
-            src/save-image.lisp src/supervisor.lisp src/tools.lisp \
-            src/turn-loop.lisp src/wss-transport.lisp \
+            src/packages.lisp src/producer-gateway.lisp src/reasoner.lisp \
+            src/receipt-log.lisp src/save-image.lisp src/supervisor.lisp \
+            src/tools.lisp src/turn-loop.lisp src/wss-transport.lisp \
             src/providers/stub.lisp src/providers/anthropic.lisp \
             | tail -1 | awk '{print $1}')
           echo "Harness LOC: $total"
-          # Hard cap: 2700 (post-builtin-tier-expansion).
-          if [[ "$total" -gt 2700 ]]; then
-            echo "::error::Harness LOC ($total) exceeds 2700 cap — trim before merge"
+          # Hard cap: 2900 (post-producer-gateway).
+          if [[ "$total" -gt 2900 ]]; then
+            echo "::error::Harness LOC ($total) exceeds 2900 cap — trim before merge"
             exit 1
           fi

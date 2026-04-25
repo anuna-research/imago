@@ -37,6 +37,8 @@
                                                   "turn-loop" "receipt-log"))
                  (:file "wss-transport"
                                      :depends-on ("packages" "mailbox" "gateway"))
+                 (:file "producer-gateway"
+                                     :depends-on ("packages" "mailbox" "gateway"))
                  (:file "reasoner"   :depends-on ("packages" "hooks" "save-image"))
                  (:module "providers"
                   :depends-on ("packages" "turn-loop" "tools" "save-image")
@@ -69,6 +71,7 @@
                  (:file "m6-tests" :depends-on ("m1-tests"))
                  (:file "m7-tests" :depends-on ("m1-tests"))
                  (:file "m7-wss-tests" :depends-on ("m1-tests"))
+                 (:file "m7-producer-tests" :depends-on ("m1-tests"))
                  (:file "m8-tests" :depends-on ("m1-tests"))
                  (:file "m9-tests" :depends-on ("m1-tests"))
                  (:file "m10-tests" :depends-on ("m1-tests"))
