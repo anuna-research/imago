@@ -128,11 +128,152 @@ trips up the dispatch machinery."
     (sleep 0.05)
     (drain-supervisor! sup)))
 
+;; ----------------------------------------------- harness-describe-agent ---
+
+(defun test-builtin-describe-agent-no-context ()
+  (format t "~%-- builtin-describe-agent-no-context --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((*current-agent* nil))
+    (let ((result (dispatch-tool! 'harness-describe-agent nil)))
+      (check (eq :no-current-agent (getf result :error))
+             "outside a turn → :no-current-agent error"))))
+
+(defun test-builtin-describe-agent ()
+  (format t "~%-- builtin-describe-agent --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((agent (make-instance 'agent
+                              :id 'meta-agent
+                              :capability "self:inspect"
+                              :system-prompt "I introspect."
+                              :tools '(harness-now harness-version))))
+    (let ((*current-agent* agent))
+      (let ((result (dispatch-tool! 'harness-describe-agent nil)))
+        (check (search "META-AGENT" (getf result :id)))
+        (check (string= "self:inspect" (getf result :capability)))
+        (check (string= "I introspect." (getf result :system-prompt)))
+        (check (= 2 (length (getf result :tools))))
+        (check (member "harness-now" (getf result :tools) :test #'string=))))))
+
+;; ----------------------------------------------- harness-query-receipts ---
+
+(defun test-builtin-query-receipts-no-log ()
+  (format t "~%-- builtin-query-receipts-no-log --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((anuna-imago::*open-receipt-logs* nil))
+    (let ((result (dispatch-tool! 'harness-query-receipts nil)))
+      (check (eq :no-log (getf result :error))))))
+
+(defun test-builtin-query-receipts ()
+  (format t "~%-- builtin-query-receipts --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((path (format nil "/tmp/imago-builtin-receipts-~A.log" (random 1000000))))
+    (handler-case (delete-file path) (error () nil))
+    (let ((log (open-receipt-log path))
+          (saved-logs anuna-imago::*open-receipt-logs*))
+      (unwind-protect
+           (progn
+             (setf anuna-imago::*open-receipt-logs* (list log))
+             (loop for i from 0 below 7 do
+               (append-receipt! log :receipt-id (format nil "r-~D" i)
+                                    :direction :inbound
+                                    :body (format nil "body-~D" i)))
+             (let ((all (dispatch-tool! 'harness-query-receipts nil)))
+               (check (= 7 (length all)) "default returns up to 10; 7 written"))
+             (let ((subset (dispatch-tool! 'harness-query-receipts '(:limit 3))))
+               (check (= 3 (length subset)) ":limit 3 returns 3 entries")
+               ;; Should be the LAST 3 (r-4, r-5, r-6).
+               (check (string= "r-4" (getf (first subset) :receipt-id)))
+               (check (string= "r-6" (getf (third subset) :receipt-id)))))
+        (close-receipt-log! log)
+        (setf anuna-imago::*open-receipt-logs* saved-logs)
+        (handler-case (delete-file path) (error () nil))))))
+
+;; ----------------------------------------------- harness-uuid ---
+
+(defun test-builtin-uuid ()
+  (format t "~%-- builtin-uuid --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((u1 (dispatch-tool! 'harness-uuid nil))
+        (u2 (dispatch-tool! 'harness-uuid nil)))
+    (check (= 36 (length u1)) "36 chars total (32 hex + 4 hyphens)")
+    (check (= 36 (length u2)))
+    (check (not (string= u1 u2)) "two UUIDs differ")
+    (check (char= #\4 (char u1 14)) "version nibble (position 14) is 4")
+    (check (member (char u1 19) '(#\8 #\9 #\a #\b))
+           "variant nibble (position 19) is 8/9/a/b")
+    (check (char= #\- (char u1 8)))
+    (check (char= #\- (char u1 13)))
+    (check (char= #\- (char u1 18)))
+    (check (char= #\- (char u1 23)))))
+
+;; ----------------------------------------------- harness-stats ---
+
+(defun test-builtin-stats-no-agent ()
+  (format t "~%-- builtin-stats-no-agent --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((*current-agent* nil))
+    (let ((result (dispatch-tool! 'harness-stats nil)))
+      (check (numberp (getf result :uptime-seconds)))
+      (check (string= *version* (getf result :version)))
+      (check (= 10 (getf result :tool-count)))
+      (check (null (getf result :mailbox-depth))
+             "no agent → :mailbox-depth nil")
+      (check (null (getf result :agent-state))))))
+
+(defun test-builtin-stats-with-agent ()
+  (format t "~%-- builtin-stats-with-agent --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((agent (make-instance 'agent :id 'a :capability "x")))
+    (send! (agent-mailbox agent) :a)
+    (send! (agent-mailbox agent) :b)
+    (let ((*current-agent* agent))
+      (let ((result (dispatch-tool! 'harness-stats nil)))
+        (check (= 2 (getf result :mailbox-depth))
+               "mailbox depth reflects messages waiting")
+        (check (eq :initialised (getf result :agent-state)))))))
+
+;; ----------------------------------------------- harness-query-theory ---
+
+(defun test-builtin-query-theory-no-theory ()
+  (format t "~%-- builtin-query-theory-no-theory --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((*active-theory-handle* nil))
+    (let ((result (dispatch-tool! 'harness-query-theory '(:goal "(forbidden x)"))))
+      (check (eq :no-theory (getf result :error))))))
+
+(defun test-builtin-query-theory ()
+  (format t "~%-- builtin-query-theory --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((original *reasoner-ipc-call*))
+    (unwind-protect
+         (progn
+           (setf *reasoner-ipc-call*
+                 (lambda (op &rest args)
+                   (declare (ignore args))
+                   (case op
+                     (:query (list :tag :+delta :time-ms 1 :derivation '(rule-1))))))
+           (let ((*active-theory-handle* :handle-1))
+             (let ((result (dispatch-tool! 'harness-query-theory
+                                            '(:goal "(forbidden delete-user)"))))
+               (check (eq :+delta (getf result :tag)))
+               (check (numberp (getf result :time-ms)))
+               (check (eq t (getf result :positive))
+                      "+Δ → :positive t — but it does NOT veto"))))
+      (setf *reasoner-ipc-call* original))))
+
+(defun test-builtin-query-theory-missing-goal ()
+  (format t "~%-- builtin-query-theory-missing-goal --~%")
+  (clear-all-tools) (install-builtin-tools!)
+  (let ((*active-theory-handle* :handle-1))
+    (let ((result (dispatch-tool! 'harness-query-theory nil)))
+      (check (eq :missing-goal (getf result :error))))))
+
 ;; ----------------------------------------------- runner ---
 
 (defun run-builtin-tools-tests ()
   (setf *failures* 0)
   (format t "~%=== Built-in tools quality-gate tests ===~%")
+  ;; Original 5 tools
   (test-builtin-list-tools)
   (test-builtin-describe-tool)
   (test-builtin-describe-tool-missing)
@@ -141,6 +282,17 @@ trips up the dispatch machinery."
   (test-builtin-now)
   (test-builtin-anthropic-descriptors)
   (test-builtin-via-turn-loop)
+  ;; Expanded tier
+  (test-builtin-describe-agent-no-context)
+  (test-builtin-describe-agent)
+  (test-builtin-query-receipts-no-log)
+  (test-builtin-query-receipts)
+  (test-builtin-uuid)
+  (test-builtin-stats-no-agent)
+  (test-builtin-stats-with-agent)
+  (test-builtin-query-theory-no-theory)
+  (test-builtin-query-theory)
+  (test-builtin-query-theory-missing-goal)
   (format t "~%=== ~D failure(s) ===~%" *failures*)
   (when (plusp *failures*) (sb-ext:exit :code 1))
   (format t "Built-in tools green.~%"))

@@ -13,6 +13,10 @@
 
 (in-package #:anuna-imago)
 
+(defvar *current-agent* nil
+  "Dynamically bound to the agent processing a turn, so tools can introspect
+on their caller. Set by PROCESS-TURN; NIL outside a turn.")
+
 (defclass agent ()
   ((id            :initarg :id            :reader agent-id)
    (capability    :initarg :capability    :reader agent-capability)

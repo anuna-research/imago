@@ -63,8 +63,12 @@ stream object that responds to STREAM-NEXT-FRAME!. Subclasses implement."))
 (defun process-turn (agent msg)
   "Process one inbound message. Caller has already verified it's not a
 control sentinel. Hooks fire at :on-user-input, :on-tool-call,
-:on-turn-complete; tool calls are dispatched through the registry."
-  (let ((rewritten (run-hook :on-user-input agent msg)))
+:on-turn-complete; tool calls are dispatched through the registry.
+
+Dynamically binds *CURRENT-AGENT* so tools (and hook handlers) can
+introspect on the agent whose turn they're handling."
+  (let* ((*current-agent* agent)
+         (rewritten (run-hook :on-user-input agent msg)))
     (cond
       ((eq rewritten :veto)
        (run-hook :on-turn-complete agent)
@@ -76,6 +80,7 @@ control sentinel. Hooks fire at :on-user-input, :on-tool-call,
              (error () nil)))
          (run-hook :on-turn-complete agent)
          reply)))))
+
 
 (defun drive-stream (agent msg)
   "Open a provider stream, consume frames, dispatch tool calls, build reply."

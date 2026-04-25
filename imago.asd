@@ -25,8 +25,9 @@
                  (:file "hooks"      :depends-on ("packages" "mailbox"))
                  (:file "tools"      :depends-on ("packages"))
                  (:file "receipt-log" :depends-on ("packages"))
-                 (:file "builtin-tools" :depends-on ("packages" "tools"
+                 (:file "builtin-tools" :depends-on ("packages" "agent" "tools"
                                                      "hooks" "receipt-log"
+                                                     "save-image" "reasoner"
                                                      "main"))
                  (:file "cbcl-ffi"   :depends-on ("packages"))
                  (:file "turn-loop"  :depends-on ("packages" "agent" "mailbox"

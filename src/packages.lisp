@@ -41,6 +41,7 @@
    #:agent-system-prompt
    #:agent-theory
    #:agent-state
+   #:*current-agent*
    #:turn-loop
    #:handle-message
    #:on-spawn
@@ -168,11 +169,17 @@
    ;; --- Built-in tools (post-spec; introspection only) ---
    #:install-builtin-tools!
    #:*builtin-tool-names*
+   #:*boot-time*
    #:harness-list-tools
    #:harness-describe-tool
    #:harness-list-hooks
    #:harness-version
    #:harness-now
+   #:harness-describe-agent
+   #:harness-query-receipts
+   #:harness-uuid
+   #:harness-stats
+   #:harness-query-theory
 
    ;; --- M10 / reasoner ---
    #:*reasoner-ipc-call*
