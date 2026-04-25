@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.suite }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-22.04]
+        # M6 needs cbcl-rs cdylib at a known path. Skip in CI for now —
+        # M6 tests skip cleanly when libcbcl_ffi isn't found. Add cbcl-rs
+        # checkout + cargo build to enable M6 in matrix.
+        suite: [core, image]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SBCL (macOS)
+        if: matrix.os == 'macos-14'
+        run: brew install sbcl
+
+      - name: Install SBCL (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl libffi-dev
+
+      - name: Install Quicklisp
+        run: |
+          curl -O https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive --no-userinit --no-sysinit \
+               --load quicklisp.lisp \
+               --eval '(quicklisp-quickstart:install)'
+
+      - name: Run core tests (M1–M5, M8)
+        if: matrix.suite == 'core'
+        run: |
+          bash bin/run-tests.sh m1
+          bash bin/run-tests.sh m2
+          bash bin/run-tests.sh m3
+          bash bin/run-tests.sh m4
+          bash bin/run-tests.sh m5
+          bash bin/run-tests.sh m8
+          bash bin/run-tests.sh m10
+
+      - name: Run image tests (M9, M11)
+        if: matrix.suite == 'image'
+        run: |
+          bash bin/run-tests.sh m9
+          bash bin/run-tests.sh m11
+
+  loc-budget:
+    name: LOC budget audit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count harness LOC (excluding tests/examples/deps)
+        run: |
+          total=$(wc -l \
+            src/agent.lisp src/cbcl-ffi.lisp src/gateway.lisp \
+            src/hooks.lisp src/mailbox.lisp src/main.lisp \
+            src/packages.lisp src/reasoner.lisp src/receipt-log.lisp \
+            src/save-image.lisp src/supervisor.lisp src/tools.lisp \
+            src/turn-loop.lisp src/providers/stub.lisp \
+            src/providers/anthropic.lisp \
+            | tail -1 | awk '{print $1}')
+          echo "Harness LOC: $total"
+          # Hard cap: 2250 (~10% margin on the 2000-LOC nominal target).
+          if [[ "$total" -gt 2250 ]]; then
+            echo "::error::Harness LOC ($total) exceeds 2250 cap — trim before merge"
+            exit 1
+          fi

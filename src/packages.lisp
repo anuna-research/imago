@@ -157,4 +157,18 @@
    #:mock-transport
    #:make-mock-transport
    #:mock-feed!
-   #:mock-drain!))
+   #:mock-drain!
+
+   ;; --- M10 / reasoner ---
+   #:*reasoner-ipc-call*
+   #:*active-theory-handle*
+   #:load-theory
+   #:query
+   #:what-if
+   #:why-not
+   #:assert-fact!
+   #:retract-fact!
+   #:proof-result-positive-p
+   #:invariant-filter-hook
+   #:install-invariant-filter!
+   #:uninstall-invariant-filter!))

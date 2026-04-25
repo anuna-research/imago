@@ -460,3 +460,31 @@
 (claims agent:impl
   :at "2026-04-25T10:33:46Z"
   (given completed-m7-gateway))
+
+(claims agent:impl
+  :at "2026-04-25T10:34:57Z"
+  (given claim-v1-m10-reasoner)
+  (normally r-cl-state-v1-m10-reasoner claim-v1-m10-reasoner state-claimed-v1-m10-reasoner)
+  (normally r-cl-chain-v1-m10-reasoner state-claimed-v1-m10-reasoner claimed-m10-reasoner)
+)
+
+;; Propagation rules: failures in 'm10-reasoner' block downstream tasks
+(normally r-propagate-m11-release-from-m10-reasoner-failed failed-m10-reasoner upstream-blocked-m11-release)
+(normally r-propagate-m11-release-from-m10-reasoner-permanently-failed permanently-failed-m10-reasoner upstream-blocked-m11-release)
+(normally r-propagate-m11-release-from-m10-reasoner-stale-v1 stale-v1-m10-reasoner upstream-blocked-m11-release)
+(normally r-propagate-m11-release-from-m10-reasoner-timeout-v1 timeout-v1-m10-reasoner upstream-blocked-m11-release)
+
+(claims agent:impl
+  :at "2026-04-25T10:36:53Z"
+  (given completed-m10-reasoner))
+
+(claims agent:reviewer
+  :at "2026-04-25T10:37:38Z"
+  (given claim-v1-m11-release)
+  (normally r-cl-state-v1-m11-release claim-v1-m11-release state-claimed-v1-m11-release)
+  (normally r-cl-chain-v1-m11-release state-claimed-v1-m11-release claimed-m11-release)
+)
+
+(claims agent:reviewer
+  :at "2026-04-25T10:54:21Z"
+  (given completed-m11-release))

@@ -26,6 +26,7 @@
                                                   "hooks" "tools"))
                  (:file "gateway"    :depends-on ("packages" "mailbox" "agent"
                                                   "turn-loop" "receipt-log"))
+                 (:file "reasoner"   :depends-on ("packages" "hooks" "save-image"))
                  (:module "providers"
                   :depends-on ("packages" "turn-loop" "tools" "save-image")
                   :components ((:file "stub")
@@ -55,4 +56,6 @@
                  (:file "m6-tests" :depends-on ("m1-tests"))
                  (:file "m7-tests" :depends-on ("m1-tests"))
                  (:file "m8-tests" :depends-on ("m1-tests"))
-                 (:file "m9-tests" :depends-on ("m1-tests"))))))
+                 (:file "m9-tests" :depends-on ("m1-tests"))
+                 (:file "m10-tests" :depends-on ("m1-tests"))
+                 (:file "m11-tests" :depends-on ("m1-tests"))))))
