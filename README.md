@@ -1,67 +1,114 @@
 # anuna-imago
 
-Minimal hackable agent harness on SBCL Common Lisp.
+A small, hackable agent runtime for SBCL Common Lisp. You build your agent
+at the REPL, save it as a single binary with `save-lisp-and-die`, and ship
+it. While it's running you can attach SLIME and redefine any function —
+the turn loop, a tool handler, the supervisor itself — without restarting.
 
-The 2k-LOC variant of [SPEC-011](https://codeberg.org/anuna/anuna-code/src/branch/main/spec/SPEC-011-image-harness.md): the agent is an SBCL image, the runtime is supervised processes, the wire is CBCL, the substrate is fully redefinable in flight.
+The runtime is supervised processes. The wire is CBCL. The substrate is
+fully redefinable in flight. Roughly 2200 lines of Common Lisp.
 
-## Status
+## Why this shape?
 
-**v0.1 reference implementation** — all 12 milestones from [`plan.spl`](./plan.spl) are merged. Run `hence plan board plan.spl` to see the board (12 done, 0 pending). All 11 milestone test suites are green; CI matrix at `.github/workflows/ci.yml`.
+Agent frameworks tend to embed assumptions about what models *can't* do —
+planning modules, prompt-pipeline curation, output parsers — and those
+assumptions age badly as model capability climbs. anuna-imago commits to
+**operational scaffolding only**: supervision, identity, audit, capability
+routing, image distribution, runtime safety invariants. If a layer turns
+out to encode an obsolete assumption, you redefine it at the live REPL
+instead of filing a framework migration ticket.
 
-| Number      | Value                                                 |
-| ----------- | ----------------------------------------------------- |
-| Harness LOC | 2199 (target was ~2000)                               |
-| Tests LOC   | 1854                                                  |
-| Image size  | 37 MB minimal / 56 MB with provider+jzon              |
-| Cold start  | 175 ms p90                                            |
-| Append log  | 0.008 ms mean per receipt                             |
-| Suites      | 11 milestones × 200+ quality-gate checks, all green   |
+This is the working implementation of [SPEC-011][spec], constrained to
+~2000 LOC. See the spec for the full argument; the README assumes you just
+want to run it.
 
-## What this is
+[spec]: https://codeberg.org/anuna/anuna-code/src/branch/main/spec/SPEC-011-image-harness.md
 
-- **Image-as-artifact**: agents ship as standalone SBCL binaries via `save-lisp-and-die`.
-- **Operational scaffolding only**: supervision, identity, audit, distribution, runtime safety invariants. Capability augmentation is declined per the SPEC-011 bitter-lesson stance and **enforced in code** — `register-hook :on-prompt-build` errors at runtime.
-- **Hackable in flight**: every function — turn loops, hooks, tools, supervision, providers — is redefinable at the live REPL via SLIME/SLY without restart. Tested under a running supervisor (`m4-tests test-process-turn-redefinable`).
-- **Contracts at every external seam**: CBCL router (CON-001), CBCL messages (CON-002, FFI to `cbcl-rs`), hooks (CON-003), tools (CON-004), provider drivers (CON-005), reasoner (CON-006), image format (CON-008). Each has an indirection seam (`*ANTHROPIC-HTTP-POST*`, `*REASONER-IPC-CALL*`, `MOCK-TRANSPORT`) so tests don't need live external services.
+## Setup
 
-## What this isn't (per the 2k cut)
+You need SBCL 2.6+, Quicklisp, and (optionally, for the CBCL parser tests)
+a local checkout of [`cbcl-rs`][cbcl-rs] with its FFI cdylib built.
 
-- Not multi-cloud — Anthropic only in v0.1 (CON-005 contract preserved for Bedrock / Vertex drivers later).
-- Not self-improving — optimization primitives (`fork-agent`, `replay-corpus`, `score`, `promote-image!`) deferred. The Stance was already skeptical of them; an out-of-tree add-on can return them later if justified.
-- Not multi-strategy supervised — only `:one-for-one` ships. Other OTP strategies deferred.
-- Not an in-CL CBCL parser — FFI to [`cbcl-rs`](https://codeberg.org/anuna/cbcl-rs) (resolves SPEC-011 open-Q-2). Inherits its Lean-verified oracle parity for free.
-- Not streaming — Anthropic provider uses non-streaming Messages API in v0.1; SSE deferred.
-
-## Quick start
+[cbcl-rs]: https://codeberg.org/anuna/cbcl-rs
 
 ```bash
-# Requires SBCL 2.6+, Quicklisp installed at ~/quicklisp.
-# (Quicklisp install: curl https://beta.quicklisp.org/quicklisp.lisp |
-#                     sbcl --no-sysinit --no-userinit --load /dev/stdin \
-#                          --eval '(quicklisp-quickstart:install)' --quit)
+# 1. SBCL
+brew install sbcl                                    # macOS
+# or:    sudo apt-get install sbcl libffi-dev        # Debian/Ubuntu
 
-bash bin/run-tests.sh all              # 11 suites; takes ~30s
-bash bin/build-echo-image.sh           # produces ./echo-agent (37 MB)
+# 2. Quicklisp (one-time)
+curl -O https://beta.quicklisp.org/quicklisp.lisp
+sbcl --no-userinit --no-sysinit --load quicklisp.lisp \
+     --eval '(quicklisp-quickstart:install)' --quit
 
-./echo-agent --version                 # anuna-imago 0.1.0
-./echo-agent --echo "hello world"      # echo: hello world
-echo "hi" | ./echo-agent --serve       # stdin-driven; drains on EOF
-./echo-agent --serve 60                # serve for 60s, then drain
+# 3. (Optional) cbcl-rs cdylib for the M6 FFI tests
+git clone https://codeberg.org/anuna/cbcl-rs ../cbcl-rs
+( cd ../cbcl-rs && cargo build --release -p cbcl-ffi )
 ```
 
-For development, attach SLIME to a running image and redefine any function in flight — `defmethod` bodies, hooks, the turn loop itself.
+That's the lot. anuna-imago itself is loaded via ASDF from this directory
+— no install step, no path-mangling.
 
-## How a tool call flows
+## Try it
+
+```bash
+bash bin/run-tests.sh all          # 11 milestone test suites, ~30s
+bash bin/build-echo-image.sh       # produces ./echo-agent (~37 MB)
+
+./echo-agent --version
+# anuna-imago 0.1.0
+
+./echo-agent --echo "hello world"
+# echo: hello world
+
+echo "ping" | ./echo-agent --serve
+# echo: ping
+# [drain on EOF]
+
+./echo-agent --serve 60            # serve for 60s, drain on SIGTERM/SIGINT
+```
+
+The echo agent uses a stub provider — no API key required. Swap in the
+real Anthropic provider and you get a working LLM-backed agent in another
+~10 lines of customisation (next section).
+
+## Mental model
+
+A running agent is **one OS process** holding an SBCL image. Inside it:
 
 ```
-agent          turn-loop          hook chain          registry
+┌──────────────────────────────────────────────────────────┐
+│  agent process                                           │
+│                                                          │
+│  ┌────────────┐                                          │
+│  │ supervisor │  one-for-one restart policy              │
+│  └─────┬──────┘                                          │
+│        │ spawns / monitors                               │
+│        ▼                                                 │
+│  ┌────────────┐    ┌────────────┐    ┌─────────────┐     │
+│  │  worker    │    │  worker    │    │  gateway    │     │
+│  │  (agent +  │    │  (agent +  │    │  (CBCL      │     │
+│  │  turn-loop)│    │  turn-loop)│    │   router)   │     │
+│  └─────┬──────┘    └────────────┘    └──────┬──────┘     │
+│        │ inbox                              │            │
+│        ▼                                    ▼            │
+│  ┌────────────┐                       ┌──────────────┐   │
+│  │  mailbox   │◄──── ask / reply ────►│  WebSocket   │   │
+│  └────────────┘                       └──────────────┘   │
+└──────────────────────────────────────────────────────────┘
+```
+
+The **turn loop** is the heart of it. For each inbound ask:
+
+```
+agent          turn-loop          hook chain          tool registry
   │ ask           │                   │                   │
   ├──────────────►│ provider-stream!  │                   │
   │               ├──── HTTP ─────►   │                   │
   │               │◄── tool_use ──    │                   │
   │               │ run-hook          │                   │
   │               │  :on-tool-call    │                   │
-  │               ├──────────────────►│ Spindle:          │
+  │               ├──────────────────►│ Spindle reasoner: │
   │               │                   │ (forbidden …) ?   │
   │               │◄──────────────────┤ -∂ → pass         │
   │               │ dispatch-tool!    │                   │
@@ -71,59 +118,152 @@ agent          turn-loop          hook chain          registry
   │◄──────────────┤ :tool-results                         │
 ```
 
+Five seams to know about:
+
+- **Methods** are `defmethod` — redefine at the REPL, the next call uses
+  the new version.
+- **Hooks** at `:on-user-input`, `:on-tool-call`, `:on-tool-result`,
+  `:on-turn-complete`, `:on-agent-spawn`, `:on-agent-crash`. Sync hooks
+  thread a value through the chain; first to return `:veto` aborts.
+- **Providers** are CLOS classes implementing `provider-stream!`. Stubs
+  for tests, Anthropic in production; Bedrock/Vertex are drop-in.
+- **Transports** are abstract — production uses WebSocket to a CBCL
+  router; tests use an in-memory `mock-transport`.
+- **Reasoner** integration is IPC-only. At `:on-tool-call` the harness
+  asks a Spindle defeasible-logic theory whether the call is `(forbidden …)`;
+  a +Δ or +∂ verdict vetoes before the tool ever runs.
+
+## Build your own agent
+
+Three things to customise: tools, system prompt, provider.
+
+```lisp
+;; my-agent.lisp
+(in-package #:anuna-imago)
+
+;; 1. Define tools the LLM can call.
+(define-tool current-time
+  :description "Return the current ISO-8601 UTC timestamp."
+  :schema      ()
+  :handler     (lambda (args) (declare (ignore args)) (iso-8601-now)))
+
+(define-tool greet
+  :description "Greet someone by name."
+  :schema      ((:name :type :string :required-p t :description "Person to greet"))
+  :handler     (lambda (args) (format nil "Hello, ~A." (getf args :name))))
+
+;; 2. Wire an agent that uses them, against a real provider.
+(defun my-toplevel ()
+  (let* ((provider (make-anthropic-provider))    ; reads ANTHROPIC_API_KEY
+         (sup      (make-supervisor 'my-sup))
+         (agent    (make-instance 'agent
+                                  :id            'clock
+                                  :capability    "time:lookup"
+                                  :provider      provider
+                                  :system-prompt "You are a clock agent."
+                                  :tools         '(current-time greet))))
+    (spawn-agent! sup agent)
+    (sleep 0.05)
+    (let ((reply (ask-agent agent "What time is it? Greet Hugo while you're at it.")))
+      (format t "~%~A~%" (getf reply :text))
+      (dolist (r (getf reply :tool-results))
+        (format t "  [~A] → ~A~%" (getf r :name) (getf r :value))))
+    (send! (agent-mailbox agent) :shutdown)
+    (drain-supervisor! sup)))
+```
+
+Save it as a binary:
+
+```bash
+sbcl --no-userinit --no-sysinit \
+     --load ~/quicklisp/setup.lisp \
+     --eval "(push (truename \".\") asdf:*central-registry*)" \
+     --eval "(asdf:load-system :imago)" \
+     --eval "(load \"my-agent.lisp\")" \
+     --eval "(anuna-imago:save-image! \"my-agent\"
+                                       :toplevel 'anuna-imago::my-toplevel
+                                       :executable t)"
+
+ANTHROPIC_API_KEY=sk-… ./my-agent
+```
+
+`./my-agent` is now a self-contained 56 MB binary you can `scp` to any
+machine that doesn't have SBCL installed. `:clean t` (default) flushes
+credentials, async pools, and open log handles before the save — see
+[`architecture/CHECKING.md`](./architecture/CHECKING.md) for the full
+audit checklist.
+
+To make the agent reachable from a CBCL router, wrap it in a `gateway`
+and call `gateway-connect!`. See `src/gateway.lisp` for the protocol;
+`test/m7-tests.lisp` shows the full lifecycle against a mock router.
+
 ## Project layout
 
 ```
 anuna-imago/
-├── imago.asd                   ASDF system definition
-├── plan.spl                    Hence implementation plan (12 milestones)
-├── README.md                   you are here
-├── LICENSE                     Apache-2.0
-├── .github/workflows/ci.yml    matrix CI + LOC-budget gate
-├── architecture/
-│   ├── ADR-001-image-runtime.md
-│   └── CHECKING.md             :clean t checklist (operator audit)
 ├── bin/
-│   ├── build-echo-image.sh     save-lisp-and-die wrapper
-│   └── run-tests.sh            test runner with Quicklisp bootstrap
+│   ├── build-echo-image.sh           save-lisp-and-die wrapper
+│   └── run-tests.sh                  test runner
 ├── src/
-│   ├── packages.lisp           anuna-imago package
-│   ├── main.lisp               agent-main entry point + --serve loop
-│   ├── mailbox.lisp            sb-thread queue (M1)
-│   ├── supervisor.lisp         OTP-style :one-for-one (M1)
-│   ├── agent.lisp              CLOS class + lifecycle generics (M1)
-│   ├── hooks.lisp              registry + sync/fire-and-forget + stance (M2)
-│   ├── tools.lisp              define-tool + JSON Schema as CL data (M3)
-│   ├── turn-loop.lisp          provider-streaming loop + frame dispatch (M4)
-│   ├── receipt-log.lisp        append-only, content-addressed (M5)
-│   ├── cbcl-ffi.lisp           cffi bindings to libcbcl_ffi.dylib (M6)
-│   ├── gateway.lisp            CBCL Router Client + transport seam (M7)
-│   ├── providers/
-│   │   ├── stub.lisp           canned-response provider (M4)
-│   │   └── anthropic.lisp      Messages API + mockable HTTP (M8)
-│   ├── save-image.lisp         save-image! + :clean checklist (M9)
-│   └── reasoner.lisp           Spindle IPC + invariant filter (M10)
-├── examples/
-│   └── echo.lisp
-└── test/
-    └── m{1..11}-tests.lisp     one suite per milestone
+│   ├── packages.lisp                 package definitions
+│   ├── main.lisp                     agent-main entry + --serve loop
+│   │
+│   ├── mailbox.lisp                  ┐
+│   ├── supervisor.lisp               │  supervised actor primitives
+│   ├── agent.lisp                    ┘
+│   │
+│   ├── hooks.lisp                    hook registry, sync + fire-and-forget
+│   ├── tools.lisp                    define-tool, JSON Schema as CL data
+│   ├── turn-loop.lisp                default per-message loop
+│   │
+│   ├── receipt-log.lisp              content-addressed audit log
+│   ├── save-image.lisp               save-image! + :clean checklist
+│   │
+│   ├── gateway.lisp                  CBCL router client (transport-abstract)
+│   ├── cbcl-ffi.lisp                 CBCL parser via FFI to cbcl-rs
+│   ├── reasoner.lisp                 Spindle IPC + invariant filter
+│   │
+│   └── providers/
+│       ├── stub.lisp                 canned-response provider for tests
+│       └── anthropic.lisp            Messages API + mockable HTTP
+│
+├── test/                             one suite per milestone (M1–M11)
+├── examples/echo.lisp                reference echo agent
+├── architecture/
+│   ├── ADR-001-image-runtime.md      why SBCL (not ECL)
+│   └── CHECKING.md                   :clean t audit checklist
+├── plan.spl                          implementation plan (hence)
+└── .github/workflows/ci.yml          matrix CI + LOC-budget gate
 ```
 
-## Resolved SPEC-011 open questions
+## Status & known gaps
 
-- **Q1 (SBCL vs ECL)** → SBCL. See `architecture/ADR-001-image-runtime.md`.
-- **Q2 (CBCL parser strategy)** → FFI to cbcl-rs. See `src/cbcl-ffi.lisp`.
-- **Q3 (Reasoner placement)** → IPC only (in-process FFI dropped per 2k cut). See `src/reasoner.lisp`.
-- **Q4 (`:clean t` checklist)** → defined in code (`*clean-checklist*` in `src/save-image.lisp`) and prose (`architecture/CHECKING.md`).
-- **Q5 (Receipt log durability)** → append-only file, no sqlite (per 2k cut). See `src/receipt-log.lisp`.
-- **Q6 (Secret distribution)** → modules register credential erasers; `:clean t` flushes before save. See `register-credential-eraser!` in `src/save-image.lisp`.
-- **Q7 (Hook deprecation discipline)** → not opt-in. `:on-prompt-build` and `:on-stream-token` error at registration. See `*EXCLUDED-HOOK-KEYS*` in `src/hooks.lisp`.
+v0.1 — all 12 implementation milestones merged; 200+ test checks green.
 
-## Known gaps
+Three things are scoped-down compared to a production deployment:
 
-- **M7 transport** — only `MOCK-TRANSPORT` is exercised in tests. A real `websocket-driver`-backed transport is a small wrapper around the same defgeneric protocol; left as a follow-up commit.
-- **M8 streaming** — non-streaming Messages API only. SSE consumption with stateful tool-call accumulation is a future enhancement.
-- **M11 CI matrix** — workflow is in place; the M6 step is gated off until the cbcl-rs cdylib build is added to the matrix prelude.
+- **WebSocket transport.** The gateway protocol is fully implemented;
+  tests run against an in-memory `mock-transport`. The production WebSocket
+  binding (a small wrapper around `websocket-driver`) is a follow-up
+  commit, not in this branch.
+- **Provider streaming.** The Anthropic provider uses the non-streaming
+  Messages API. Streaming SSE — and the stateful tool-call accumulation
+  it needs — is a future enhancement.
+- **CI matrix.** GitHub Actions runs M1–M5, M8–M11 on macOS + Ubuntu. M6
+  (the cbcl-rs FFI tests) is gated off until the CI prelude grows a
+  cbcl-rs cdylib build step.
+
+By the numbers: 2199 LOC harness, 1854 LOC tests, 37 MB minimal image,
+175 ms p90 cold start.
+
+## Where to dig next
+
+- [`SPEC-011`][spec] — the original specification this is an implementation of
+- [`architecture/ADR-001-image-runtime.md`](./architecture/ADR-001-image-runtime.md) — why SBCL specifically
+- [`architecture/CHECKING.md`](./architecture/CHECKING.md) — what `:clean t` actually does at save time
+- [`plan.spl`](./plan.spl) — implementation plan as defeasible-logic rules; query with `hence plan board plan.spl`
+- [`test/m4-tests.lisp`](./test/m4-tests.lisp) — the most readable end-to-end exercise of the runtime
+- [`test/m7-tests.lisp`](./test/m7-tests.lisp) — gateway round-trip against the mock router
 
 ## License
 
