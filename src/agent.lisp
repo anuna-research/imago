@@ -19,7 +19,7 @@
    (mailbox       :initform (make-mailbox) :reader agent-mailbox)
    (supervisor    :initarg :supervisor    :accessor agent-supervisor :initform nil)
    (provider      :initarg :provider      :accessor agent-provider   :initform nil)
-   (tools         :initform nil           :accessor agent-tools)
+   (tools         :initarg :tools :initform nil :accessor agent-tools)
    (system-prompt :initarg :system-prompt :accessor agent-system-prompt :initform "")
    (theory        :initarg :theory        :accessor agent-theory     :initform nil)
    (state         :initform :initialised  :accessor agent-state)))

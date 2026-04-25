@@ -165,6 +165,15 @@
    #:wss-transport-headers
    #:*wss-open-timeout-seconds*
 
+   ;; --- Built-in tools (post-spec; introspection only) ---
+   #:install-builtin-tools!
+   #:*builtin-tool-names*
+   #:harness-list-tools
+   #:harness-describe-tool
+   #:harness-list-hooks
+   #:harness-version
+   #:harness-now
+
    ;; --- M10 / reasoner ---
    #:*reasoner-ipc-call*
    #:*active-theory-handle*

@@ -134,6 +134,36 @@ Five seams to know about:
   asks a Spindle defeasible-logic theory whether the call is `(forbidden …)`;
   a +Δ or +∂ verdict vetoes before the tool ever runs.
 
+## Built-in tools
+
+Five small tools auto-register when `imago` loads. They cover
+introspection on the harness itself — useful both for an agent that
+wants to discover its own surface and for a human debugging a deployed
+binary. Agents that don't list them in `:tools` don't expose them to
+the LLM, so registration is harmless.
+
+| Name | Returns |
+|---|---|
+| `harness-list-tools` | List of all registered tool names |
+| `harness-describe-tool` | `{description, permission, schema}` for a named tool |
+| `harness-list-hooks` | Hook keys + handler counts |
+| `harness-version` | Harness version string |
+| `harness-now` | Current UTC time, ISO-8601 |
+
+```lisp
+;; Wire all of them into an agent:
+(make-instance 'agent ... :tools *builtin-tool-names*)
+```
+
+What's deliberately **not** built in: file IO, shell exec, HTTP fetch,
+web search. Those are exactly the "agent framework" abstractions
+SPEC-011's bitter-lesson stance refused — they age badly as model
+capability climbs, and they're better-served by MCP servers or per-
+project tool modules. Two opt-in trapdoors (`harness-eval` and
+`harness-redefine-method`) for self-modification live in
+`examples/self-modifying.lisp` (planned, not in this branch) so the
+author has to consciously enable them.
+
 ## Build your own agent
 
 Three things to customise: tools, system prompt, provider.
@@ -230,6 +260,7 @@ anuna-imago/
 │   │
 │   ├── hooks.lisp                    hook registry, sync + fire-and-forget
 │   ├── tools.lisp                    define-tool, JSON Schema as CL data
+│   ├── builtin-tools.lisp            harness-{list,describe,now,version,…}
 │   ├── turn-loop.lisp                default per-message loop
 │   │
 │   ├── receipt-log.lisp              content-addressed audit log
@@ -267,7 +298,7 @@ Two things are scoped-down compared to a full production deployment:
   Ubuntu. M6 (the cbcl-rs FFI tests) is gated off until the CI prelude
   grows a cbcl-rs cdylib build step.
 
-By the numbers: 2317 LOC harness, ~2000 LOC tests, 57 MB image with WSS
+By the numbers: 2424 LOC harness, ~2100 LOC tests, 57 MB image with WSS
 transport in heap, 175 ms p90 cold start.
 
 ## Where to dig next

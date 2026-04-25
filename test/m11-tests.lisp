@@ -121,15 +121,14 @@ We close stdin so LISTEN doesn't block; the deadline path triggers exit."
 
 (defun test-loc-budget ()
   "Acceptance: harness LOC near the ~2k target. Examples and tests excluded.
-Bumped to 2400 after the wss-transport addition (~115 LOC of websocket
-driver wrapping) — still ~20% over the 2000 nominal but the entire
-production-WSS path is now real, not deferred."
+Cap raised to 2500 after the built-in introspection tools landed (~95 LOC).
+Still well below the line where a trim sweep would be warranted."
   (format t "~%-- loc-budget --~%")
   (let* ((root (%imago-root-path))
          (harness-files
-           (list "src/agent.lisp" "src/cbcl-ffi.lisp" "src/gateway.lisp"
-                 "src/hooks.lisp" "src/mailbox.lisp" "src/main.lisp"
-                 "src/packages.lisp" "src/reasoner.lisp"
+           (list "src/agent.lisp" "src/builtin-tools.lisp" "src/cbcl-ffi.lisp"
+                 "src/gateway.lisp" "src/hooks.lisp" "src/mailbox.lisp"
+                 "src/main.lisp" "src/packages.lisp" "src/reasoner.lisp"
                  "src/receipt-log.lisp" "src/save-image.lisp"
                  "src/supervisor.lisp" "src/tools.lisp" "src/turn-loop.lisp"
                  "src/wss-transport.lisp"
@@ -137,8 +136,8 @@ production-WSS path is now real, not deferred."
          (total (reduce #'+ (mapcar (lambda (f) (%count-loc (concatenate 'string root f)))
                                     harness-files))))
     (format t "  harness LOC: ~D~%" total)
-    (check (< total 2400)
-           (format nil "harness LOC ~D under 2400 (post-WSS cap)" total))))
+    (check (< total 2500)
+           (format nil "harness LOC ~D under 2500" total))))
 
 ;; ---------------------------------------------------------------- runner ---
 

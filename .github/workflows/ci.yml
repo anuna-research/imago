@@ -65,16 +65,16 @@ jobs:
       - name: Count harness LOC (excluding tests/examples/deps)
         run: |
           total=$(wc -l \
-            src/agent.lisp src/cbcl-ffi.lisp src/gateway.lisp \
-            src/hooks.lisp src/mailbox.lisp src/main.lisp \
+            src/agent.lisp src/builtin-tools.lisp src/cbcl-ffi.lisp \
+            src/gateway.lisp src/hooks.lisp src/mailbox.lisp src/main.lisp \
             src/packages.lisp src/reasoner.lisp src/receipt-log.lisp \
             src/save-image.lisp src/supervisor.lisp src/tools.lisp \
             src/turn-loop.lisp src/wss-transport.lisp \
             src/providers/stub.lisp src/providers/anthropic.lisp \
             | tail -1 | awk '{print $1}')
           echo "Harness LOC: $total"
-          # Hard cap: 2400 (post-WSS; ~20% over 2000 nominal).
-          if [[ "$total" -gt 2400 ]]; then
-            echo "::error::Harness LOC ($total) exceeds 2400 cap — trim before merge"
+          # Hard cap: 2500 (post-built-in-tools).
+          if [[ "$total" -gt 2500 ]]; then
+            echo "::error::Harness LOC ($total) exceeds 2500 cap — trim before merge"
             exit 1
           fi

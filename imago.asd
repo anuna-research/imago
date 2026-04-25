@@ -25,6 +25,9 @@
                  (:file "hooks"      :depends-on ("packages" "mailbox"))
                  (:file "tools"      :depends-on ("packages"))
                  (:file "receipt-log" :depends-on ("packages"))
+                 (:file "builtin-tools" :depends-on ("packages" "tools"
+                                                     "hooks" "receipt-log"
+                                                     "main"))
                  (:file "cbcl-ffi"   :depends-on ("packages"))
                  (:file "turn-loop"  :depends-on ("packages" "agent" "mailbox"
                                                   "hooks" "tools"))
@@ -67,4 +70,5 @@
                  (:file "m8-tests" :depends-on ("m1-tests"))
                  (:file "m9-tests" :depends-on ("m1-tests"))
                  (:file "m10-tests" :depends-on ("m1-tests"))
-                 (:file "m11-tests" :depends-on ("m1-tests"))))))
+                 (:file "m11-tests" :depends-on ("m1-tests"))
+                 (:file "builtin-tools-tests" :depends-on ("m1-tests"))))))
