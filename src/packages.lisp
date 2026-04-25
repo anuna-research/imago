@@ -181,6 +181,15 @@
    #:harness-stats
    #:harness-query-theory
 
+   ;; --- Opt-in fileops tools ---
+   #:install-fileops-tools!
+   #:uninstall-fileops-tools!
+   #:*fileops-tool-names*
+   #:*fileops-max-read-chars*
+   #:harness-read-file
+   #:harness-write-file
+   #:harness-list-directory
+
    ;; --- M10 / reasoner ---
    #:*reasoner-ipc-call*
    #:*active-theory-handle*

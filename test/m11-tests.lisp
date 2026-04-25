@@ -127,6 +127,7 @@ the built-in tier expanded from 5 to 10 tools (~85 LOC of new handlers
   (let* ((root (%imago-root-path))
          (harness-files
            (list "src/agent.lisp" "src/builtin-tools.lisp" "src/cbcl-ffi.lisp"
+                 "src/fileops-tools.lisp"
                  "src/gateway.lisp" "src/hooks.lisp" "src/mailbox.lisp"
                  "src/main.lisp" "src/packages.lisp" "src/reasoner.lisp"
                  "src/receipt-log.lisp" "src/save-image.lisp"

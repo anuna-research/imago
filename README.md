@@ -363,7 +363,8 @@ anuna-imago/
 │   │
 │   ├── hooks.lisp                    hook registry, sync + fire-and-forget
 │   ├── tools.lisp                    define-tool, JSON Schema as CL data
-│   ├── builtin-tools.lisp            harness-{list,describe,now,version,…}
+│   ├── builtin-tools.lisp            harness-{list,describe,uuid,stats,…}
+│   ├── fileops-tools.lisp            opt-in harness-{read,write,list-dir}
 │   ├── turn-loop.lisp                default per-message loop
 │   │
 │   ├── receipt-log.lisp              content-addressed audit log
@@ -415,9 +416,9 @@ anuna-imago/
 - [ ] Bedrock provider driver
 - [ ] Vertex provider driver
 
-By the numbers: **2424 LOC** harness, **~2100 LOC** tests, **57 MB** image
-with the WSS transport in heap, **175 ms** p90 cold start, **14 test
-suites** × **200+ checks**, all green.
+By the numbers: **2677 LOC** harness, **~2400 LOC** tests, **57 MB** image
+with the WSS transport in heap, **175 ms** p90 cold start, **15 test
+suites** × **240+ checks**, all green.
 
 See the [open issues](https://codeberg.org/anuna/anuna-imago/issues) for
 proposed features and known issues.
@@ -505,9 +506,9 @@ Further reading, in roughly the order you'd want to read them:
 [cl-url]:           https://common-lisp.net/
 [sbcl-shield]:      https://img.shields.io/badge/SBCL-2.6%2B-darkgreen.svg?style=for-the-badge
 [sbcl-url]:         https://www.sbcl.org/
-[tests-shield]:     https://img.shields.io/badge/tests-13_suites_green-success.svg?style=for-the-badge
+[tests-shield]:     https://img.shields.io/badge/tests-15_suites_green-success.svg?style=for-the-badge
 [tests-url]:        ./test/
-[loc-shield]:       https://img.shields.io/badge/LOC-2424-informational.svg?style=for-the-badge
+[loc-shield]:       https://img.shields.io/badge/LOC-2677-informational.svg?style=for-the-badge
 [loc-url]:          ./src/
 
 [sbcl-tile]:        https://img.shields.io/badge/SBCL-image_runtime-darkgreen?style=flat-square
