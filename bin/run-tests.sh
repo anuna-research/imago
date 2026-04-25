@@ -19,6 +19,7 @@ case "${TARGET}" in
                        (anuna-imago.test:run-m4-tests)
                        (anuna-imago.test:run-m5-tests)
                        (anuna-imago.test:run-m6-tests)
+                       (anuna-imago.test:run-m7-tests)
                        (anuna-imago.test:run-m8-tests)
                        (anuna-imago.test:run-m9-tests))' ;;
   m1)   RUNS='(anuna-imago.test:run-m1-tests)' ;;
@@ -27,6 +28,7 @@ case "${TARGET}" in
   m4)   RUNS='(anuna-imago.test:run-m4-tests)' ;;
   m5)   RUNS='(anuna-imago.test:run-m5-tests)' ;;
   m6)   RUNS='(anuna-imago.test:run-m6-tests)' ;;
+  m7)   RUNS='(anuna-imago.test:run-m7-tests)' ;;
   m8)   RUNS='(anuna-imago.test:run-m8-tests)' ;;
   m9)   RUNS='(anuna-imago.test:run-m9-tests)' ;;
   *)    echo "Unknown target: ${TARGET}" >&2; exit 2 ;;

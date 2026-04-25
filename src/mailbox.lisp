@@ -23,8 +23,12 @@
   (print-unreadable-object (mb stream :type t :identity t)
     (format stream "depth=~D~:[~; CLOSED~]" (mailbox-count mb) (mailbox-closed mb))))
 
-(defun send! (mailbox message)
-  "Enqueue MESSAGE; wake one waiting receiver. Errors if mailbox is closed."
+(defgeneric send! (target message)
+  (:documentation "Enqueue MESSAGE on TARGET. Defaults to mailbox semantics;
+gateway and other reply-sinks specialise by adding their own methods."))
+
+(defmethod send! ((mailbox mailbox) message)
+  "Mailbox: enqueue MESSAGE; wake one waiting receiver. Errors if closed."
   (sb-thread:with-mutex ((mailbox-lock mailbox))
     (when (mailbox-closed mailbox)
       (error "send! on closed mailbox"))

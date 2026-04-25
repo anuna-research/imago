@@ -24,6 +24,8 @@
                  (:file "cbcl-ffi"   :depends-on ("packages"))
                  (:file "turn-loop"  :depends-on ("packages" "agent" "mailbox"
                                                   "hooks" "tools"))
+                 (:file "gateway"    :depends-on ("packages" "mailbox" "agent"
+                                                  "turn-loop" "receipt-log"))
                  (:module "providers"
                   :depends-on ("packages" "turn-loop" "tools" "save-image")
                   :components ((:file "stub")
@@ -51,5 +53,6 @@
                  (:file "m4-tests" :depends-on ("m1-tests"))
                  (:file "m5-tests" :depends-on ("m1-tests"))
                  (:file "m6-tests" :depends-on ("m1-tests"))
+                 (:file "m7-tests" :depends-on ("m1-tests"))
                  (:file "m8-tests" :depends-on ("m1-tests"))
                  (:file "m9-tests" :depends-on ("m1-tests"))))))

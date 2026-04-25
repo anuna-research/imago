@@ -135,4 +135,26 @@
    #:ensure-cbcl-ffi-loaded
    #:parse-message
    #:verify-dialect
-   #:message-canonical-p))
+   #:message-canonical-p
+
+   ;; --- M7 / gateway ---
+   #:gateway
+   #:make-gateway
+   #:gateway-id
+   #:gateway-transport
+   #:gateway-state
+   #:gateway-agent
+   #:gateway-capability
+   #:gateway-connect!
+   #:gateway-start-pumps!
+   #:gateway-disconnect!
+   #:gateway-reply-mailbox
+   #:transport-open!
+   #:transport-send!
+   #:transport-recv!
+   #:transport-close!
+   #:transport-connected-p
+   #:mock-transport
+   #:make-mock-transport
+   #:mock-feed!
+   #:mock-drain!))

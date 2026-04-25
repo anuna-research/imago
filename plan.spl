@@ -443,3 +443,20 @@
 (claims agent:impl
   :at "2026-04-25T10:29:28Z"
   (given completed-m6-cbcl-ffi))
+
+(claims agent:impl
+  :at "2026-04-25T10:30:54Z"
+  (given claim-v1-m7-gateway)
+  (normally r-cl-state-v1-m7-gateway claim-v1-m7-gateway state-claimed-v1-m7-gateway)
+  (normally r-cl-chain-v1-m7-gateway state-claimed-v1-m7-gateway claimed-m7-gateway)
+)
+
+;; Propagation rules: failures in 'm7-gateway' block downstream tasks
+(normally r-propagate-m10-reasoner-from-m7-gateway-failed failed-m7-gateway upstream-blocked-m10-reasoner)
+(normally r-propagate-m10-reasoner-from-m7-gateway-permanently-failed permanently-failed-m7-gateway upstream-blocked-m10-reasoner)
+(normally r-propagate-m10-reasoner-from-m7-gateway-stale-v1 stale-v1-m7-gateway upstream-blocked-m10-reasoner)
+(normally r-propagate-m10-reasoner-from-m7-gateway-timeout-v1 timeout-v1-m7-gateway upstream-blocked-m10-reasoner)
+
+(claims agent:impl
+  :at "2026-04-25T10:33:46Z"
+  (given completed-m7-gateway))
