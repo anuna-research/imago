@@ -1,0 +1,417 @@
+; =============================================================================
+; IMPL-IMAGO-2K — Implementation Plan
+; =============================================================================
+; Decomposes the 2000-LOC variant of SPEC-011 (image-based agent harness) into
+; twelve milestone tasks with dependency, readiness, and assignment rules.
+; Greenfield SBCL Common Lisp project.
+;
+; Source spec: ~/Code/anuna-code/spec/SPEC-011-image-harness.md
+; Variant: 2k LOC budget (FFI for CBCL, one provider, one supervision strategy,
+;          optimization primitives deferred, two deprecated hooks dropped).
+;
+; Agent roles:
+;   - architect : scaffolding, contract definitions, ADR translation
+;   - impl      : SBCL implementation per milestone
+;   - reviewer  : verification before milestone close
+
+(meta plan
+  (id "IMPL-IMAGO-2K")
+  (title "anuna-imago — 2k LOC harness implementation")
+  (version "0.1.0")
+  (status "active")
+  (created "2026-04-25")
+  (spec "~/Code/anuna-code/spec/SPEC-011-image-harness.md")
+  (description "Twelve milestones (M0 scaffold through M11 release) building the minimal-hackable-portable agent harness in SBCL Common Lisp. Each milestone gated on reviewer verification of the REQs and contracts it implements. Total budget approx 1830 LOC excluding tests; uses bordeaux-threads, dexador, websocket-driver, jzon, cffi, swank as deps. CBCL parser via FFI to cbcl-rs (resolves SPEC-011 open-Q-2). One provider (Anthropic). One supervision strategy (one-for-one). Optimization primitives and replay-as-API dropped per 2k cuts."))
+
+; --- AGENTS ---
+(given agent-architect-available)
+(given agent-impl-available)
+(given agent-reviewer-available)
+
+; --- TASKS ---
+(given task-m0-scaffold)
+(given task-m1-core)
+(given task-m2-hooks)
+(given task-m3-tools)
+(given task-m4-turn-loop)
+(given task-m5-receipt-log)
+(given task-m6-cbcl-ffi)
+(given task-m7-gateway)
+(given task-m8-anthropic)
+(given task-m9-image)
+(given task-m10-reasoner)
+(given task-m11-release)
+
+(given no-deps-m0-scaffold)
+
+; --- TASK METADATA ---
+
+(meta task-m0-scaffold
+  (description "ASDF system definition (imago.asd) declaring all components and deps. src/packages.lisp with anuna-imago, anuna-imago.cbcl, anuna-imago.providers packages. src/main.lisp with agent-main entry point stub. README.md describing the project shape. LICENSE (Apache-2.0 to match anuna-code). architecture/ADR-001-image-runtime.md placeholder. Quality gate: (asdf:load-system :imago) compiles cleanly under SBCL with all listed deps available via Quicklisp.")
+  (acceptance "asdf:load-system :imago succeeds. Package definitions parse. main.lisp stub prints version and exits.")
+  (implements "scaffolding prerequisite")
+  (loc-budget 80))
+
+(meta task-m1-core
+  (description "Core supervised actor primitives. mailbox.lisp (~80 LOC): bordeaux-threads queue with condvar, send/receive, peek, drain. supervisor.lisp (~250 LOC): one-for-one strategy only (other 3 deferred to v2 per 2k cut), restart counters with max-restarts and within window, child registry, supervisor introspection (list-children, query-state, force-restart, drain), graceful shutdown. agent.lisp (~120 LOC): defclass agent with id, capability, mailbox, supervisor, provider, tools, system-prompt, theory slots; defgenerics turn-loop, handle-message, on-spawn, on-shutdown with default methods.")
+  (acceptance "Supervisor unit test: a child that signals on every Nth message restarts up to max-restarts then escalates to its parent. Mailbox round-trip test: send N, receive N in order. Agent CLOS smoke: instantiate, query slots, call defgenerics.")
+  (implements "REQ-002 (one-for-one subset), partial REQ-004 (substrate)")
+  (loc-budget 450))
+
+(meta task-m2-hooks
+  (description "Hook system at well-defined turn-loop and supervisor lifecycle points. hooks.lisp (~120 LOC): register-hook, remove-hook, run-hook primitives. Two semantics: sync-transformative (chained, first :veto aborts, returns transformed value) and fire-and-forget (dispatched on worker thread, run-hook returns immediately). Required keys: :on-user-input, :on-tool-call, :on-turn-complete, :on-agent-spawn, :on-agent-crash. Deprecated keys :on-prompt-build and :on-stream-token from spec REQ-005 explicitly NOT registered (2k cut, stance enforcement).")
+  (acceptance "Hook ordering test: three sync-transform handlers run in registration order. Veto test: middle handler returning :veto aborts chain. Fire-and-forget timing test: hook sleep does not block run-hook caller.")
+  (implements "REQ-005 (4-key subset), CON-003")
+  (loc-budget 120))
+
+(meta task-m3-tools
+  (description "Tool definition + registry + provider-format conversion. tools.lisp (~150 LOC): define-tool macro accepting name, :description, :permission (:read | :write | :execute | :sensitive), :schema (param-name :type :required-p :description), :handler. Registry keyed by name. Schema-to-JSON-Schema converter for Anthropic format. Tools are CLOS-redefinable.")
+  (acceptance "define-tool macro round-trip: define a tool, convert schema to Anthropic JSON Schema, parse a sample tool-call, dispatch handler. Schema property test: random tool definitions round-trip through JSON Schema without information loss.")
+  (implements "REQ-006, CON-004")
+  (loc-budget 150))
+
+(meta task-m4-turn-loop
+  (description "Default turn-loop method + stub provider + echo example. turn-loop.lisp (~150 LOC): defmethod turn-loop ((agent agent) ctx) wiring receive-message, :on-user-input hook, provider-stream loop, tool-call dispatch via :on-tool-call hook (Spindle invariant integration deferred to M10), :on-turn-complete fire-and-forget. providers/stub.lisp (~50 LOC): minimal canned-response provider for testing without network. examples/echo.lisp (~50 LOC): agent that replies 'echo: <input>'. Phase 1 quality gate: save-image! → boot → register → reply round-trip green against an in-process stub router.")
+  (acceptance "Echo agent serves 100 asks against stub provider with no errors, no leaks. Turn-loop redefinition mid-flight (REQ-004) takes effect on next call. Spec Phase 1 quality gates green.")
+  (implements "REQ-001 partial, REQ-007 partial (stub provider only)")
+  (loc-budget 250))
+
+(meta task-m5-receipt-log
+  (description "Append-only content-addressed receipt log (no sqlite per 2k cut). receipt-log.lisp (~120 LOC): append-receipt!, schema (receipt-id, seq, direction, dialect, verb, content-hash, timestamp, agent-id, producer-id, status). Storage as line-oriented append-only file. Content-hash via ironclad (SHA-256 of canonical body). NO replay-as-API per 2k cut: reads happen via shell tools (tail/grep/jq).")
+  (acceptance "1000 receipts appended in order, file is tail-readable, content hashes deduplicate identical bodies. Append latency p95 under 1ms.")
+  (implements "REQ-010 (log subset; replay API dropped), OBS-001")
+  (loc-budget 120))
+
+(meta task-m6-cbcl-ffi
+  (description "FFI binding to cbcl-rs (resolves SPEC-011 open question 2). cbcl-ffi.lisp (~80 LOC): cffi shim exposing parse-message, to-canonical, verify-r1-r4, message-receipt-id over a stable C ABI provided by cbcl-rs. Inherits 156/156 Lean oracle parity for free. NO in-CL parser per 2k cut. Build prerequisites documented: cbcl-rs cdylib reachable via load-foreign-library.")
+  (acceptance "TEST-007 oracle parity: 156/156 vectors green. TEST-019 fuzz: 1M random inputs no crash/hang/divergence. parse-message returns CL data structure usable by gateway.lisp.")
+  (implements "REQ-003, CON-002, NFR-005")
+  (loc-budget 80))
+
+(meta task-m7-gateway
+  (description "CBCL Router Client implementation per CON-001. gateway.lisp (~250 LOC): WSS connection via websocket-driver, authenticate, register-capability, receive-ask, send-reply, heartbeat, disconnect. Wires receipt-log on every accepted ask + emitted reply. Capability registration is static per REQ-011 (sub-agent runtime re-registration dropped per my 2k review). Includes in-process stub router for tests so M4 echo agent can run without external dep.")
+  (acceptance "Capability registration round-trip with cbcl-lfe-router instance. TEST-014 capability-based dispatch: agent A receives calendar:appointment, agent B does not, hot-deregister A causes fail-route. Heartbeat every 30s; reconnect on drop.")
+  (implements "REQ-011 (static-only), CON-001")
+  (loc-budget 250))
+
+(meta task-m8-anthropic
+  (description "Anthropic provider driver per CON-005. providers/anthropic.lisp (~250 LOC): defclass provider; methods build-request, parse-event, auth-headers; stream! primitive over dexador HTTP+SSE. Tool-call schema conversion via tools.lisp. Error model: provider errors surface as canonical-event :error with provider/status/retryable/body. NO Bedrock or Vertex per 2k cut (CON-005 contract preserved; second/third drivers in v2).")
+  (acceptance "TEST-010 provider stub conformance to CON-005. Real Anthropic round-trip green for 100 turns at temperature 0. Tool-call dispatch end-to-end: agent calls a tool defined via define-tool, Anthropic returns tool_use, harness dispatches handler, result sent back.")
+  (implements "REQ-007, CON-005")
+  (loc-budget 250))
+
+(meta task-m9-image
+  (description "Image distribution per CON-008 — the load-bearing :clean t story. save-image.lisp + checklist as CHECKING.md. save-image! function: sb-ext:save-lisp-and-die wrapper with :toplevel #'agent-main, :clean t, :stripped nil. :clean t flushes per documented checklist: open sockets, in-progress receipts, ephemeral caches, env-loaded credentials, swank connections, debug instrumentation. CI scripts for darwin-arm64 and linux-x86_64 (darwin-x86_64 dropped per 2k cut, NFR-006 reduced).")
+  (acceptance "TEST-006 image determinism: byte-identical artifacts on repeated save with no REPL activity. TEST-016 cold start P95 ≤ 200ms over 100 boots. TEST-017 image size ≤ 60MB minimal / ≤ 100MB full. :clean audit: grep saved image binary, no plaintext credentials or in-flight receipt bodies. CI matrix passes smoke on both platforms.")
+  (implements "REQ-001 full, CON-008, NFR-001, NFR-002, NFR-006 (reduced)")
+  (loc-budget 50))
+
+(meta task-m10-reasoner
+  (description "Spindle reasoner integration via IPC (in-process FFI dropped per 2k cut). reasoner.lisp (~80 LOC): load-theory, assert-fact!, retract-fact!, query, what-if, why-not over IPC to spindle-rs service. Wired into hooks.lisp at :on-tool-call as invariant filter only — capability-augmenting use explicitly blocked per Stance.")
+  (acceptance "TEST-011 invariant filter: 'never call delete-user without confirmation' theory blocks 100% of attempts. Reasoner query latency P95 ≤ 10ms over IPC. Negative-test corpus of denied operations: 100% denial rate.")
+  (implements "REQ-008, CON-006")
+  (loc-budget 80))
+
+(meta task-m11-release
+  (description "Drainable shutdown + end-to-end release smoke. REQ-012 implementation in supervisor + gateway: refuse new asks (capability unregister), continue serving in-flight to NFR-009 30s timeout, persist heap to designated location, exit with :drained or :forced status. End-to-end smoke: build image, boot against real router, serve 50 concurrent asks, SIGTERM, verify drain, persistent recovery checkpoint readable, status code correct. Final two-platform CI matrix.")
+  (acceptance "TEST-015 drainable shutdown: capability deregisters within 100ms, in-flight asks complete, new asks rejected, exit code :drained within 30s. CI smoke green on darwin-arm64 and linux-x86_64. Manual review of full LOC budget: under 2000 lines (excluding tests, deps, examples).")
+  (implements "REQ-012, NFR-006, NFR-009")
+  (loc-budget 50))
+
+; --- READINESS RULES ---
+
+(normally r-ready-m0
+  (and task-m0-scaffold no-deps-m0-scaffold)
+  ready-m0-scaffold)
+
+(normally r-ready-m1
+  (and task-m1-core completed-m0-scaffold)
+  ready-m1-core)
+
+(normally r-ready-m2
+  (and task-m2-hooks completed-m0-scaffold)
+  ready-m2-hooks)
+
+(normally r-ready-m3
+  (and task-m3-tools completed-m0-scaffold)
+  ready-m3-tools)
+
+(normally r-ready-m4
+  (and task-m4-turn-loop completed-m1-core completed-m2-hooks completed-m3-tools)
+  ready-m4-turn-loop)
+
+(normally r-ready-m5
+  (and task-m5-receipt-log completed-m0-scaffold)
+  ready-m5-receipt-log)
+
+(normally r-ready-m6
+  (and task-m6-cbcl-ffi completed-m0-scaffold)
+  ready-m6-cbcl-ffi)
+
+(normally r-ready-m7
+  (and task-m7-gateway completed-m1-core completed-m5-receipt-log completed-m6-cbcl-ffi)
+  ready-m7-gateway)
+
+(normally r-ready-m8
+  (and task-m8-anthropic completed-m2-hooks completed-m3-tools)
+  ready-m8-anthropic)
+
+; M9 readiness relaxed for v0.1: ship save-lisp-and-die with the post-M5 surface
+; (no gateway/anthropic yet) to demonstrate the image-as-artifact path early.
+; Pre-M11 release the image is rebuilt with M7+M8 in heap.
+(normally r-ready-m9
+  (and task-m9-image completed-m4-turn-loop completed-m5-receipt-log)
+  ready-m9-image)
+
+(normally r-ready-m10
+  (and task-m10-reasoner completed-m2-hooks completed-m7-gateway)
+  ready-m10-reasoner)
+
+(normally r-ready-m11
+  (and task-m11-release completed-m9-image completed-m10-reasoner)
+  ready-m11-release)
+
+; --- ASSIGNMENT RULES ---
+
+(normally r-assign-m0
+  (and ready-m0-scaffold agent-architect-available)
+  assign-to-m0-scaffold-architect)
+
+(normally r-assign-m1
+  (and ready-m1-core agent-impl-available)
+  assign-to-m1-core-impl)
+
+(normally r-assign-m2
+  (and ready-m2-hooks agent-impl-available)
+  assign-to-m2-hooks-impl)
+
+(normally r-assign-m3
+  (and ready-m3-tools agent-impl-available)
+  assign-to-m3-tools-impl)
+
+(normally r-assign-m4
+  (and ready-m4-turn-loop agent-impl-available)
+  assign-to-m4-turn-loop-impl)
+
+(normally r-assign-m5
+  (and ready-m5-receipt-log agent-impl-available)
+  assign-to-m5-receipt-log-impl)
+
+(normally r-assign-m6
+  (and ready-m6-cbcl-ffi agent-impl-available)
+  assign-to-m6-cbcl-ffi-impl)
+
+(normally r-assign-m7
+  (and ready-m7-gateway agent-impl-available)
+  assign-to-m7-gateway-impl)
+
+(normally r-assign-m8
+  (and ready-m8-anthropic agent-impl-available)
+  assign-to-m8-anthropic-impl)
+
+(normally r-assign-m9
+  (and ready-m9-image agent-impl-available)
+  assign-to-m9-image-impl)
+
+(normally r-assign-m10
+  (and ready-m10-reasoner agent-impl-available)
+  assign-to-m10-reasoner-impl)
+
+(normally r-assign-m11
+  (and ready-m11-release agent-reviewer-available)
+  assign-to-m11-release-reviewer)
+
+; --- RULE METADATA ---
+
+(meta r-ready-m4
+  (description "Turn-loop integration needs the three primitives it composes")
+  (justification "default turn-loop wires hooks (M2), dispatches tools (M3), runs in supervised process with mailbox (M1)"))
+
+(meta r-ready-m7
+  (description "Gateway needs supervision tree, receipt log, and CBCL parsing")
+  (justification "WSS connection runs as a supervised child (M1), every accepted ask appends to receipt log (M5), inbound bytes are R1-R4 verified (M6)"))
+
+(meta r-ready-m9
+  (description "Image distribution needs the full functional surface present in heap before save-lisp-and-die")
+  (justification ":clean t flush only audits real state; needs turn-loop (M4), gateway (M7), provider (M8) all loaded so the audit is meaningful"))
+
+(meta r-ready-m11
+  (description "Release smoke covers shutdown, image distribution, and reasoner together")
+  (justification "drainable shutdown (REQ-012) requires all earlier surfaces; final smoke validates the full 2k harness end-to-end"))
+
+(meta r-assign-m11
+  (description "Final release is reviewer-driven, not impl-driven")
+  (justification "milestone is verification of the full 2k budget against acceptance criteria; needs a reviewer who did not author the modules"))
+
+(claims agent:architect
+  :at "2026-04-25T09:44:21Z"
+  (given claim-v1-m0-scaffold)
+  (normally r-cl-state-v1-m0-scaffold claim-v1-m0-scaffold state-claimed-v1-m0-scaffold)
+  (normally r-cl-chain-v1-m0-scaffold state-claimed-v1-m0-scaffold claimed-m0-scaffold)
+)
+
+;; Propagation rules: failures in 'm0-scaffold' block downstream tasks
+(normally r-propagate-m1-core-from-m0-scaffold-failed failed-m0-scaffold upstream-blocked-m1-core)
+(normally r-propagate-m1-core-from-m0-scaffold-permanently-failed permanently-failed-m0-scaffold upstream-blocked-m1-core)
+(normally r-propagate-m1-core-from-m0-scaffold-stale-v1 stale-v1-m0-scaffold upstream-blocked-m1-core)
+(normally r-propagate-m1-core-from-m0-scaffold-timeout-v1 timeout-v1-m0-scaffold upstream-blocked-m1-core)
+(normally r-propagate-m1-core-from-m0-scaffold-blocked upstream-blocked-m0-scaffold upstream-blocked-m1-core)
+(normally r-propagate-m2-hooks-from-m0-scaffold-failed failed-m0-scaffold upstream-blocked-m2-hooks)
+(normally r-propagate-m2-hooks-from-m0-scaffold-permanently-failed permanently-failed-m0-scaffold upstream-blocked-m2-hooks)
+(normally r-propagate-m2-hooks-from-m0-scaffold-stale-v1 stale-v1-m0-scaffold upstream-blocked-m2-hooks)
+(normally r-propagate-m2-hooks-from-m0-scaffold-timeout-v1 timeout-v1-m0-scaffold upstream-blocked-m2-hooks)
+(normally r-propagate-m2-hooks-from-m0-scaffold-blocked upstream-blocked-m0-scaffold upstream-blocked-m2-hooks)
+(normally r-propagate-m3-tools-from-m0-scaffold-failed failed-m0-scaffold upstream-blocked-m3-tools)
+(normally r-propagate-m3-tools-from-m0-scaffold-permanently-failed permanently-failed-m0-scaffold upstream-blocked-m3-tools)
+(normally r-propagate-m3-tools-from-m0-scaffold-stale-v1 stale-v1-m0-scaffold upstream-blocked-m3-tools)
+(normally r-propagate-m3-tools-from-m0-scaffold-timeout-v1 timeout-v1-m0-scaffold upstream-blocked-m3-tools)
+(normally r-propagate-m3-tools-from-m0-scaffold-blocked upstream-blocked-m0-scaffold upstream-blocked-m3-tools)
+(normally r-propagate-m5-receipt-log-from-m0-scaffold-failed failed-m0-scaffold upstream-blocked-m5-receipt-log)
+(normally r-propagate-m5-receipt-log-from-m0-scaffold-permanently-failed permanently-failed-m0-scaffold upstream-blocked-m5-receipt-log)
+(normally r-propagate-m5-receipt-log-from-m0-scaffold-stale-v1 stale-v1-m0-scaffold upstream-blocked-m5-receipt-log)
+(normally r-propagate-m5-receipt-log-from-m0-scaffold-timeout-v1 timeout-v1-m0-scaffold upstream-blocked-m5-receipt-log)
+(normally r-propagate-m5-receipt-log-from-m0-scaffold-blocked upstream-blocked-m0-scaffold upstream-blocked-m5-receipt-log)
+(normally r-propagate-m6-cbcl-ffi-from-m0-scaffold-failed failed-m0-scaffold upstream-blocked-m6-cbcl-ffi)
+(normally r-propagate-m6-cbcl-ffi-from-m0-scaffold-permanently-failed permanently-failed-m0-scaffold upstream-blocked-m6-cbcl-ffi)
+(normally r-propagate-m6-cbcl-ffi-from-m0-scaffold-stale-v1 stale-v1-m0-scaffold upstream-blocked-m6-cbcl-ffi)
+(normally r-propagate-m6-cbcl-ffi-from-m0-scaffold-timeout-v1 timeout-v1-m0-scaffold upstream-blocked-m6-cbcl-ffi)
+(normally r-propagate-m6-cbcl-ffi-from-m0-scaffold-blocked upstream-blocked-m0-scaffold upstream-blocked-m6-cbcl-ffi)
+
+;; Transitive propagation: upstream-blocked cascades through dependency chain
+(normally r-propagate-m4-turn-loop-from-m1-core-blocked upstream-blocked-m1-core upstream-blocked-m4-turn-loop)
+(normally r-propagate-m7-gateway-from-m1-core-blocked upstream-blocked-m1-core upstream-blocked-m7-gateway)
+(normally r-propagate-m10-reasoner-from-m2-hooks-blocked upstream-blocked-m2-hooks upstream-blocked-m10-reasoner)
+(normally r-propagate-m4-turn-loop-from-m2-hooks-blocked upstream-blocked-m2-hooks upstream-blocked-m4-turn-loop)
+(normally r-propagate-m8-anthropic-from-m2-hooks-blocked upstream-blocked-m2-hooks upstream-blocked-m8-anthropic)
+(normally r-propagate-m4-turn-loop-from-m3-tools-blocked upstream-blocked-m3-tools upstream-blocked-m4-turn-loop)
+(normally r-propagate-m8-anthropic-from-m3-tools-blocked upstream-blocked-m3-tools upstream-blocked-m8-anthropic)
+(normally r-propagate-m7-gateway-from-m5-receipt-log-blocked upstream-blocked-m5-receipt-log upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m6-cbcl-ffi-blocked upstream-blocked-m6-cbcl-ffi upstream-blocked-m7-gateway)
+(normally r-propagate-m9-image-from-m4-turn-loop-blocked upstream-blocked-m4-turn-loop upstream-blocked-m9-image)
+(normally r-propagate-m10-reasoner-from-m7-gateway-blocked upstream-blocked-m7-gateway upstream-blocked-m10-reasoner)
+(normally r-propagate-m9-image-from-m7-gateway-blocked upstream-blocked-m7-gateway upstream-blocked-m9-image)
+(normally r-propagate-m11-release-from-m10-reasoner-blocked upstream-blocked-m10-reasoner upstream-blocked-m11-release)
+(normally r-propagate-m9-image-from-m8-anthropic-blocked upstream-blocked-m8-anthropic upstream-blocked-m9-image)
+(normally r-propagate-m11-release-from-m9-image-blocked upstream-blocked-m9-image upstream-blocked-m11-release)
+
+(claims agent:architect
+  :at "2026-04-25T09:46:27Z"
+  (given completed-m0-scaffold))
+
+(claims agent:impl
+  :at "2026-04-25T09:47:03Z"
+  (given claim-v1-m1-core)
+  (normally r-cl-state-v1-m1-core claim-v1-m1-core state-claimed-v1-m1-core)
+  (normally r-cl-chain-v1-m1-core state-claimed-v1-m1-core claimed-m1-core)
+)
+
+;; Propagation rules: failures in 'm1-core' block downstream tasks
+(normally r-propagate-m4-turn-loop-from-m1-core-failed failed-m1-core upstream-blocked-m4-turn-loop)
+(normally r-propagate-m4-turn-loop-from-m1-core-permanently-failed permanently-failed-m1-core upstream-blocked-m4-turn-loop)
+(normally r-propagate-m4-turn-loop-from-m1-core-stale-v1 stale-v1-m1-core upstream-blocked-m4-turn-loop)
+(normally r-propagate-m4-turn-loop-from-m1-core-timeout-v1 timeout-v1-m1-core upstream-blocked-m4-turn-loop)
+(normally r-propagate-m7-gateway-from-m1-core-failed failed-m1-core upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m1-core-permanently-failed permanently-failed-m1-core upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m1-core-stale-v1 stale-v1-m1-core upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m1-core-timeout-v1 timeout-v1-m1-core upstream-blocked-m7-gateway)
+
+(claims agent:impl
+  :at "2026-04-25T09:52:25Z"
+  (given completed-m1-core))
+
+(claims agent:impl
+  :at "2026-04-25T09:53:02Z"
+  (given claim-v1-m2-hooks)
+  (normally r-cl-state-v1-m2-hooks claim-v1-m2-hooks state-claimed-v1-m2-hooks)
+  (normally r-cl-chain-v1-m2-hooks state-claimed-v1-m2-hooks claimed-m2-hooks)
+)
+
+;; Propagation rules: failures in 'm2-hooks' block downstream tasks
+(normally r-propagate-m10-reasoner-from-m2-hooks-failed failed-m2-hooks upstream-blocked-m10-reasoner)
+(normally r-propagate-m10-reasoner-from-m2-hooks-permanently-failed permanently-failed-m2-hooks upstream-blocked-m10-reasoner)
+(normally r-propagate-m10-reasoner-from-m2-hooks-stale-v1 stale-v1-m2-hooks upstream-blocked-m10-reasoner)
+(normally r-propagate-m10-reasoner-from-m2-hooks-timeout-v1 timeout-v1-m2-hooks upstream-blocked-m10-reasoner)
+(normally r-propagate-m4-turn-loop-from-m2-hooks-failed failed-m2-hooks upstream-blocked-m4-turn-loop)
+(normally r-propagate-m4-turn-loop-from-m2-hooks-permanently-failed permanently-failed-m2-hooks upstream-blocked-m4-turn-loop)
+(normally r-propagate-m4-turn-loop-from-m2-hooks-stale-v1 stale-v1-m2-hooks upstream-blocked-m4-turn-loop)
+(normally r-propagate-m4-turn-loop-from-m2-hooks-timeout-v1 timeout-v1-m2-hooks upstream-blocked-m4-turn-loop)
+(normally r-propagate-m8-anthropic-from-m2-hooks-failed failed-m2-hooks upstream-blocked-m8-anthropic)
+(normally r-propagate-m8-anthropic-from-m2-hooks-permanently-failed permanently-failed-m2-hooks upstream-blocked-m8-anthropic)
+(normally r-propagate-m8-anthropic-from-m2-hooks-stale-v1 stale-v1-m2-hooks upstream-blocked-m8-anthropic)
+(normally r-propagate-m8-anthropic-from-m2-hooks-timeout-v1 timeout-v1-m2-hooks upstream-blocked-m8-anthropic)
+
+(claims agent:impl
+  :at "2026-04-25T09:55:19Z"
+  (given completed-m2-hooks))
+
+(claims agent:impl
+  :at "2026-04-25T09:56:01Z"
+  (given claim-v1-m3-tools)
+  (normally r-cl-state-v1-m3-tools claim-v1-m3-tools state-claimed-v1-m3-tools)
+  (normally r-cl-chain-v1-m3-tools state-claimed-v1-m3-tools claimed-m3-tools)
+)
+
+;; Propagation rules: failures in 'm3-tools' block downstream tasks
+(normally r-propagate-m4-turn-loop-from-m3-tools-failed failed-m3-tools upstream-blocked-m4-turn-loop)
+(normally r-propagate-m4-turn-loop-from-m3-tools-permanently-failed permanently-failed-m3-tools upstream-blocked-m4-turn-loop)
+(normally r-propagate-m4-turn-loop-from-m3-tools-stale-v1 stale-v1-m3-tools upstream-blocked-m4-turn-loop)
+(normally r-propagate-m4-turn-loop-from-m3-tools-timeout-v1 timeout-v1-m3-tools upstream-blocked-m4-turn-loop)
+(normally r-propagate-m8-anthropic-from-m3-tools-failed failed-m3-tools upstream-blocked-m8-anthropic)
+(normally r-propagate-m8-anthropic-from-m3-tools-permanently-failed permanently-failed-m3-tools upstream-blocked-m8-anthropic)
+(normally r-propagate-m8-anthropic-from-m3-tools-stale-v1 stale-v1-m3-tools upstream-blocked-m8-anthropic)
+(normally r-propagate-m8-anthropic-from-m3-tools-timeout-v1 timeout-v1-m3-tools upstream-blocked-m8-anthropic)
+
+(claims agent:impl
+  :at "2026-04-25T09:58:00Z"
+  (given completed-m3-tools))
+
+(claims agent:impl
+  :at "2026-04-25T10:00:30Z"
+  (given claim-v1-m4-turn-loop)
+  (normally r-cl-state-v1-m4-turn-loop claim-v1-m4-turn-loop state-claimed-v1-m4-turn-loop)
+  (normally r-cl-chain-v1-m4-turn-loop state-claimed-v1-m4-turn-loop claimed-m4-turn-loop)
+)
+
+;; Propagation rules: failures in 'm4-turn-loop' block downstream tasks
+(normally r-propagate-m9-image-from-m4-turn-loop-failed failed-m4-turn-loop upstream-blocked-m9-image)
+(normally r-propagate-m9-image-from-m4-turn-loop-permanently-failed permanently-failed-m4-turn-loop upstream-blocked-m9-image)
+(normally r-propagate-m9-image-from-m4-turn-loop-stale-v1 stale-v1-m4-turn-loop upstream-blocked-m9-image)
+(normally r-propagate-m9-image-from-m4-turn-loop-timeout-v1 timeout-v1-m4-turn-loop upstream-blocked-m9-image)
+
+(claims agent:impl
+  :at "2026-04-25T10:02:49Z"
+  (given completed-m4-turn-loop))
+
+(claims agent:impl
+  :at "2026-04-25T10:03:58Z"
+  (given claim-v1-m5-receipt-log)
+  (normally r-cl-state-v1-m5-receipt-log claim-v1-m5-receipt-log state-claimed-v1-m5-receipt-log)
+  (normally r-cl-chain-v1-m5-receipt-log state-claimed-v1-m5-receipt-log claimed-m5-receipt-log)
+)
+
+;; Propagation rules: failures in 'm5-receipt-log' block downstream tasks
+(normally r-propagate-m7-gateway-from-m5-receipt-log-failed failed-m5-receipt-log upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m5-receipt-log-permanently-failed permanently-failed-m5-receipt-log upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m5-receipt-log-stale-v1 stale-v1-m5-receipt-log upstream-blocked-m7-gateway)
+(normally r-propagate-m7-gateway-from-m5-receipt-log-timeout-v1 timeout-v1-m5-receipt-log upstream-blocked-m7-gateway)
+
+(claims agent:impl
+  :at "2026-04-25T10:06:17Z"
+  (given completed-m5-receipt-log))
+
+(claims agent:impl
+  :at "2026-04-25T10:08:03Z"
+  (given claim-v1-m9-image)
+  (normally r-cl-state-v1-m9-image claim-v1-m9-image state-claimed-v1-m9-image)
+  (normally r-cl-chain-v1-m9-image state-claimed-v1-m9-image claimed-m9-image)
+)
+
+;; Propagation rules: failures in 'm9-image' block downstream tasks
+(normally r-propagate-m11-release-from-m9-image-failed failed-m9-image upstream-blocked-m11-release)
+(normally r-propagate-m11-release-from-m9-image-permanently-failed permanently-failed-m9-image upstream-blocked-m11-release)
+(normally r-propagate-m11-release-from-m9-image-stale-v1 stale-v1-m9-image upstream-blocked-m11-release)
+(normally r-propagate-m11-release-from-m9-image-timeout-v1 timeout-v1-m9-image upstream-blocked-m11-release)
+
+(claims agent:impl
+  :at "2026-04-25T10:11:51Z"
+  (given completed-m9-image))

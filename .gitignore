@@ -1,0 +1,15 @@
+# SBCL/ASDF compilation cache (lives in ~/.cache/common-lisp/)
+*.fasl
+
+# Built images (use bin/build-echo-image.sh to recreate)
+/echo-agent
+/imago-*
+*.core
+
+# Test temp files
+/tmp/imago-*
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
