@@ -11,7 +11,7 @@
   :license "Apache-2.0"
   :homepage "https://codeberg.org/anuna/anuna-imago"
   :source-control (:git "https://codeberg.org/anuna/anuna-imago.git")
-  :depends-on ()  ; M1: SBCL-native sb-thread only. M5+ adds ironclad, cffi, etc.
+  :depends-on (#:dexador #:com.inuoe.jzon)  ; M8 deps; load-time only when used.
   :components
   ((:module "src"
     :components ((:file "packages")
@@ -24,8 +24,9 @@
                  (:file "turn-loop"  :depends-on ("packages" "agent" "mailbox"
                                                   "hooks" "tools"))
                  (:module "providers"
-                  :depends-on ("packages" "turn-loop")
-                  :components ((:file "stub")))
+                  :depends-on ("packages" "turn-loop" "tools" "save-image")
+                  :components ((:file "stub")
+                               (:file "anthropic" :depends-on ("stub"))))
                  (:file "save-image" :depends-on ("packages" "hooks"
                                                    "receipt-log"))
                  (:file "main"       :depends-on ("packages" "supervisor"
@@ -48,4 +49,5 @@
                  (:file "m3-tests" :depends-on ("m1-tests"))
                  (:file "m4-tests" :depends-on ("m1-tests"))
                  (:file "m5-tests" :depends-on ("m1-tests"))
+                 (:file "m8-tests" :depends-on ("m1-tests"))
                  (:file "m9-tests" :depends-on ("m1-tests"))))))

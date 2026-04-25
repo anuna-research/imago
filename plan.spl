@@ -415,3 +415,14 @@
 (claims agent:impl
   :at "2026-04-25T10:11:51Z"
   (given completed-m9-image))
+
+(claims agent:impl
+  :at "2026-04-25T10:18:36Z"
+  (given claim-v1-m8-anthropic)
+  (normally r-cl-state-v1-m8-anthropic claim-v1-m8-anthropic state-claimed-v1-m8-anthropic)
+  (normally r-cl-chain-v1-m8-anthropic state-claimed-v1-m8-anthropic claimed-m8-anthropic)
+)
+
+(claims agent:impl
+  :at "2026-04-25T10:22:33Z"
+  (given completed-m8-anthropic))

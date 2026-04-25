@@ -116,4 +116,16 @@
    #:pre-save-clean!
    #:*clean-checklist*
    #:register-credential-eraser!
-   #:register-receipt-log-for-clean!))
+   #:register-receipt-log-for-clean!
+
+   ;; --- M8 / anthropic provider ---
+   #:anthropic-provider
+   #:make-anthropic-provider
+   #:anthropic-api-key
+   #:anthropic-model
+   #:anthropic-base-url
+   #:anthropic-max-tokens
+   #:anthropic-version
+   #:build-request
+   #:auth-headers
+   #:*anthropic-http-post*))
