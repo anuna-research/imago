@@ -15,7 +15,9 @@
                 ;; M7 production transport: websocket-driver wraps
                 ;; handshake + framing (provides the WSD package with
                 ;; the wsd: nickname covering client + on/send/close).
-                #:websocket-driver)
+                #:websocket-driver
+                ;; Ed25519 keypairs + signatures for did:key identity.
+                #:ironclad)
   :components
   ((:module "src"
     :components ((:file "packages")
@@ -34,7 +36,8 @@
                  (:file "turn-loop"  :depends-on ("packages" "agent" "mailbox"
                                                   "hooks" "tools"))
                  (:file "gateway"    :depends-on ("packages" "mailbox" "agent"
-                                                  "turn-loop" "receipt-log"))
+                                                  "turn-loop" "receipt-log"
+                                                  "identity"))
                  (:file "wss-transport"
                                      :depends-on ("packages" "mailbox" "gateway"))
                  (:file "producer-gateway"
@@ -46,6 +49,10 @@
                                (:file "anthropic" :depends-on ("stub"))))
                  (:file "save-image" :depends-on ("packages" "hooks"
                                                    "receipt-log"))
+                 (:file "identity"   :depends-on ("packages" "receipt-log"
+                                                   "save-image"))
+                 ;; gateway depends on identity so %make-auth-frame can
+                 ;; dispatch on AGENT-IDENTITY vs bearer-string.
                  (:file "main"       :depends-on ("packages" "supervisor"
                                                    "agent" "turn-loop"
                                                    "providers" "save-image"))))
@@ -77,4 +84,5 @@
                  (:file "m10-tests" :depends-on ("m1-tests"))
                  (:file "m11-tests" :depends-on ("m1-tests"))
                  (:file "builtin-tools-tests" :depends-on ("m1-tests"))
-                 (:file "fileops-tools-tests" :depends-on ("m1-tests"))))))
+                 (:file "fileops-tools-tests" :depends-on ("m1-tests"))
+                 (:file "identity-tests" :depends-on ("m1-tests"))))))

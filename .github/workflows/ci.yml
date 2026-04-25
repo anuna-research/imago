@@ -67,15 +67,16 @@ jobs:
           total=$(wc -l \
             src/agent.lisp src/builtin-tools.lisp src/cbcl-ffi.lisp \
             src/fileops-tools.lisp \
-            src/gateway.lisp src/hooks.lisp src/mailbox.lisp src/main.lisp \
+            src/gateway.lisp src/hooks.lisp src/identity.lisp \
+            src/mailbox.lisp src/main.lisp \
             src/packages.lisp src/producer-gateway.lisp src/reasoner.lisp \
             src/receipt-log.lisp src/save-image.lisp src/supervisor.lisp \
             src/tools.lisp src/turn-loop.lisp src/wss-transport.lisp \
             src/providers/stub.lisp src/providers/anthropic.lisp \
             | tail -1 | awk '{print $1}')
           echo "Harness LOC: $total"
-          # Hard cap: 2900 (post-producer-gateway).
-          if [[ "$total" -gt 2900 ]]; then
-            echo "::error::Harness LOC ($total) exceeds 2900 cap — trim before merge"
+          # Hard cap: 3300 (post-identity / did:key).
+          if [[ "$total" -gt 3300 ]]; then
+            echo "::error::Harness LOC ($total) exceeds 3300 cap — trim before merge"
             exit 1
           fi

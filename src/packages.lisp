@@ -41,6 +41,8 @@
    #:agent-system-prompt
    #:agent-theory
    #:agent-state
+   #:agent-identity-slot
+   #:agent-did
    #:*current-agent*
    #:turn-loop
    #:handle-message
@@ -165,6 +167,28 @@
    #:wss-transport-url
    #:wss-transport-headers
    #:*wss-open-timeout-seconds*
+
+   ;; --- Identity (did:key, Ed25519) ---
+   #:agent-identity
+   #:generate-identity
+   #:identity-did
+   #:identity-public-key
+   #:identity-public-key-bytes
+   #:identity-private-key
+   #:encode-did-key
+   #:parse-did-key
+   #:sign-bytes
+   #:sign-string
+   #:verify-bytes
+   #:verify-signature
+   #:bytes->hex
+   #:hex->bytes
+   #:base58btc-encode
+   #:base58btc-decode
+   #:make-did-auth-frame
+   #:make-did-auth-payload
+   #:clear-identity-private-key!
+   #:register-identity-for-clean!
 
    ;; --- Producer gateway (cross-process composition) ---
    #:producer-gateway

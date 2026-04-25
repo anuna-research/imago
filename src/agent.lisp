@@ -26,7 +26,16 @@ on their caller. Set by PROCESS-TURN; NIL outside a turn.")
    (tools         :initarg :tools :initform nil :accessor agent-tools)
    (system-prompt :initarg :system-prompt :accessor agent-system-prompt :initform "")
    (theory        :initarg :theory        :accessor agent-theory     :initform nil)
-   (state         :initform :initialised  :accessor agent-state)))
+   (state         :initform :initialised  :accessor agent-state)
+   (identity      :initarg :identity :initform nil :accessor agent-identity-slot
+                  :documentation "AGENT-IDENTITY (Ed25519 + did:key) or NIL.
+Only required when this agent connects to a router that enforces R4
+(Ed25519 signatures). See (agent-did agent) for the DID convenience.")))
+
+(defun agent-did (agent)
+  "Convenience: return the agent's did:key string, or NIL if no identity."
+  (let ((id (agent-identity-slot agent)))
+    (when id (identity-did id))))
 
 (defmethod print-object ((a agent) stream)
   (print-unreadable-object (a stream :type t :identity t)

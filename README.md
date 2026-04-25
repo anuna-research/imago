@@ -373,6 +373,7 @@ anuna-imago/
 │   │
 │   ├── gateway.lisp                  CBCL Router Client — receiver side
 │   ├── producer-gateway.lisp         CBCL Router Client — producer side
+│   ├── identity.lisp                 Ed25519 + did:key, sign/verify
 │   ├── wss-transport.lisp            websocket-driver-backed transport
 │   ├── cbcl-ffi.lisp                 CBCL parser via FFI to cbcl-rs
 │   ├── reasoner.lisp                 Spindle IPC + invariant filter
@@ -545,6 +546,37 @@ docstrings live with the definitions in `src/`.
 (mock-drain! tr &key timeout)      ; read what gateway sent
 ```
 
+### Identity (did:key, Ed25519)
+
+```lisp
+(generate-identity)                              → agent-identity
+(identity-did identity)                          → "did:key:z..."
+(identity-public-key-bytes identity)             → octet-vector (32 bytes)
+(identity-private-key identity)                  → ironclad-priv | nil  ; nil after :clean
+(sign-string identity string)                    → octet-vector (64 bytes)
+(verify-signature did string signature-bytes)    → boolean
+
+;; DID encoding helpers (W3C did:key, Ed25519 multicodec 0xed01)
+(encode-did-key 32-byte-pubkey)                  → "did:key:z..."
+(parse-did-key did-string)                       → 32-byte-pubkey | nil
+(bytes->hex octet-vector) / (hex->bytes string)
+(base58btc-encode octet-vector) / (base58btc-decode string)
+
+;; :clean integration — strips private key before save-image!
+(register-identity-for-clean! identity)
+(clear-identity-private-key! identity)
+
+;; Auth handshake helper
+(make-did-auth-payload did iso-timestamp)        → string  ; signed payload
+(make-did-auth-frame identity)
+   → "(auth-did <did> <iso-ts> <hex-sig>)"
+
+;; Wire identity into an agent or gateway:
+(make-instance 'agent ... :identity (generate-identity))
+(agent-did agent)                                ; convenience
+(make-gateway ... :identity (generate-identity)) ; uses (auth-did …) instead of (auth …)
+```
+
 ### Reasoner
 
 ```lisp
@@ -620,9 +652,9 @@ docstrings live with the definitions in `src/`.
 - [ ] Bedrock provider driver
 - [ ] Vertex provider driver
 
-By the numbers: **2890 LOC** harness, **~2600 LOC** tests, **57 MB** image
-with the WSS transport in heap, **175 ms** p90 cold start, **16 test
-suites** × **250+ checks**, all green.
+By the numbers: **2928 LOC** harness, **~2900 LOC** tests, **63 MB** image
+(full-agent profile incl. provider + WSS + identity), **165 ms** p90 cold
+start, **17 test suites** × **290+ checks**, all green.
 
 See the [open issues](https://codeberg.org/anuna/anuna-imago/issues) for
 proposed features and known issues.
@@ -710,9 +742,9 @@ Further reading, in roughly the order you'd want to read them:
 [cl-url]:           https://common-lisp.net/
 [sbcl-shield]:      https://img.shields.io/badge/SBCL-2.6%2B-darkgreen.svg?style=for-the-badge
 [sbcl-url]:         https://www.sbcl.org/
-[tests-shield]:     https://img.shields.io/badge/tests-16_suites_green-success.svg?style=for-the-badge
+[tests-shield]:     https://img.shields.io/badge/tests-17_suites_green-success.svg?style=for-the-badge
 [tests-url]:        ./test/
-[loc-shield]:       https://img.shields.io/badge/LOC-2890-informational.svg?style=for-the-badge
+[loc-shield]:       https://img.shields.io/badge/LOC-2928-informational.svg?style=for-the-badge
 [loc-url]:          ./src/
 
 [sbcl-tile]:        https://img.shields.io/badge/SBCL-image_runtime-darkgreen?style=flat-square

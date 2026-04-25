@@ -140,7 +140,12 @@ string. Falls back to a tag of :UNKNOWN if STRING isn't S-expr-shaped."
                    trimmed)))))))
 
 (defun %make-auth-frame (identity)
-  (format nil "(auth ~A)" identity))
+  "Build the auth frame appropriate for IDENTITY:
+  - AGENT-IDENTITY → (auth-did <DID> <iso-ts> <hex-sig>) per W3C did:key
+  - any other value → (auth <bearer-string>)              ; legacy"
+  (typecase identity
+    (agent-identity (make-did-auth-frame identity))
+    (t (format nil "(auth ~A)" identity))))
 
 (defun %make-register-frame (capability)
   (format nil "(register ~A)" capability))

@@ -138,8 +138,8 @@ the built-in tier expanded from 5 to 10 tools (~85 LOC of new handlers
          (total (reduce #'+ (mapcar (lambda (f) (%count-loc (concatenate 'string root f)))
                                     harness-files))))
     (format t "  harness LOC: ~D~%" total)
-    (check (< total 2900)
-           (format nil "harness LOC ~D under 2900" total))))
+    (check (< total 3300)
+           (format nil "harness LOC ~D under 3300" total))))
 
 ;; ---------------------------------------------------------------- runner ---
 
