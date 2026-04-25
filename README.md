@@ -387,6 +387,7 @@ anuna-imago/
 ├── examples/echo.lisp                reference echo agent
 ├── architecture/
 │   ├── ADR-001-image-runtime.md      why SBCL (not ECL)
+│   ├── ADR-002-identity.md           why did:key (not did:web/plc)
 │   └── CHECKING.md                   :clean t audit checklist
 ├── plan.spl                          implementation plan (hence)
 └── .github/workflows/ci.yml          matrix CI + LOC-budget gate
@@ -726,6 +727,7 @@ augmentation.
 Further reading, in roughly the order you'd want to read them:
 
 * [`architecture/ADR-001-image-runtime.md`](./architecture/ADR-001-image-runtime.md) — why SBCL specifically
+* [`architecture/ADR-002-identity.md`](./architecture/ADR-002-identity.md) — why did:key for agent identity (and what's deferred)
 * [`architecture/CHECKING.md`](./architecture/CHECKING.md) — what `:clean t` actually does at save time
 * [`plan.spl`](./plan.spl) — implementation plan as defeasible-logic rules; query with `hence plan board plan.spl`
 * [`test/m4-tests.lisp`](./test/m4-tests.lisp) — the most readable end-to-end exercise of the runtime
