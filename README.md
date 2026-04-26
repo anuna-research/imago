@@ -29,7 +29,7 @@
     ·
     <a href="#roadmap">Roadmap</a>
     ·
-    <a href="https://codeberg.org/anuna/anuna-imago/issues">Report a bug</a>
+    <a href="https://codeberg.org/anuna/imago/issues">Report a bug</a>
   </p>
 </div>
 
@@ -97,6 +97,7 @@ The wire is CBCL. The substrate is fully redefinable in flight.
 * [![dexador][dex-tile]][dex-url]
 * [![com.inuoe.jzon][jzon-tile]][jzon-url]
 * [![CFFI][cffi-tile]][cffi-url]
+* [![ironclad][ironclad-tile]][ironclad-url]
 * [![cbcl-rs][cbcl-tile]][cbcl-url]
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -128,10 +129,11 @@ The wire is CBCL. The substrate is fully redefinable in flight.
 ### Installation
 
 ```sh
-git clone https://codeberg.org/anuna/anuna-imago
+# Clone into anuna-imago/ to match the package name and directory tree below.
+git clone https://codeberg.org/anuna/imago anuna-imago
 cd anuna-imago
-bash bin/run-tests.sh all          # 13 suites, 200+ checks, ~30s
-bash bin/build-echo-image.sh       # produces ./echo-agent (~57 MB)
+bash bin/run-tests.sh all          # 17 suites, 290+ checks, ~30s
+bash bin/build-echo-image.sh       # produces ./echo-agent (~63 MB full-agent profile)
 ```
 
 No install step. The system loads via ASDF from this directory; nothing
@@ -213,7 +215,7 @@ agent          turn-loop          hook chain          tool registry
   │◄──────────────┤ :tool-results                         │
 ```
 
-Five seams to know about:
+Six seams to know about:
 
 * **Methods** are `defmethod` — redefine at the REPL, the next call uses
   the new version.
@@ -221,23 +223,26 @@ Five seams to know about:
   `:on-turn-complete`, `:on-agent-spawn`, `:on-agent-crash`. First
   handler to return `:veto` aborts the chain.
 * **Providers** are CLOS classes implementing `provider-stream!`. Stubs
-  for tests, Anthropic in production; Bedrock and Vertex are drop-in.
+  for tests, Anthropic in production; CON-005 contract preserved so
+  Bedrock and Vertex drivers fit the same shape (not yet implemented).
 * **Transports** are abstract — `wss-transport` for production, an
   in-memory `mock-transport` for tests.
 * **Reasoner** integration is IPC-only. At `:on-tool-call` the harness
   asks a Spindle defeasible-logic theory whether the call is
   `(forbidden …)`; a +Δ or +∂ verdict vetoes before the handler runs.
+* **Identity** is per-agent: each agent can carry an `agent-identity`
+  with an Ed25519 keypair and a `did:key:…` DID. Gateways auth via the
+  `(auth-did …)` frame; `:clean t` zeros the private key before save.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 
 ### Built-in tools
 
-Five tools auto-register when `imago` loads. They cover introspection on
-the harness itself — useful both for an agent that wants to discover its
-own surface and for a human debugging a deployed binary. Agents that
-don't list them in `:tools` don't expose them to the LLM, so registration
-is harmless.
+Ten tools auto-register when `imago` loads. They cover introspection on
+the harness itself plus a few mundane utilities. Agents that don't list
+them in `:tools` don't expose them to the LLM, so registration is
+harmless.
 
 | Name | Returns |
 |---|---|
@@ -246,18 +251,41 @@ is harmless.
 | `harness-list-hooks` | Hook keys + handler counts |
 | `harness-version` | Harness version string |
 | `harness-now` | Current UTC time, ISO-8601 |
+| `harness-describe-agent` | Calling agent's id, capability, system prompt, tools, state |
+| `harness-query-receipts` | Last N receipt-log entries with `:limit` |
+| `harness-uuid` | Fresh UUID v4 |
+| `harness-stats` | Process metrics: uptime, mailbox depth, tool count |
+| `harness-query-theory` | Inspect a Spindle theory query (does NOT veto) |
 
 ```lisp
-;; Wire all of them into an agent:
+;; Wire all ten into an agent:
 (make-instance 'agent ... :tools *builtin-tool-names*)
 ```
 
-What's deliberately **not** built in: file IO, shell exec, HTTP fetch,
-web search. Those are the "agent framework" abstractions SPEC-011's
-bitter-lesson stance refused — they age badly as model capability
-climbs, and they're better served by MCP servers or per-project tool
-modules. Two opt-in trapdoors (`harness-eval` and `harness-redefine-method`)
-for self-modification will live in `examples/self-modifying.lisp` so the
+#### Opt-in: fileops
+
+File operations are gated behind an explicit installer. The reasoner is
+expected to gate dangerous calls — at minimum, `(forbidden harness-write-file "/etc/...")`
+style rules — before exposing these to an agent.
+
+```lisp
+(install-fileops-tools!)        ; registers the three below
+(make-instance 'agent ...
+  :tools (append *builtin-tool-names* *fileops-tool-names*))
+```
+
+| Name | Permission | Returns |
+|---|---|---|
+| `harness-read-file` | `:read` | UTF-8 content + `:length` + `:truncated` (truncates at `:max-chars`, default 1MB) |
+| `harness-write-file` | `:write` | `{:status :ok :length …}`; `:append t` to append |
+| `harness-list-directory` | `:read` | Sorted file + subdirectory names |
+
+What's deliberately **not** shipped: HTTP fetch, web search, shell exec.
+Those are exactly the "agent framework" abstractions SPEC-011's
+bitter-lesson stance refused — schema-volatile across providers, and
+better served by MCP servers or per-project tool modules. Two opt-in
+trapdoors (`harness-eval` and `harness-redefine-method`) for
+self-modification will live in `examples/self-modifying.lisp` so the
 author has to consciously enable them.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -317,23 +345,26 @@ sbcl --no-userinit --no-sysinit \
 ANTHROPIC_API_KEY=sk-… ./my-agent
 ```
 
-`./my-agent` is now a self-contained 56 MB binary you can `scp` to any
+`./my-agent` is now a self-contained ~63 MB binary you can `scp` to any
 machine without SBCL installed. `:clean t` (default) flushes credentials,
-async pools, and open log handles before the save — see
+private keys, async pools, and open log handles before the save — see
 [`architecture/CHECKING.md`](./architecture/CHECKING.md) for the
 checklist.
 
 To make the agent reachable from a CBCL router, build a `gateway` over
-a `wss-transport`:
+a `wss-transport`. Pass either a bearer-token string or an
+`agent-identity` (Ed25519 + did:key) for the `:identity` slot — the
+auth handshake dispatches on type:
 
 ```lisp
-(let* ((tr (make-wss-transport "wss://router.example/agent/v1"
-                                :headers '(("authorization" . "Bearer …"))))
+(let* ((id (generate-identity))                 ; fresh did:key identity
+       (tr (make-wss-transport "wss://router.example/agent/v1"))
        (gw (make-gateway :id 'my-gw
                          :transport tr
-                         :identity "agent-token"
+                         :identity id            ; → (auth-did <DID> …)
                          :capability "echo:say"
                          :agent agent)))
+  (register-identity-for-clean! id)             ; private key stripped on save
   (gateway-connect! gw)
   (gateway-start-pumps! gw))
 ```
@@ -382,8 +413,9 @@ anuna-imago/
 │       ├── stub.lisp                 canned-response provider for tests
 │       └── anthropic.lisp            Messages API + mockable HTTP
 │
-├── test/                             one suite per milestone (M1–M11)
-│                                     plus M7-WSS and built-in tools
+├── test/                             milestone suites (M1–M11) plus
+│                                     M7-WSS, M7-Producer, builtin-tools,
+│                                     fileops-tools, identity
 ├── examples/echo.lisp                reference echo agent
 ├── architecture/
 │   ├── ADR-001-image-runtime.md      why SBCL (not ECL)
@@ -646,18 +678,22 @@ docstrings live with the definitions in `src/`.
 - [x] M9  Image distribution (`save-image!` + `:clean`)
 - [x] M10 Reasoner IPC + invariant filter
 - [x] M11 Drainable shutdown + release smoke
-- [x] Built-in introspection tools
+- [x] Built-in introspection tools (10 default, auto-registered)
+- [x] Producer-gateway (cross-process agent composition)
+- [x] Opt-in fileops tools (`install-fileops-tools!`)
+- [x] did:key cryptographic identity (Ed25519, ADR-002)
+- [ ] R4 frame-level signing on every CBCL message (needs cbcl-rs FFI)
 - [ ] Streaming SSE for the Anthropic provider
 - [ ] CI matrix M6 step (cbcl-rs cdylib build)
 - [ ] `examples/self-modifying.lisp` (`harness-eval` opt-in)
 - [ ] Bedrock provider driver
 - [ ] Vertex provider driver
 
-By the numbers: **2928 LOC** harness, **~2900 LOC** tests, **63 MB** image
+By the numbers: **2928 LOC** harness, **~2900 LOC** tests, **~63 MB** image
 (full-agent profile incl. provider + WSS + identity), **165 ms** p90 cold
 start, **17 test suites** × **290+ checks**, all green.
 
-See the [open issues](https://codeberg.org/anuna/anuna-imago/issues) for
+See the [open issues](https://codeberg.org/anuna/imago/issues) for
 proposed features and known issues.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -670,15 +706,17 @@ proposed features and known issues.
 Contributions are welcome. The project is small enough that a PR-and-discuss
 flow works fine — no formal RFC process.
 
-1. Fork the project at <https://codeberg.org/anuna/anuna-imago>
+1. Fork the project at <https://codeberg.org/anuna/imago>
 2. Create your feature branch (`git checkout -b feat/your-feature`)
 3. Make sure `bash bin/run-tests.sh all` is green before opening a PR
 4. Commit your changes (`git commit -m 'feat: …'`)
 5. Push to the branch and open a pull request
 
-The LOC budget gate at 2500 lines (in `.github/workflows/ci.yml`) is a
+The LOC budget gate at 3300 lines (in `.github/workflows/ci.yml`) is a
 soft signal — going over warrants a discussion of whether the addition
-is paying for itself.
+is paying for itself. The cap has been raised four times as features
+landed; each bump comes with a commit message explaining what made it
+necessary.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -699,7 +737,7 @@ more information.
 
 Hugo O'Connor — hugo.oconnor@gmail.com
 
-Project Link: <https://codeberg.org/anuna/anuna-imago>
+Project Link: <https://codeberg.org/anuna/imago>
 
 Spec: <https://codeberg.org/anuna/anuna-code/src/branch/main/spec/SPEC-011-image-harness.md>
 
@@ -715,6 +753,7 @@ Spec: <https://codeberg.org/anuna/anuna-code/src/branch/main/spec/SPEC-011-image
 * [websocket-driver][wsd-url] — clean WS protocol implementation, server + client
 * [dexador][dex-url] — HTTP+SSE used by the Anthropic provider
 * [com.inuoe.jzon][jzon-url] — fast, modern JSON for CL
+* [ironclad][ironclad-url] — Ed25519 sign/verify behind the did:key identity layer
 * [cbcl-rs][cbcl-url] — Rust parser binding, inherits Lean-verified oracle parity
 * [`hence`](https://codeberg.org/anuna/hence) — the defeasible-logic task planner that drives [`plan.spl`](./plan.spl)
 * [Best-README-Template](https://github.com/othneildrew/Best-README-Template) — the structural template this README follows
@@ -758,6 +797,8 @@ Further reading, in roughly the order you'd want to read them:
 [jzon-url]:         https://github.com/Zulu-Inuoe/jzon
 [cffi-tile]:        https://img.shields.io/badge/CFFI-FFI-red?style=flat-square
 [cffi-url]:         https://cffi.common-lisp.dev/
+[ironclad-tile]:    https://img.shields.io/badge/ironclad-Ed25519-purple?style=flat-square
+[ironclad-url]:     https://github.com/sharplispers/ironclad
 [cbcl-tile]:        https://img.shields.io/badge/cbcl--rs-Lean_verified-darkgreen?style=flat-square
 [cbcl-url]:         https://codeberg.org/anuna/cbcl-rs
 
