@@ -81,6 +81,8 @@ expect_success "self-modification-floor vendored"    test -f "$VENDOR_TARGET/ima
 expect_failure "plugins/ NOT vendored"               test -d "$VENDOR_TARGET/imago/plugins"
 expect_failure "test/ NOT vendored"                  test -d "$VENDOR_TARGET/imago/test"
 expect_failure "examples/ NOT vendored"              test -d "$VENDOR_TARGET/imago/examples"
+expect_failure "imago.asd patched: no examples module"  grep -q '(:module "examples"' "$VENDOR_TARGET/imago/imago.asd"
+expect_failure "imago.asd patched: no echo file entry"  grep -q '(:file "echo")' "$VENDOR_TARGET/imago/imago.asd"
 
 # ---------------------------------------------------------------------------
 echo "# .asd generation"
@@ -146,7 +148,10 @@ if command -v sbcl >/dev/null 2>&1 && [[ -f "$QL_SETUP" ]]; then
   expect_success "scaffold e2e target"               bash "$SCAFFOLDER" e2e "$E2E"
   expect_success "build.sh runs"                     bash "$E2E/bin/build.sh"
   expect_success "binary was produced"               test -x "$E2E/e2e"
-  expect_success "binary --version exits 0"          "$E2E/e2e" --version
+  e2e_version_includes_imago() {
+    "$E2E/e2e" --version 2>&1 | grep -q 'anuna-imago'
+  }
+  expect_success "binary --version prints anuna-imago"  e2e_version_includes_imago
   expect_success "binary --echo replies"             "$E2E/e2e" --echo "hello"
   expect_success "run-tests.sh passes"               bash "$E2E/bin/run-tests.sh"
 
