@@ -53,6 +53,7 @@
       <a href="#usage">Usage</a>
       <ul>
         <li><a href="#try-it">Try it</a></li>
+        <li><a href="#redefine-in-flight">Redefine in flight</a></li>
         <li><a href="#mental-model">Mental model</a></li>
         <li><a href="#built-in-tools">Built-in tools</a></li>
         <li><a href="#build-your-own-agent">Build your own agent</a></li>
@@ -163,6 +164,53 @@ echo "ping" | ./echo-agent --serve
 The echo agent uses a stub provider — no API key required. Swap in the
 real Anthropic provider and you have a working LLM-backed agent in another
 ~10 lines of customisation (see [Build your own agent](#build-your-own-agent)).
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+
+### Redefine in flight
+
+The headline claim — "redefine any function in flight, then save" — works
+because methods are late-bound and the SBCL heap is the artifact.
+
+```lisp
+(in-package :anuna-imago)
+
+;; Build and start an agent in a live REPL.
+(defparameter *sup*   (make-supervisor 'live-sup))
+(defparameter *agent* (build-echo-agent))
+(spawn-agent! *sup* *agent*)
+
+(getf (ask-agent *agent* "hi") :text)
+;; => "echo: hi"
+
+;; Redefine a provider method. CLOS swaps the dispatch in place — the
+;; running supervisor, the spawned agent, its mailbox: all untouched.
+(defmethod provider-stream! ((p stub-provider) agent message)
+  (declare (ignore agent))
+  (let* ((c     (if (listp message) (getf message :content) message))
+         (frame (list :text (format nil "shouted: ~A!" (string-upcase c))))
+         (cell  (cons nil (list frame))))
+    (lambda () (pop (cdr cell)))))
+
+(getf (ask-agent *agent* "hi") :text)
+;; => "shouted: HI!"        ; same process, no restart
+
+;; Snapshot the live image. The redefined method is in the saved heap.
+(send! (agent-mailbox *agent*) :shutdown)
+(drain-supervisor! *sup*)
+(save-image! "shouty-agent" :toplevel 'agent-main)
+```
+
+```sh
+$ ./shouty-agent --echo "hello"
+shouted: HELLO!
+```
+
+The patch survives because the binary *is* the heap. There's no source
+tree to redeploy and no rebuild step — the running image was edited and
+then frozen. The same path works for any harness method: tool dispatch,
+hook handlers, supervisor restart policy.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
