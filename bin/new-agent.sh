@@ -167,4 +167,27 @@ cat > "$TARGET_ABS/src/agent.lisp" <<EOF
     (anuna-imago:agent-main)))     ; reuses harness --echo / --serve / --version
 EOF
 
+# Generate bin/build.sh.
+mkdir -p "$TARGET_ABS/bin"
+cat > "$TARGET_ABS/bin/build.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "\$(dirname "\$0")/.."
+
+# Locate quicklisp setup (covers the two common install locations).
+QL_SETUP="\${HOME}/quicklisp/setup.lisp"
+[[ -f "\$QL_SETUP" ]] || QL_SETUP="\${HOME}/.quicklisp/setup.lisp"
+[[ -f "\$QL_SETUP" ]] || { echo "quicklisp not found; install it first"; exit 1; }
+
+sbcl --no-userinit --no-sysinit --non-interactive \\
+     --load "\$QL_SETUP" \\
+     --eval "(push (truename \\"./\\")       asdf:*central-registry*)" \\
+     --eval "(push (truename \\"./imago/\\") asdf:*central-registry*)" \\
+     --eval "(asdf:load-system :$NAME)" \\
+     --eval '(anuna-imago:save-image! "$NAME"
+                                       :toplevel '"'"'$NAME::toplevel
+                                       :executable t)'
+EOF
+chmod +x "$TARGET_ABS/bin/build.sh"
+
 echo "✓ Scaffolded $NAME at $TARGET"

@@ -99,6 +99,14 @@ expect_success "registers greet tool"                grep -q "define-tool greet"
 expect_success "uses stamped capability"             grep -q '"vendor-test:reply"' "$VENDOR_TARGET/src/agent.lisp"
 
 # ---------------------------------------------------------------------------
+echo "# bin/build.sh generation"
+expect_success "build.sh exists"                     test -f "$VENDOR_TARGET/bin/build.sh"
+expect_success "build.sh is executable"              test -x "$VENDOR_TARGET/bin/build.sh"
+expect_success "build.sh loads :vendor-test"         grep -q ':vendor-test' "$VENDOR_TARGET/bin/build.sh"
+expect_success "build.sh names binary correctly"     grep -q '"vendor-test"' "$VENDOR_TARGET/bin/build.sh"
+expect_success "build.sh saves with toplevel"        grep -q "vendor-test::toplevel" "$VENDOR_TARGET/bin/build.sh"
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
