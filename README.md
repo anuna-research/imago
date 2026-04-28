@@ -374,26 +374,48 @@ work unchanged with any served model.
 ##### Multi-turn experiment runner
 
 [`examples/glm-self-mod-experiment.lisp`](./examples/glm-self-mod-experiment.lisp)
-is a research instrument, not a unit test. It spawns a GLM 5.1 agent
-against the Z.ai Coding Plan, runs a fixed six-prompt protocol that
-exercises tool-discovery → plan → implement → verify → forbidden-probe
-→ rollback, captures the harness state delta after each turn, and
-writes a markdown report under `/tmp/imago-experiments/` documenting
-the journey. Includes a floor-only stub reasoner so no live Spindle
-service is needed.
+is a research instrument with two modes, driven by
+[`bin/run-experiment.sh`](./bin/run-experiment.sh):
 
-```lisp
-(ql:quickload '(:imago :imago/zai))
-(load (merge-pathnames "examples/self-modifying.lisp"
-                       (asdf:system-source-directory :imago)))
-(load (merge-pathnames "examples/glm-self-mod-experiment.lisp"
-                       (asdf:system-source-directory :imago)))
-(anuna-imago::run-experiment)   ; → /tmp/imago-experiments/<ts>-glm-experiment.md
+| Mode | What | Question it answers |
+|---|---|---|
+| **Prescribed** (default) | Fixed six-prompt protocol: tool-discovery → plan → implement → verify → forbidden-probe → rollback | Do the safety mechanisms catch the obvious attacks? Comparable across runs. |
+| **Goal-driven** (`--goal "..."`) | Agent is told a goal in its system prompt and driven by `Continue.` each turn until it replies `GOAL ACHIEVED:` or hits `--turns` (default 8) | Can the model decompose a real task using the port? Open-ended; not directly comparable. |
+
+```sh
+./bin/run-experiment.sh                                    # prescribed
+./bin/run-experiment.sh --model glm-4.7                    # different model
+./bin/run-experiment.sh --goal "Define a memoize macro and use it
+                                to wrap a slow function."
+./bin/run-experiment.sh --goal "..." --turns 12            # longer run
+./bin/run-experiment.sh --dry-run --goal "..."             # show what would run
 ```
 
-The generated report includes a falsification checklist (run-time
-observations to mark ✅ / ❌) and a list of failure modes to scan for
-during review.
+The script reads your Z.ai key from `~/.local/share/opencode/auth.json`
+under the `zai-coding-plan` slug — no env vars to set. Reports land
+under `/tmp/imago-experiments/<timestamp>-glm{-goal}-experiment.md`
+with: starting/ending state, per-turn deltas (audit log appendices,
+origin-index updates, rollback-register pushes, reasoner-trace facts
+correlated by `form-id`), audit-log tally, falsification checklist,
+and failure modes to scan for.
+
+Both modes use a floor-only stub reasoner that mimics the shipped
+`theories/self-modification-floor.spl`, so no live Spindle service is
+required.
+
+**What goals can actually work**: the agent can `defun` / `defclass` /
+`defmacro` freely, but most of the harness's core dispatch surface is
+in `*safety-layer-symbols*` — so goals like *"add logging to all tool
+calls"* will hit `:vetoed` because the obvious implementation
+mentions `dispatch-tool!`. Goals that fit the v0.1 floor:
+
+- "Define utility functions and use them via subsequent harness-eval calls."
+- "Build a small library of string utilities (palindrome, capitalize words, etc.) and demonstrate calling them on test inputs."
+- "Define a memoize macro and apply it to a slow function you also define."
+- "Implement a simple in-memory key-value cache as a defclass with put/get methods, and exercise it."
+
+Wrapping/replacing existing harness behavior is largely deferred to a
+future `harness-advise` tool (ADR-005, v0.2).
 
 #### Opt-in: self-modification port
 

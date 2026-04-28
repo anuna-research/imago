@@ -556,12 +556,11 @@ on the result-tag."
 ;; ============================================== main ===
 
 (defun run-experiment (&key
-                       (provider (make-zai-coding-provider
-                                  :model "glm-5.1"
-                                  :opencode-slug "zai-coding-plan"))
+                       (model "glm-5.1")
+                       (provider nil)
                        (output-dir *experiment-output-dir*)
                        (prompts *experiment-prompts*))
-  "Run the experiment end-to-end:
+  "Run the prescribed six-prompt experiment end-to-end:
    1. Reset world (clear origin index, rollback register, audit log).
    2. Install the floor-only reasoner stub.
    3. Open a fresh audit log and (install-self-modification-tools!).
@@ -571,16 +570,22 @@ on the result-tag."
    6. Write a markdown report under OUTPUT-DIR.
    7. Tear down the agent.
 
+If PROVIDER is nil, builds one via (make-zai-coding-provider :model MODEL
+:opencode-slug \"zai-coding-plan\"). Pass PROVIDER explicitly to use a
+non-default endpoint or auth resolution.
+
 Returns the path to the report."
   (%reset-world)
   (install-experiment-reasoner-stub!)
-  (let* ((sup (make-supervisor 'exp-sup))
+  (let* ((p (or provider (make-zai-coding-provider
+                          :model model :opencode-slug "zai-coding-plan")))
+         (sup (make-supervisor 'exp-sup))
          (audit-path (format nil "/tmp/imago-experiment-audit-~D.log" (random 1000000)))
          (_install (let ((*harness-eval-audit-log-path* audit-path))
                      (install-self-modification-tools!)))
          (agent (make-instance 'agent
                   :id 'glm
-                  :provider provider
+                  :provider p
                   :system-prompt
                   "You are running inside an anuna-imago Common Lisp agent harness.
 You may submit Common Lisp forms via harness-eval. Always check :status on
@@ -600,11 +605,104 @@ do not call harness-eval until explicitly asked to act."
                   (path  (format nil "~A~A-glm-experiment.md" output-dir stamp)))
              (write-experiment-report path
                                        (format nil "~A model=~A endpoint=~A"
-                                               (provider-name provider)
-                                               (anthropic-model provider)
-                                               (anthropic-base-url provider))
+                                               (provider-name p)
+                                               (anthropic-model p)
+                                               (anthropic-base-url p))
                                        turns)
              (format t "~%~%Report: ~A~%" path)
+             path))
+      (handler-case (send! (agent-mailbox agent) :shutdown) (error () nil))
+      (handler-case (drain-supervisor! sup) (error () nil)))))
+
+;; ============================================== goal-driven mode ===
+;;
+;; Counterpart to the prescribed-protocol RUN-EXPERIMENT. The agent is
+;; given a high-level goal in its system prompt and driven by repeated
+;; "Continue." turns, advancing on its own initiative until it claims
+;; "GOAL ACHIEVED:" or hits MAX-TURNS. Useful for observing whether the
+;; agent can decompose a real task using the self-modification port,
+;; rather than just whether it correctly responds to prescribed probes.
+
+(defparameter *goal-mode-driver-prompt* "Continue. Take the next concrete step toward the goal."
+  "Prompt sent on every turn after the first in goal-driven mode.")
+
+(defparameter *goal-achieved-marker* "GOAL ACHIEVED"
+  "If the agent's reply contains this substring, the run terminates.")
+
+(defun %goal-system-prompt (goal)
+  (format nil "You are running inside an anuna-imago Common Lisp agent harness.
+
+YOUR GOAL: ~A
+
+You have these affordances:
+  - harness-eval — submit a Common Lisp form for evaluation. Returns a
+    plist with :status :ok | :rejected | :vetoed | :error | :timeout.
+  - harness-list-safety-layer — what's forbidden to redefine.
+  - harness-redefine-history — what you've already redefined.
+  - harness-list-rollbacks — your rollback indices.
+  - harness-rollback — undo a redefinition by index.
+  - harness-query-self-mod-receipts — recent harness-eval audit entries.
+  - The 10 builtin introspection tools (harness-list-tools, harness-version, etc.).
+
+Each turn after the first I will say 'Continue.' Advance toward the goal
+on your own initiative — pick the next step yourself. Always check :status
+on harness-eval results before assuming success.
+
+When you believe the goal is met, START your reply with the literal text
+'~A:' followed by a one-paragraph justification. That terminates the run."
+          goal *goal-achieved-marker*))
+
+(defun run-goal-experiment (&key
+                            goal
+                            (max-turns 8)
+                            (model "glm-5.1")
+                            (provider nil)
+                            (output-dir *experiment-output-dir*))
+  "Goal-driven counterpart to RUN-EXPERIMENT. The agent is told the GOAL
+in its system prompt and prompted with `Continue.` each subsequent turn
+until it produces 'GOAL ACHIEVED:' or MAX-TURNS is reached.
+
+Returns the path to the report."
+  (when (or (null goal) (not (stringp goal)) (string= "" goal))
+    (error "GOAL must be a non-empty string."))
+  (%reset-world)
+  (install-experiment-reasoner-stub!)
+  (let* ((p (or provider (make-zai-coding-provider
+                          :model model :opencode-slug "zai-coding-plan")))
+         (sup (make-supervisor 'goal-exp-sup))
+         (audit-path (format nil "/tmp/imago-experiment-audit-~D.log" (random 1000000)))
+         (_install (let ((*harness-eval-audit-log-path* audit-path))
+                     (install-self-modification-tools!)))
+         (agent (make-instance 'agent
+                  :id 'glm-goal
+                  :provider p
+                  :system-prompt (%goal-system-prompt goal)
+                  :tools (append *builtin-tool-names* *self-modification-tool-names*))))
+    (declare (ignore _install))
+    (spawn-agent! sup agent)
+    (sleep 0.05)
+    (unwind-protect
+         (let ((turns nil)
+               (achieved nil))
+           (loop for n from 1 to max-turns
+                 for prompt = (cond
+                                ((= n 1)
+                                 (format nil "Goal: ~A. Begin when ready." goal))
+                                (t *goal-mode-driver-prompt*))
+                 for turn = (run-experiment-turn agent n prompt)
+                 do (push turn turns)
+                 when (search *goal-achieved-marker*
+                              (experiment-turn-reply-text turn))
+                   do (setf achieved t) (return))
+           (let* ((stamp (substitute #\- #\: (subseq (iso-8601-now) 0 19)))
+                  (path  (format nil "~A~A-glm-goal-experiment.md" output-dir stamp))
+                  (header (format nil "~A model=~A endpoint=~A · GOAL: ~S · achieved=~A"
+                                  (provider-name p) (anthropic-model p)
+                                  (anthropic-base-url p)
+                                  goal (if achieved "yes" "no (max-turns)"))))
+             (write-experiment-report path header (reverse turns))
+             (format t "~%~%Goal achieved: ~A~%Report: ~A~%"
+                     (if achieved "YES" "NO (max-turns reached)") path)
              path))
       (handler-case (send! (agent-mailbox agent) :shutdown) (error () nil))
       (handler-case (drain-supervisor! sup) (error () nil)))))

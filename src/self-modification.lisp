@@ -51,6 +51,7 @@
     %harness-eval-prefilter
     %harness-eval-handler
     tool-call
+    dispatch-tool!
     register-tool!
     unregister-tool!
     %tool-receipt!
