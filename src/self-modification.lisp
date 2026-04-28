@@ -851,7 +851,7 @@ Always returns a plist; never raises."
                         :time-ms 0)))
          (%emit-receipt! 'harness-eval agent-id form-string
                          :reasoner :vetoed (%elapsed-ms start)
-                         (list :reason :no-active-theory))
+                         (list :form-id form-id :reason :no-active-theory))
          res))
 
       (t
@@ -870,14 +870,15 @@ Always returns a plist; never raises."
            (veto-result
             (%emit-receipt! 'harness-eval agent-id form-string
                             :reasoner :vetoed (%elapsed-ms start)
-                            (list :goal (getf veto-result :goal)
+                            (list :form-id form-id
+                                  :goal (getf veto-result :goal)
                                   :derivation (getf veto-result :derivation)))
             veto-result)
            (t
-            (%after-reasoner-pipeline form form-string lift pkg-name timeout-ms
-                                       agent-id start))))))))
+            (%after-reasoner-pipeline form form-string lift form-id
+                                       pkg-name timeout-ms agent-id start))))))))
 
-(defun %after-reasoner-pipeline (form form-string lift pkg-name timeout-ms agent-id start)
+(defun %after-reasoner-pipeline (form form-string lift form-id pkg-name timeout-ms agent-id start)
   ;; Step 4 — capture pre-state, eval, capture post-state, record
   (multiple-value-bind (pre-method-set prior-fdef prior-bound)
       (%form-rollback-prep lift)
@@ -888,7 +889,8 @@ Always returns a plist; never raises."
          (let ((res (list :status :timeout :phase :evaluation
                           :elapsed-ms timeout-ms)))
            (%emit-receipt! 'harness-eval agent-id form-string
-                           :evaluation :timeout timeout-ms nil)
+                           :evaluation :timeout timeout-ms
+                           (list :form-id form-id))
            res))
         ((eq (first reply) :error)
          (let* ((c (second reply))
@@ -901,7 +903,8 @@ Always returns a plist; never raises."
                            :stdout stdout)))
            (%emit-receipt! 'harness-eval agent-id form-string
                            :evaluation :error elapsed
-                           (list :condition-type (type-of c)
+                           (list :form-id form-id
+                                 :condition-type (type-of c)
                                  :message (princ-to-string c)))
            res))
         (t   ; (:ok value stdout elapsed)
@@ -918,7 +921,8 @@ Always returns a plist; never raises."
            (%form-record-definition lift form-string agent-id rollback-rec)
            (%emit-receipt! 'harness-eval agent-id form-string
                            :evaluated :ok elapsed
-                           (list :value-fingerprint
+                           (list :form-id form-id
+                                 :value-fingerprint
                                  (%form-fingerprint (%bounded-prin1 value))
                                  :rollback-index (and rollback-rec
                                                       (getf rollback-rec :index))))
