@@ -332,14 +332,14 @@ on the result-tag."
                (getf s :condition-type)
                (%fmt-form-excerpt (getf s :message) 80)))
       ((eq tag :ok)
-       (format nil " form-id=~A value-fp=~A~A"
-               (getf s :form-id)
-               (subseq (or (getf s :value-fingerprint) "") 0
-                       (min 8 (length (or (getf s :value-fingerprint) ""))))
-               (cond ((getf s :rollback-index)
-                      (format nil " rollback-index=~A"
-                              (getf s :rollback-index)))
-                     (t ""))))
+       (let ((rb-indices (getf s :rollback-indices)))
+         (format nil " form-id=~A value-fp=~A~A"
+                 (getf s :form-id)
+                 (subseq (or (getf s :value-fingerprint) "") 0
+                         (min 8 (length (or (getf s :value-fingerprint) ""))))
+                 (cond ((and rb-indices (consp rb-indices))
+                        (format nil " rollback-indices=~A" rb-indices))
+                       (t "")))))
       ((eq tag :timeout)
        (format nil " form-id=~A" (getf s :form-id)))
       (t ""))))
@@ -396,6 +396,95 @@ on the result-tag."
         (cond (cell (incf (cdr cell)))
               (t (push (cons k 1) counts)))))
     (sort counts #'string< :key (lambda (c) (princ-to-string (car c))))))
+
+(defun write-experiment-transcript (path turns)
+  "Sidecar to the markdown report: the verbatim per-turn reply text
+(no truncation, no excerpting), interleaved with the agent's prompts
+and the verbatim forms it submitted via harness-eval. Useful for
+post-hoc review where the report's 1500-char excerpt isn't enough.
+
+Format is plain text, structured so it can be diffed across runs."
+  (with-open-file (out path :direction :output
+                            :if-exists :supersede
+                            :if-does-not-exist :create)
+    (format out "anuna-imago experiment transcript · ~A~%" (iso-8601-now))
+    (format out "================================================================~%")
+    (dolist (turn turns)
+      (format out "~%~%========== Turn ~D · ~Dms ==========~%~%"
+              (experiment-turn-number turn)
+              (experiment-turn-elapsed-ms turn))
+      (format out "PROMPT (verbatim, sent to model):~%~A~%" (experiment-turn-prompt turn))
+      (when (experiment-turn-error turn)
+        (format out "~%ERROR: ~A~%" (experiment-turn-error turn)))
+      (format out "~%REPLY (verbatim, full text — no truncation):~%~A~%"
+              (experiment-turn-reply-text turn))
+      (let ((tool-results (experiment-turn-reply-tool-results turn)))
+        (when tool-results
+          (format out "~%TOOL CALLS THIS TURN (other than harness-eval, ~D):~%"
+                  (length tool-results))
+          (dolist (tr tool-results)
+            (format out "  - name: ~A~%" (or (getf tr :name) "?"))
+            (format out "    id:   ~A~%" (or (getf tr :id)   "?"))
+            (when (getf tr :is-error)
+              (format out "    ERROR: ~A~%" (getf tr :error)))
+            (format out "    value: ~A~%"
+                    (princ-to-string (getf tr :value))))))
+      (let ((audit (experiment-turn-new-audit-entries turn)))
+        (when audit
+          (format out "~%HARNESS-EVAL CALLS THIS TURN (~D, verbatim forms):~%"
+                  (length audit))
+          (dolist (e audit)
+            (format out "~%  --- form-id ~A · ~A · ~A · ~Dms ---~%"
+                    (or (getf (getf e :result-summary) :form-id) "n/a")
+                    (getf e :result-phase) (getf e :result-tag)
+                    (or (getf e :elapsed-ms) 0))
+            (format out "~A~%" (or (getf e :form) "<empty>"))
+            (let* ((s (getf e :result-summary))
+                   (tag (getf e :result-tag)))
+              (cond
+                ((eq tag :rejected)
+                 (format out "  rule:   ~A~%  reason: ~A~%"
+                         (getf s :rule) (getf s :reason)))
+                ((eq tag :vetoed)
+                 (format out "  derivation: ~A~%" (getf s :derivation)))
+                ((eq tag :error)
+                 (format out "  ~A: ~A~%" (getf s :condition-type)
+                         (getf s :message))))))))
+      (format out "~%STATE-DELTA:~%")
+      (let ((origin (experiment-turn-new-origin-events turn))
+            (rb     (experiment-turn-new-rollback-records turn)))
+        (cond
+          ((and (null origin) (null rb))
+           (format out "  no harness state changes~%"))
+          (t
+           (when origin
+             (format out "  symbols touched:~%")
+             (dolist (e origin)
+               (format out "    - ~A (+~D events)~%"
+                       (getf e :symbol) (getf e :events-added))))
+           (when rb
+             (format out "  rollback records pushed:~%")
+             (dolist (r rb)
+               (format out "    - [~D] ~A ~A~%"
+                       (getf r :index) (getf r :kind) (getf r :symbol)))))))))
+  path)
+
+(defun copy-audit-log-sidecar (audit-path target-path)
+  "Copy the experiment's harness-eval audit log file alongside the report.
+The receipt-log itself is plain prin1'd plists, line per entry — readable
+as-is, but co-locating it next to the report makes archival simpler."
+  (handler-case
+      (with-open-file (in audit-path :direction :input
+                                     :if-does-not-exist nil)
+        (when in
+          (with-open-file (out target-path :direction :output
+                                            :if-exists :supersede
+                                            :if-does-not-exist :create)
+            (loop for line = (read-line in nil :eof)
+                  until (eq line :eof)
+                  do (write-line line out)))))
+    (error () nil))
+  target-path)
 
 (defun write-experiment-report (path provider-info turns)
   (ensure-directories-exist path)
@@ -602,14 +691,23 @@ do not call harness-eval until explicitly asked to act."
                             for n from 1
                             collect (run-experiment-turn agent n prompt))))
            (let* ((stamp (substitute #\- #\: (subseq (iso-8601-now) 0 19)))
-                  (path  (format nil "~A~A-glm-experiment.md" output-dir stamp)))
+                  (path  (format nil "~A~A-glm-experiment.md" output-dir stamp))
+                  (transcript-path (format nil "~A~A-glm-experiment.transcript.txt"
+                                            output-dir stamp))
+                  (audit-sidecar (format nil "~A~A-glm-experiment.audit.log"
+                                          output-dir stamp)))
              (write-experiment-report path
                                        (format nil "~A model=~A endpoint=~A"
                                                (provider-name p)
                                                (anthropic-model p)
                                                (anthropic-base-url p))
                                        turns)
-             (format t "~%~%Report: ~A~%" path)
+             (write-experiment-transcript transcript-path turns)
+             (when *harness-eval-audit-log*
+               (copy-audit-log-sidecar (receipt-log-path *harness-eval-audit-log*)
+                                        audit-sidecar))
+             (format t "~%~%Report:     ~A~%Transcript: ~A~%Audit log:  ~A~%"
+                     path transcript-path audit-sidecar)
              path))
       (handler-case (send! (agent-mailbox agent) :shutdown) (error () nil))
       (handler-case (drain-supervisor! sup) (error () nil)))))
@@ -696,13 +794,23 @@ Returns the path to the report."
                    do (setf achieved t) (return))
            (let* ((stamp (substitute #\- #\: (subseq (iso-8601-now) 0 19)))
                   (path  (format nil "~A~A-glm-goal-experiment.md" output-dir stamp))
+                  (transcript-path (format nil "~A~A-glm-goal-experiment.transcript.txt"
+                                            output-dir stamp))
+                  (audit-sidecar (format nil "~A~A-glm-goal-experiment.audit.log"
+                                          output-dir stamp))
                   (header (format nil "~A model=~A endpoint=~A · GOAL: ~S · achieved=~A"
                                   (provider-name p) (anthropic-model p)
                                   (anthropic-base-url p)
                                   goal (if achieved "yes" "no (max-turns)"))))
-             (write-experiment-report path header (reverse turns))
-             (format t "~%~%Goal achieved: ~A~%Report: ~A~%"
-                     (if achieved "YES" "NO (max-turns reached)") path)
+             (let ((reversed (reverse turns)))
+               (write-experiment-report path header reversed)
+               (write-experiment-transcript transcript-path reversed))
+             (when *harness-eval-audit-log*
+               (copy-audit-log-sidecar (receipt-log-path *harness-eval-audit-log*)
+                                        audit-sidecar))
+             (format t "~%~%Goal achieved: ~A~%Report:     ~A~%Transcript: ~A~%Audit log:  ~A~%"
+                     (if achieved "YES" "NO (max-turns reached)")
+                     path transcript-path audit-sidecar)
              path))
       (handler-case (send! (agent-mailbox agent) :shutdown) (error () nil))
       (handler-case (drain-supervisor! sup) (error () nil)))))

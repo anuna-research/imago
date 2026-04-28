@@ -717,52 +717,113 @@ load-theory and before the first harness-eval call."
                     internal-time-units-per-second))))
 
 (defun %form-rollback-prep (lift)
-  "Return (values pre-method-set prior-fdefinition prior-bound-p) for
-rollback bookkeeping. Returns NILs if the form isn't a method or function
-redefinition."
-  (let ((op (getf lift :operator))
-        (target (getf lift :target)))
-    (cond
-      ((and (eq op 'defmethod) target)
-       (values (%method-set target) nil nil))
-      ((and (or (eq op 'defun) (eq op 'defmacro)) target)
-       (let ((bound (and (fboundp target) (not (macro-function target)))))
-         (values nil
-                 (and bound (symbol-function target))
-                 bound)))
-      (t (values nil nil nil)))))
+  "Snapshot pre-eval state for every definition target the lift surfaced
+— top-level OR buried inside progn/let/etc. Returns an alist:
+  ((SYMBOL :method <pre-method-set>) ...)
+  ((SYMBOL :function <prior-fn> <prior-bound-p>) ...)
 
-(defun %form-rollback-record (lift agent-id form-hash pre-method-set prior-fdef prior-bound)
-  "After a successful eval, record a rollback entry if appropriate."
-  (let ((op (getf lift :operator))
-        (target (getf lift :target))
-        (qualifier (getf lift :qualifier))
+The buried-target gap was a real bug: agents bundling
+\"(progn (in-package …) (defun foo …) (defun bar …))\" produced no
+origin-index events and no rollback records under the previous
+implementation, because top-level operator was `progn` and target was
+nil. %lift-form already populates :defun-targets / :defmethod-targets
+/ :defgeneric-targets via deep walk; we now consult those lists too."
+  (let ((entries nil)
+        (seen    (make-hash-table :test 'eq))
+        (op       (getf lift :operator))
+        (target   (getf lift :target)))
+    (labels ((capture-method (sym)
+               (push (list sym :method (%method-set sym)) entries)
+               (setf (gethash sym seen) t))
+             (capture-function (sym)
+               (let ((bound (and (fboundp sym) (not (macro-function sym)))))
+                 (push (list sym :function
+                             (and bound (symbol-function sym))
+                             bound)
+                       entries)
+                 (setf (gethash sym seen) t))))
+      ;; Top-level
+      (cond
+        ((and (eq op 'defmethod) target)              (capture-method target))
+        ((and (or (eq op 'defun) (eq op 'defmacro))
+              target)                                  (capture-function target)))
+      ;; Buried — :defmethod-targets / :defgeneric-targets are method
+      ;; surface; :defun-targets covers defun + defmacro buried.
+      (dolist (s (getf lift :defmethod-targets))
+        (unless (gethash s seen) (capture-method s)))
+      (dolist (s (getf lift :defgeneric-targets))
+        (unless (gethash s seen) (capture-method s)))
+      (dolist (s (getf lift :defun-targets))
+        (unless (gethash s seen) (capture-function s))))
+    (nreverse entries)))
+
+(defun %form-rollback-record (lift agent-id form-hash pre-state)
+  "After a successful eval, push rollback records for every target whose
+post-state diverged from PRE-STATE. PRE-STATE is the alist returned by
+%form-rollback-prep. Returns the list of newly-pushed rollback records
+(possibly empty)."
+  (let ((records      nil)
+        (qualifier    (getf lift :qualifier))
         (specialisers (getf lift :specialisers)))
-    (cond
-      ((and (eq op 'defmethod) target)
-       (let* ((post (%method-set target))
-              (added (set-difference post pre-method-set))
-              (removed (set-difference pre-method-set post)))
-         (when (or added removed)
-           (%push-method-rollback! target qualifier specialisers
-                                    added removed agent-id form-hash))))
-      ((and (or (eq op 'defun) (eq op 'defmacro)) target)
-       (%push-function-rollback! target prior-fdef prior-bound
-                                  agent-id form-hash))
-      (t nil))))
+    (dolist (entry pre-state)
+      (let ((sym  (first entry))
+            (kind (second entry)))
+        (case kind
+          (:method
+           (let* ((pre   (third entry))
+                  (post  (%method-set sym))
+                  (added (set-difference post pre))
+                  (removed (set-difference pre post)))
+             (when (or added removed)
+               (push (%push-method-rollback! sym qualifier specialisers
+                                              added removed
+                                              agent-id form-hash)
+                     records))))
+          (:function
+           (let ((prior-fn    (third entry))
+                 (prior-bound (fourth entry)))
+             (push (%push-function-rollback! sym prior-fn prior-bound
+                                              agent-id form-hash)
+                   records))))))
+    (nreverse records)))
 
-(defun %form-record-definition (lift form-string agent-id rollback-rec)
-  "After a successful eval, push an origin-index event for definition forms."
-  (let ((op (getf lift :operator))
-        (target (getf lift :target)))
-    (when (and target
-               (member op '(defun defmethod defgeneric defmacro
-                            defparameter defvar defclass defstruct)))
-      (%record-definition! target form-string agent-id
-                            (when rollback-rec
-                              (list :kind (getf rollback-rec :kind)
-                                    :index (getf rollback-rec :index)))
-                            (and rollback-rec (getf rollback-rec :index))))))
+(defun %form-record-definition (lift form-string agent-id rollback-records)
+  "Push an origin-index event for every symbol the form (re)defined,
+top-level OR buried. ROLLBACK-RECORDS is the list returned by
+%form-rollback-record; we match by symbol so each event's :rollback-ref
+points at the right rollback record (or nil for events that don't have
+a rollback record, e.g. defparameter / defclass)."
+  (let* ((rb-by-sym (mapcar (lambda (r) (cons (getf r :symbol) (getf r :index)))
+                            rollback-records))
+         (recorded  (make-hash-table :test 'eq))
+         (op        (getf lift :operator))
+         (target    (getf lift :target)))
+    (labels ((record (sym kind-keyword)
+               (unless (gethash sym recorded)
+                 (let ((rb-idx (cdr (assoc sym rb-by-sym))))
+                   (%record-definition! sym form-string agent-id
+                                         (and kind-keyword
+                                              (list :kind kind-keyword))
+                                         rb-idx)
+                   (setf (gethash sym recorded) t)))))
+      ;; Top-level: respect the broader CON-005 set including defparameter
+      ;; / defvar / defclass / defstruct that don't have a rollback record.
+      (when (and target
+                 (member op '(defun defmethod defgeneric defmacro
+                              defparameter defvar defclass defstruct
+                              define-condition define-symbol-macro)))
+        (record target (cond ((eq op 'defmethod)  :method)
+                             ((eq op 'defgeneric) :generic)
+                             ((eq op 'defun)      :function)
+                             ((eq op 'defmacro)   :macro)
+                             (t                   :variable))))
+      ;; Buried — only the def shapes %lift-form tracks (defmethod /
+      ;; defgeneric / defun / defmacro). Buried defparameter / defvar
+      ;; would need additional walker support; flagged as a v0.2
+      ;; extension.
+      (dolist (s (getf lift :defmethod-targets))   (record s :method))
+      (dolist (s (getf lift :defgeneric-targets))  (record s :generic))
+      (dolist (s (getf lift :defun-targets))       (record s :function)))))
 
 (defun %harness-eval-handler (args)
   "CON-001 entry point. ARGS is a plist with :form (string, required),
@@ -880,9 +941,10 @@ Always returns a plist; never raises."
                                        pkg-name timeout-ms agent-id start))))))))
 
 (defun %after-reasoner-pipeline (form form-string lift form-id pkg-name timeout-ms agent-id start)
-  ;; Step 4 — capture pre-state, eval, capture post-state, record
-  (multiple-value-bind (pre-method-set prior-fdef prior-bound)
-      (%form-rollback-prep lift)
+  ;; Step 4 — capture pre-state for every (re)defined target (top-level
+  ;; OR buried), eval, capture post-state diffs, push rollback records
+  ;; per target, push origin-index events per target.
+  (let ((pre-state (%form-rollback-prep lift)))
     (let ((reply (%eval-form-with-timeout form pkg-name timeout-ms))
           (form-hash (%form-fingerprint form-string)))
       (cond
@@ -912,19 +974,19 @@ Always returns a plist; never raises."
          (let* ((value (second reply))
                 (stdout (third reply))
                 (elapsed (fourth reply))
-                (rollback-rec (%form-rollback-record lift agent-id form-hash
-                                                     pre-method-set
-                                                     prior-fdef prior-bound))
+                (rollback-records (%form-rollback-record lift agent-id form-hash
+                                                          pre-state))
                 (res (list :status :ok :phase :evaluated
                            :value (%bounded-prin1 value)
                            :stdout stdout
                            :elapsed-ms elapsed)))
-           (%form-record-definition lift form-string agent-id rollback-rec)
+           (%form-record-definition lift form-string agent-id rollback-records)
            (%emit-receipt! 'harness-eval agent-id form-string
                            :evaluated :ok elapsed
                            (list :form-id form-id
                                  :value-fingerprint
                                  (%form-fingerprint (%bounded-prin1 value))
-                                 :rollback-index (and rollback-rec
-                                                      (getf rollback-rec :index))))
+                                 :rollback-indices
+                                 (mapcar (lambda (r) (getf r :index))
+                                         rollback-records)))
            res))))))
