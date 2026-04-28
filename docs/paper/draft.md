@@ -20,7 +20,7 @@ The alternative we propose is to refuse, at the framework layer, to encode assum
 
 This stance has consequences. Three principles structure them: every layer must be redefinable at runtime without restart, the runtime artifact must be the heap, and safety must come from invariants rather than from prescriptive pipelines. A fourth principle puts these in motion: the harness accumulates as the agent and user team meets the real requirements of the task.
 
-**Contributions.** (1) An argument that the bitter lesson applies to agent-runtime framework design, with three concrete examples of capability-tracking abstractions that have already aged out (§2). (2) Four principles that characterise a modular, self-evolving runtime: live redefinition, image-as-artifact, invariants over pipelines, and harness accumulation (§3). (3) anuna-imago, an SBCL Common Lisp harness of approximately 4100 lines, offered as an existence proof (§4). (4) A statement of the wager: this position loses if model capability plateaus (§6).
+**Contributions.** (1) An argument that the bitter lesson applies to agent-runtime framework design, with three concrete examples of capability-tracking abstractions that have already aged out (§2). (2) Four principles that characterise a modular, self-evolving runtime: live redefinition, image-as-artifact, invariants over pipelines, and harness accumulation (§3). (3) Four minimum requirements that operationalise those principles into testable criteria a candidate runtime can be checked against (§4). (4) anuna-imago, an SBCL Common Lisp harness of approximately 4100 lines, offered as an existence proof (§5). (5) A statement of the wager: this position loses if model capability plateaus (§7).
 
 ## 2. The bitter lesson, applied to runtimes
 
@@ -52,11 +52,25 @@ Safety is not a sequence of checks the framework runs in a fixed order; it is a 
 
 Together, the three principles describe a harness that does not ship as a finished product but accumulates. The minimal commitment — supervision, identity, audit, capability routing — is the starting point, not the end. Beyond that, the harness grows in response to the requirements the agent and user team actually encounter in service of the task: a tool defined when a workflow demands it, a hook installed when behaviour needs to be observed, a method redefined when a default proves wrong. The runtime is the cumulative product of contact with real requirements, not the prediction of imagined ones. This is the inversion the bitter lesson asks for: instead of front-loading abstractions to anticipate model capability, the framework lets the abstractions emerge from use, and remain only as long as they remain useful.
 
-## 4. anuna-imago as existence proof
+## 4. Minimum requirements
+
+A runtime is *modular and self-evolving* if and only if it satisfies the four requirements below. Each follows from one of the principles in §3, but is stated here as a testable criterion a candidate runtime can be evaluated against. They are minimal: a runtime that fails any one of them sacrifices the corresponding principle. They are not exhaustive: a candidate may meet all four and still be inadequate for other reasons (poor concurrency model, weak debugging, hostile build system). The requirements address modularity and self-evolution specifically.
+
+**R1 (Live redefinition).** Every layer the user might wish to replace — tool dispatch, hook execution, provider streaming, prompt assembly, the turn loop — is reached through late binding. A replacement takes effect on the next call without restart. Configurability does not satisfy R1; configuration assumes the framework anticipated the axes of variation, while late binding does not.
+
+**R2 (Heap-as-artifact).** The deployed runtime is a snapshot of the in-memory state, capturing any redefinitions applied before the snapshot. A source tree plus build step does not satisfy R2: it forces every live redefinition to be reified as a code edit before deployment, which breaks the affordance.
+
+**R3 (Invariant-based safety).** Safety policy is expressible as statements over the runtime's actions, separable from the policy enforcer. The user authors policy without modifying the framework. The enforcer's role is reduced to consulting the policy at decision points and acting on its verdict.
+
+**R4 (Accumulation surface).** Adding a tool, hook, or method does not require modifying the framework. The user-callable register/install/define operations take effect immediately (per R1) and persist across image saves (per R2).
+
+A candidate runtime that satisfies R1–R4 is a *modular, self-evolving* runtime in the sense developed here. We use this definition in §5 to evaluate anuna-imago against it.
+
+## 5. anuna-imago as existence proof
 
 We have built a runtime that follows the three principles, called **anuna-imago**. The implementation is approximately 4100 lines of Common Lisp on SBCL with a further 3340 lines of tests; the harness is small enough to read in an afternoon, and small enough that no part of it is load-bearing in the sense that the user cannot replace it. We offer the artifact as a demonstration that the principles cohere into a working system, not as a product pitch — the choice of substrate (SBCL Common Lisp) carries real costs that we acknowledge explicitly below.
 
-### 4.1 A worked redefinition
+### 5.1 A worked redefinition (R1, R2, R4)
 
 Any method can be redefined at the live REPL, and the redefinition survives an image save. The following transcript builds an agent against a stub provider, asks it, redefines the provider's `stream!` method, asks again (new behaviour, same process, no restart), and saves the heap as an executable binary. Running the binary from the shell produces output consistent with the redefined method:
 
@@ -84,15 +98,15 @@ shouted: HELLO!
 
 No framework migration ticket; no rebuild step. The patch survives because the binary *is* the heap.
 
-### 4.2 Safety from invariants in practice
+### 5.2 Safety from invariants in practice (R3)
 
 The self-modification port instantiates Principle 3. A `harness-eval` tool lets the agent submit Common Lisp source forms for evaluation; before evaluation, three layers gate the call: a pre-filter denylist for obvious structural violations, a defeasible-logic reasoner querying a Spindle theory of floor invariants, and a handler that runs the form under timeout with a rollback register for any methods it redefines. A published log of six goal-driven runs with GLM 5.1 records the agent self-redefining 18 symbols across 6 turns to add persistent memory to itself, with 3 vetoes from the floor invariants intercepting attempts to redefine the safety surface. The invariants are short, queryable, and authored once.
 
-### 4.3 Limitations
+### 5.3 Limitations
 
 Common Lisp on SBCL is a small ecosystem with a sharp learning curve and genuine hiring difficulty. Teams committed to Python or TypeScript ergonomics will not adopt anuna-imago verbatim. Our argument is structural: *some* substrate that supports these principles must exist, and substrates that do not — including the typical Python-based agent stack — pay back the limitation as migration cost over time. anuna-imago demonstrates that the position is realisable; it does not claim to be the realisation everyone should choose.
 
-## 5. Related stances
+## 6. Related stances
 
 The position has antecedents and convergent neighbours.
 
@@ -102,7 +116,7 @@ The position has antecedents and convergent neighbours.
 
 **The Erlang/OTP supervision tradition** [Armstrong 2003]. anuna-imago's `make-supervisor` is a direct CLOS port of Armstrong's one-for-one supervisor, and its mailbox abstraction follows the same letterbox-with-pid shape as Erlang processes. The contribution we claim is *not* the supervisor — Armstrong's design is fully borrowed and unmodified. The contribution is to limit framework scope to such established prior art and push every other concern to user code. Operational scaffolding is not a new research problem; what is new is committing to it as the *only* framework concern.
 
-## 6. Conclusion
+## 7. Conclusion
 
 Agent runtimes should commit to operational scaffolding only — supervision, identity, audit, capability routing — and treat every other layer as part of a modular, self-evolving runtime that the user, or the agent itself, can redefine in flight. Three principles implement the position: live redefinition, image-as-artifact, invariants not pipelines. anuna-imago, ~4100 LOC of Common Lisp, demonstrates that the position is realisable. The wager is plain: if model capability plateaus in the next several years, prescriptive frameworks were correct to bake in scaffolding and we paid for under-engineering. If capability continues climbing, prescriptive frameworks pay migration debt forever and the modular-runtime position wins by attrition. Either way, the harness is not built before the task arrives — it accumulates as the agent/user team learns what the task actually requires. The artifact is at `codeberg.org/anuna/imago`. Take it apart, and grow what you need.
 
