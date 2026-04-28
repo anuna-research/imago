@@ -339,26 +339,37 @@ plugins under [`plugins/`](./plugins). Load with
 
 | Plugin | Load with | Provides |
 |---|---|---|
-| `imago/openrouter` | `(ql:quickload :imago/openrouter)` | OpenAI-compatible driver for any [OpenRouter](https://openrouter.ai)-served model: GLM, GPT, Claude, Gemini, Qwen, Mistral, … Pass the slug as `:model`, e.g. `"z-ai/glm-5.1"` (default), `"openai/gpt-4o"`, `"anthropic/claude-opus-4-7"` |
+| `imago/openrouter` | `(ql:quickload :imago/openrouter)` | OpenAI-compatible driver for any [OpenRouter](https://openrouter.ai)-served model. Pass the slug as `:model`, e.g. `"z-ai/glm-5.1"`, `"openai/gpt-4o"`, `"anthropic/claude-opus-4-7"` |
+| `imago/zai` | `(ql:quickload :imago/zai)` | Z.ai GLM Coding Plan provider (Anthropic-compatible). Thin wrapper over the existing Anthropic driver pointed at `api.z.ai/api/anthropic`. Optional opencode `auth.json` key reader |
 
 ```lisp
-;; Example: GLM 5.1 via OpenRouter
+;; --- Example A: any model via OpenRouter ----------------------------
 (ql:quickload :imago/openrouter)
+;; OPENROUTER_API_KEY in env, or :api-key here.
 (let ((provider (anuna-imago:make-openrouter-provider
-                  :model "z-ai/glm-5.1"
-                  :app-name "imago-experiment"        ; optional, dashboard label
-                  :site-url "https://example.com")))   ; optional
-  ;; OPENROUTER_API_KEY in env, or :api-key here.
+                  :model "z-ai/glm-5.1"))) ; or "openai/gpt-4o", "anthropic/claude-opus-4-7", …
   (make-instance 'anuna-imago:agent
-                 :id 'glm
+                 :provider provider
+                 :system-prompt "You are concise."
+                 :tools '(anuna-imago:harness-list-tools)))
+
+;; --- Example B: Z.ai GLM Coding Plan (Anthropic-compatible) ---------
+(ql:quickload :imago/zai)
+(let ((provider (anuna-imago:make-zai-coding-provider
+                  :model "glm-5.1"                       ; or glm-5-turbo / glm-4.7 / glm-4.5-air
+                  ;; Pull the key from opencode's auth.json so you don't
+                  ;; have to re-paste it. Pass NIL to skip and use
+                  ;; ANTHROPIC_API_KEY env instead.
+                  :opencode-slug "zai-coding-plan")))
+  (make-instance 'anuna-imago:agent
                  :provider provider
                  :system-prompt "You are concise."
                  :tools '(anuna-imago:harness-list-tools)))
 ```
 
-The plugin reuses the existing `provider-stream!` contract — the same
+Both plugins reuse the existing `provider-stream!` contract — the same
 agent definition, supervision, hook chain, and self-modification port
-work unchanged with any OpenRouter-served model.
+work unchanged with any served model.
 
 #### Opt-in: self-modification port
 
@@ -559,8 +570,11 @@ anuna-imago/
 │   │                                 OQ-001..004 resolutions
 │   └── CHECKING.md                   :clean t audit checklist
 ├── plugins/                          opt-in subsystems — load via
-│   └── openrouter/                   (ql:quickload :imago/<plugin>)
-│       ├── openrouter.lisp           OpenRouter (OpenAI-compatible) driver
+│   ├── openrouter/                   (ql:quickload :imago/<plugin>)
+│   │   ├── openrouter.lisp           OpenRouter (OpenAI-compatible) driver
+│   │   └── test.lisp                 stubbed-HTTP test suite
+│   └── zai/
+│       ├── zai.lisp                  Z.ai GLM Coding Plan (Anthropic-compat)
 │       └── test.lisp                 stubbed-HTTP test suite
 ├── plan.spl                          SPEC-011 implementation plan (hence)
 ├── plan.spec-012.spl                 SPEC-012 implementation plan (hence)

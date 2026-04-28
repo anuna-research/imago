@@ -145,6 +145,13 @@
    #:openrouter-app-name
    #:*openrouter-http-post*
 
+   ;; --- Z.ai GLM Coding Plan provider (post-spec; Anthropic-compatible) ---
+   #:make-zai-coding-provider
+   #:read-opencode-zai-key
+   #:*zai-coding-base-url*
+   #:*zai-default-model*
+   #:*zai-opencode-auth-path*
+
    ;; --- M6 / cbcl FFI ---
    #:*cbcl-ffi-library-path*
    #:ensure-cbcl-ffi-loaded

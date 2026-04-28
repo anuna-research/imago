@@ -124,3 +124,21 @@
   :depends-on (#:imago/openrouter #:imago/test)
   :components ((:module "plugins/openrouter"
                 :components ((:file "test")))))
+
+(defsystem #:imago/zai
+  :name "imago/zai"
+  :description "Z.ai GLM Coding Plan provider plugin — thin wrapper over imago's existing anthropic-provider, since the Coding Plan exposes Anthropic-compatible Messages API. Includes an opencode auth.json key reader."
+  :version "0.1.0"
+  :license "Apache-2.0"
+  :depends-on (#:imago)
+  :components ((:module "plugins/zai"
+                :components ((:file "zai")))))
+
+(defsystem #:imago/zai/test
+  :name "imago/zai/test"
+  :description "Test suite for the Z.ai Coding Plan plugin. Stubbed HTTP."
+  :version "0.1.0"
+  :license "Apache-2.0"
+  :depends-on (#:imago/zai #:imago/test)
+  :components ((:module "plugins/zai"
+                :components ((:file "test")))))
