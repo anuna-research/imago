@@ -62,6 +62,14 @@ expect_success "scaffolds into nonexistent deep path"  bash "$SCAFFOLDER" deep-t
 expect_success "deep target dir exists"                test -d "$DEEP_TARGET"
 
 # ---------------------------------------------------------------------------
+echo "# non-empty target rejection"
+NONEMPTY="$TMP_ROOT/nonempty"
+mkdir -p "$NONEMPTY"
+touch "$NONEMPTY/preexisting.txt"
+expect_failure "non-empty target without --force"    bash "$SCAFFOLDER" foo "$NONEMPTY"
+expect_success "non-empty target WITH --force"       bash "$SCAFFOLDER" foo "$NONEMPTY" --force
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

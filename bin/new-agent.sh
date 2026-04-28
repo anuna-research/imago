@@ -69,6 +69,12 @@ case "$TARGET_ABS_PROBE/" in
     ;;
 esac
 
+# Refuse non-empty existing target unless --force was passed.
+if [[ -d "$TARGET" ]] && [[ -n "$(ls -A "$TARGET" 2>/dev/null)" ]] && [[ "$FORCE" -eq 0 ]]; then
+  echo "Target dir is non-empty: $TARGET (pass --force to scaffold anyway)" >&2
+  exit 2
+fi
+
 # Now create the target.
 mkdir -p "$TARGET"
 TARGET_ABS="$(cd "$TARGET" && pwd)"
