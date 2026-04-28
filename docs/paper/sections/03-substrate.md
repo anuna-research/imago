@@ -50,7 +50,7 @@ invariants don't need to change. A pipeline-based safety story, by contrast,
 gets longer with every new capability surface: a new tool means a new
 validator, a new orchestration step, a new place to forget a check. An
 invariant-based story stays the same size: the new capability either does
-or does not violate the existing rules. anuna-imago's SPEC-012
+or does not violate the existing rules. anuna-imago's
 self-modification port queries a Spindle defeasible-logic theory at every
 `harness-eval` call; the theory is the entire safety contract for that
 surface, and the framework's role is reduced to "ask the reasoner, veto on

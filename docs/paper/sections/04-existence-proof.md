@@ -46,7 +46,7 @@ the binary *is* the heap.
 
 ## Safety from invariants in practice
 
-The SPEC-012 self-modification port instantiates Principle 3. A
+The self-modification port instantiates Principle 3. A
 `harness-eval` tool lets the agent submit Common Lisp source forms for
 evaluation; before evaluation, three layers gate the call: a pre-filter
 denylist for obvious structural violations, a defeasible-logic reasoner
