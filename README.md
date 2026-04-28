@@ -487,6 +487,20 @@ without trial-and-error against the safety stack:
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 
+### Quick start: scaffold a new project
+
+```sh
+bash bin/new-agent.sh my-agent ../my-agent
+cd ../my-agent
+bash bin/build.sh
+./my-agent --echo "hi"
+```
+
+This vendors imago into `../my-agent/imago/`, generates a starter
+project with a build script, smoke test, and demonstrative agent
+file. See `bin/new-agent.sh` for what gets stamped where.
+
+
 ### Build your own agent
 
 Three things to customise: tools, system prompt, provider.
