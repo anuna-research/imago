@@ -273,6 +273,7 @@
    #:%lift-form
    ;; Safety-layer symbol set (ADR-012 §A1, generalised over CON-003).
    #:*safety-layer-symbols*
+   #:*safety-layer-categories*
    ;; Receipt (CON-004) — separate audit log instance for harness-eval.
    #:*harness-eval-audit-log*
    #:%tool-receipt!

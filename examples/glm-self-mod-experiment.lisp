@@ -324,9 +324,13 @@ on the result-tag."
        (format nil " rule=~A reason=~S"
                (getf s :rule) (%fmt-form-excerpt (getf s :reason) 80)))
       ((eq tag :vetoed)
-       (format nil " form-id=~A derivation=~A"
+       (format nil " form-id=~A derivation=~A~A"
                (getf s :form-id)
-               (%fmt-form-excerpt (princ-to-string (getf s :derivation)) 100)))
+               (%fmt-form-excerpt (princ-to-string (getf s :derivation)) 100)
+               (cond ((getf s :hint)
+                      (format nil "~%    hint: ~A"
+                              (%fmt-form-excerpt (getf s :hint) 280)))
+                     (t ""))))
       ((eq tag :error)
        (format nil " ~A: ~A"
                (getf s :condition-type)

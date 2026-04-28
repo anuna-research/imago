@@ -106,6 +106,105 @@ generalised mentions/2 rule. ADR-012 §A1.")
   "T if SYM is in the safety-layer set."
   (and (symbolp sym) (member sym *safety-layer-symbols* :test #'eq)))
 
+;; ---------------------------------------------------------------- categories
+;;
+;; Symbols in *safety-layer-symbols* are partitioned into categories so the
+;; reasoner-veto handler can emit a teaching :hint instead of just naming
+;; the offending symbol. Without categorisation, the agent treats each
+;; veto as "this specific symbol is bad" and cycles through alternatives
+;; from the same category one at a time (eval → read → load → … each
+;; producing the same +Δ). The hint says "this entire category is
+;; forbidden; here's an alternative class of tools".
+
+(defparameter *safety-layer-categories*
+  '((:eval-class
+     (eval compile compile-file load read read-from-string
+      read-preserving-whitespace)
+     "Reader/evaluator primitives. Forbidden because they bypass the form-level safety filter — an agent could embed any defmethod in quoted data and run it via EVAL/READ/LOAD (ADR-012 §F2). Alternative for serialisation: line-oriented I/O with WITH-OPEN-FILE + WRITE-LINE/FORMAT to write, READ-LINE + SUBSEQ / PARSE-INTEGER / STRING= for manual parsing. Do NOT try to read s-expressions back; design your on-disk format as plain text records.")
+    (:reader-macro-class
+     (set-macro-character set-dispatch-macro-character set-syntax-from-char
+      *readtable* copy-readtable make-dispatch-macro-character)
+     "Reader-macro mutation. Forbidden because the harness reads submitted forms via a sealed readtable; mutating *readtable* or installing reader macros would let a later form interpret unrelated text as code (ADR-012 §F3).")
+    (:thread-class
+     (sb-thread:interrupt-thread sb-thread:terminate-thread
+      sb-thread:make-thread sb-thread:join-thread)
+     "Thread primitives. Forbidden because they can run arbitrary forms in another thread's context, bypassing the eval-thread timeout / safety chain (ADR-012 §F9). Stay on the calling thread.")
+    (:method-mutate-class
+     (add-method remove-method find-method ensure-generic-function
+      sb-mop:generic-function-methods sb-mop:intern-eql-specializer)
+     "Method-table mutation/introspection primitives. Use (defmethod NAME …) — the lift function sees the target through that path. For introspection of methods on a generic, this access is denied in v0.1; you can still call the generic and observe its behaviour.")
+    (:safety-layer-target
+     (invariant-filter-hook install-invariant-filter! uninstall-invariant-filter!
+      %harness-eval-prefilter %harness-eval-handler tool-call dispatch-tool!
+      register-tool! unregister-tool! %tool-receipt!)
+     "Safety-stack functions and generics themselves. Redefining them would defeat the safety stack. Cannot be added to or replaced from inside harness-eval — operator action at the REPL is the only path.")
+    (:tool-struct
+     (tool-handler tool-permission tool-name tool-description tool-schema
+      find-tool list-tools clear-all-tools make-tool)
+     "Tool struct accessors / registry-introspection functions. Forbidden because they enable bypass via direct hash-table mutation. For introspection of registered tools, use the harness-list-tools / harness-describe-tool TOOLS — those are dispatched safely.")
+    (:registry-table
+     (*tool-registry* *tool-registry-lock* *valid-permissions* *valid-param-types*)
+     "Tool registry storage. Direct (setf (gethash …) …) is forbidden. New tools cannot be added from inside harness-eval (REQ-001 — only the operator at the REPL can extend the tool surface).")
+    (:audit-state
+     (*open-receipt-logs* *credential-erasers* register-receipt-log-for-clean!
+      register-credential-eraser! append-receipt! open-receipt-log
+      close-receipt-log!)
+     "Audit log primitives. Writing the audit log directly would enable forgery (ADR-012 §F10). The audit log is written automatically per harness-eval call; you cannot append entries yourself.")
+    (:theory-state
+     (*active-theory-handle* *invariant-filter-handle*)
+     "Reasoner theory state. Replacing or clearing the theory would relax the safety floor. Operator action only.")
+    (:harness-eval-state
+     (*redefine-history* *rollback-register* *safety-layer-symbols*
+      *prefilter-denylist* *harness-eval-audit-log*)
+     "Self-modification port internal state. Read-only via the harness-redefine-history / harness-list-rollbacks / harness-list-safety-layer tools — direct mutation is forbidden.")
+    (:harness-eval-install-fn
+     (install-self-modification-tools! uninstall-self-modification-tools! harness-eval)
+     "Install-fn pair and the harness-eval tool symbol itself. Cannot reinstall or uninstall the port from inside harness-eval — operator action."))
+  "Partitions *safety-layer-symbols* into ten categories. Each entry is
+  (category-keyword (symbol …) \"why string\")
+The veto handler looks up a symbol's category to emit a teaching
+hint; harness-list-safety-layer renders the categorised view when
+called with :by-category t.")
+
+(defun %symbol-category (sym)
+  "Return the category keyword for SYM, or NIL if SYM is in
+*safety-layer-symbols* but not yet partitioned (defensive — in
+production every safety-layer symbol should be in some category)."
+  (loop for (cat syms _) in *safety-layer-categories*
+        when (member sym syms :test #'eq)
+          return cat))
+
+(defun %category-rationale (cat)
+  "Return the 'why' paragraph for category CAT."
+  (third (assoc cat *safety-layer-categories*)))
+
+(defun %derivation-trigger-symbol (derivation)
+  "Pull the safety-layer symbol that triggered the veto out of the
+reasoner's derivation. The shipped floor produces derivations of the
+shape ((forbidden eval-call F)
+       (mentions|defmethod-targets|defgeneric-targets|defun-targets F SYMBOL)
+       (safety-layer-symbol SYMBOL))
+We pick the SYMBOL out of the second clause. Returns NIL on shapes we
+don't recognise so future-proof rules degrade gracefully."
+  (loop for clause in derivation
+        when (and (consp clause)
+                  (member (first clause)
+                          '(mentions defmethod-targets defgeneric-targets
+                            defun-targets))
+                  (>= (length clause) 3))
+          return (third clause)))
+
+(defun %vetoed-hint (derivation)
+  "Build the :hint string emitted on a vetoed receipt. Returns NIL when
+the derivation doesn't pin a single trigger symbol (e.g. defence-in-
+depth :no-active-theory case)."
+  (let* ((sym (%derivation-trigger-symbol derivation))
+         (cat (and sym (%symbol-category sym)))
+         (why (and cat (%category-rationale cat))))
+    (when cat
+      (format nil "Triggered by mention of ~A (category ~A). ~A"
+              sym cat why))))
+
 ;; =========================================================================
 ;; CON-002 — pre-filter (top-level structural denylist)
 ;; =========================================================================
@@ -922,11 +1021,14 @@ Always returns a plist; never raises."
          (unwind-protect
              (let ((proof (%query-forbidden handle form-id)))
                (when (proof-result-positive-p proof)
-                 (setf veto-result
-                       (list :status :vetoed :phase :reasoner
-                             :goal (list 'forbidden 'eval-call form-id)
-                             :derivation (getf proof :derivation)
-                             :time-ms (or (getf proof :time-ms) 0)))))
+                 (let* ((derivation (getf proof :derivation))
+                        (hint       (%vetoed-hint derivation)))
+                   (setf veto-result
+                         (list :status :vetoed :phase :reasoner
+                               :goal (list 'forbidden 'eval-call form-id)
+                               :derivation derivation
+                               :hint hint
+                               :time-ms (or (getf proof :time-ms) 0))))))
            (%retract-lift-facts! handle form-id lift))
          (cond
            (veto-result
@@ -934,7 +1036,8 @@ Always returns a plist; never raises."
                             :reasoner :vetoed (%elapsed-ms start)
                             (list :form-id form-id
                                   :goal (getf veto-result :goal)
-                                  :derivation (getf veto-result :derivation)))
+                                  :derivation (getf veto-result :derivation)
+                                  :hint (getf veto-result :hint)))
             veto-result)
            (t
             (%after-reasoner-pipeline form form-string lift form-id

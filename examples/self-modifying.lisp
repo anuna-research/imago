@@ -54,6 +54,11 @@ Return shapes (one of):
   (:status :rejected :phase :pre-filter :rule <kw> :reason <str>)
   ; reasoner veto — form mentions a safety-layer symbol per the active theory
   (:status :vetoed   :phase :reasoner   :goal <list> :derivation <list>
+                                        :hint <string>   ; READ THIS — names
+                                                         ; the category and
+                                                         ; suggests an
+                                                         ; alternative class
+                                                         ; of operations
                                         :time-ms <int>)
   ; runtime error during eval (form raised a condition)
   (:status :error    :phase :evaluation :condition-type <symbol>
@@ -74,23 +79,45 @@ unregister-tool! at the REPL.")
 
 ;; ---------------------------------------------- introspection: safety set ---
 
+(defun %fmt-symbol-with-package (s)
+  (format nil "~(~A:~A~)"
+          (and (symbol-package s) (package-name (symbol-package s)))
+          (symbol-name s)))
+
 (defun %tool-list-safety-layer (args)
-  "Return the safety-layer symbol set: any form mentioning these will be
-vetoed by the reasoner. Optional :prefix filters by symbol-name prefix."
-  (let ((prefix (getf args :prefix)))
-    (sort
-     (loop for s in *safety-layer-symbols*
-           for name = (symbol-name s)
-           when (or (null prefix)
-                    (and (stringp prefix)
-                         (>= (length name) (length prefix))
-                         (string-equal (subseq name 0 (length prefix))
-                                       prefix)))
-             collect (format nil "~(~A:~A~)"
-                              (and (symbol-package s)
-                                   (package-name (symbol-package s)))
-                              name))
-     #'string<)))
+  "Return the safety-layer symbol set. Three modes:
+
+  :by-category t      → categorised view: list of (:category :why
+                        :symbols) plists. The agent should read this
+                        first to learn what KINDS of operations are
+                        forbidden — without categories, an agent that
+                        gets vetoed on EVAL will retry with READ, then
+                        LOAD, etc., not realising they're all in the
+                        same forbidden class.
+  :prefix \"FOO\"     → flat alphabetical list, filtered to symbols
+                        whose name starts with FOO (case-insensitive).
+  no args             → flat alphabetical list of all 38+ symbols."
+  (let ((by-cat (getf args :by-category))
+        (prefix (getf args :prefix)))
+    (cond
+      (by-cat
+       (mapcar (lambda (entry)
+                 (list :category (first entry)
+                       :why      (third entry)
+                       :symbols  (mapcar #'%fmt-symbol-with-package
+                                          (second entry))))
+               *safety-layer-categories*))
+      (t
+       (sort
+        (loop for s in *safety-layer-symbols*
+              for name = (symbol-name s)
+              when (or (null prefix)
+                       (and (stringp prefix)
+                            (>= (length name) (length prefix))
+                            (string-equal (subseq name 0 (length prefix))
+                                          prefix)))
+                collect (%fmt-symbol-with-package s))
+        #'string<)))))
 
 ;; ---------------------------------------------- introspection: history ---
 
@@ -168,10 +195,12 @@ harness-query-receipts (which reads the SPEC-011 ASK/reply log)."
 (defun %register-self-mod-introspection-tools! ()
   (register-tool!
    (make-tool :name 'harness-list-safety-layer
-              :description "Return the safety-layer symbol set — any form mentioning these will be rejected by the pre-filter or vetoed by the reasoner. Use this to know what NOT to redefine before submitting a harness-eval form. Optional :prefix filters by symbol-name prefix (e.g. \"TOOL-\")."
+              :description "Return the safety-layer symbol set — any form mentioning these will be rejected by the pre-filter or vetoed by the reasoner. Pass :by-category t (RECOMMENDED FIRST CALL) to get a categorised view with rationale per category — eval-class, reader-macro-class, thread-class, method-mutate-class, safety-layer-target, tool-struct, registry-table, audit-state, theory-state, harness-eval-state, harness-eval-install-fn. Without :by-category, returns a flat alphabetical list. Optional :prefix filters the flat list."
               :permission :read
-              :schema '((:prefix :type :string :required-p nil
-                         :description "Filter to symbols whose name starts with this string (case-insensitive)."))
+              :schema '((:by-category :type :boolean :required-p nil
+                         :description "Return categorised view with per-category rationale instead of flat list. Recommended for first call.")
+                        (:prefix :type :string :required-p nil
+                         :description "Filter the flat list to symbols whose name starts with this string (ignored when :by-category is true)."))
               :handler #'%tool-list-safety-layer))
   (register-tool!
    (make-tool :name 'harness-redefine-history
