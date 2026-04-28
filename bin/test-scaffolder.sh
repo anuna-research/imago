@@ -51,6 +51,17 @@ expect_success "scaffolder runs"                     bash "$SCAFFOLDER" test-age
 expect_success "target dir exists"                   test -d "$TARGET"
 
 # ---------------------------------------------------------------------------
+echo "# nesting refusal"
+expect_failure "refuses target inside imago tree"    bash "$SCAFFOLDER" foo "$REPO_ROOT/examples/foo"
+expect_failure "refuses target = imago tree itself"  bash "$SCAFFOLDER" foo "$REPO_ROOT"
+
+# ---------------------------------------------------------------------------
+echo "# happy path: nonexistent parent is created"
+DEEP_TARGET="$TMP_ROOT/brand-new/nested/dir"
+expect_success "scaffolds into nonexistent deep path"  bash "$SCAFFOLDER" deep-test "$DEEP_TARGET"
+expect_success "deep target dir exists"                test -d "$DEEP_TARGET"
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

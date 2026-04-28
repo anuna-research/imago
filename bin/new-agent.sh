@@ -37,7 +37,39 @@ if [[ ! "$NAME" =~ ^[a-z][a-z0-9-]*$ ]]; then
   exit 2
 fi
 
-# Create target dir.
+# Refuse to scaffold inside the imago tree itself. We compare the
+# absolute target against the imago root before creating any dirs.
+IMAGO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+# Resolve target's absolute path without requiring it to exist:
+# walk up to the first ancestor that does exist, then re-append.
+RESOLVE_PARENT="$TARGET"
+while [[ ! -d "$RESOLVE_PARENT" ]] && [[ "$RESOLVE_PARENT" != "/" ]]; do
+  RESOLVE_PARENT="$(dirname "$RESOLVE_PARENT")"
+done
+TARGET_PARENT_ABS="$(cd "$RESOLVE_PARENT" && pwd -P)"
+# When the target itself already exists, RESOLVE_PARENT == TARGET and
+# the suffix-strip would no-op (TARGET doesn't end in "/"). Resolve
+# the target directly in that case; otherwise re-append the suffix.
+if [[ "$RESOLVE_PARENT" == "$TARGET" ]]; then
+  TARGET_ABS_PROBE="$(cd "$TARGET" && pwd -P)"
+elif [[ "$RESOLVE_PARENT" == "/" ]]; then
+  # Target's entire ancestor chain is absent; TARGET is already absolute.
+  TARGET_ABS_PROBE="$TARGET"
+else
+  TARGET_ABS_PROBE="$TARGET_PARENT_ABS/${TARGET#$RESOLVE_PARENT/}"
+fi
+
+# Append "/" to the probe and use the alternation "$IMAGO_ROOT"/*|"$IMAGO_ROOT/"
+# so the pattern matches both proper descendants AND the imago root itself.
+case "$TARGET_ABS_PROBE/" in
+  "$IMAGO_ROOT"/*|"$IMAGO_ROOT/")
+    echo "Refusing to scaffold into the imago tree: $TARGET" >&2
+    exit 2
+    ;;
+esac
+
+# Now create the target.
 mkdir -p "$TARGET"
 TARGET_ABS="$(cd "$TARGET" && pwd)"
 
