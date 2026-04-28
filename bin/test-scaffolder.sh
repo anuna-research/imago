@@ -137,6 +137,38 @@ expect_success "output mentions bin/build.sh"       grep -q 'bin/build.sh' <<< "
 expect_success "output mentions ./hint-test"        grep -q '\./hint-test' <<< "$HINT_OUT"
 
 # ---------------------------------------------------------------------------
+echo "# end-to-end (requires SBCL + Quicklisp)"
+QL_SETUP="${HOME}/quicklisp/setup.lisp"
+[[ -f "$QL_SETUP" ]] || QL_SETUP="${HOME}/.quicklisp/setup.lisp"
+
+if command -v sbcl >/dev/null 2>&1 && [[ -f "$QL_SETUP" ]]; then
+  E2E="$TMP_ROOT/e2e"
+  expect_success "scaffold e2e target"               bash "$SCAFFOLDER" e2e "$E2E"
+  expect_success "build.sh runs"                     bash "$E2E/bin/build.sh"
+  expect_success "binary was produced"               test -x "$E2E/e2e"
+  expect_success "binary --version exits 0"          "$E2E/e2e" --version
+  expect_success "binary --echo replies"             "$E2E/e2e" --echo "hello"
+  expect_success "run-tests.sh passes"               bash "$E2E/bin/run-tests.sh"
+
+  # Acceptance criterion #6: clean git status after scaffold (no fasls / binary leak).
+  (
+    cd "$E2E"
+    git init -q
+    git add .
+    UNTRACKED="$(git status --porcelain | grep '^??' || true)"
+    [[ -z "$UNTRACKED" ]] || { echo "leak: $UNTRACKED"; exit 1; }
+  ) && {
+    echo "  ✓ git status clean after build (no untracked fasls/binary)"
+    PASS=$((PASS + 1))
+  } || {
+    echo "  ✗ git status not clean after build"
+    FAIL=$((FAIL + 1))
+  }
+else
+  echo "  ⚠ skipped (sbcl or quicklisp not available)"
+fi
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

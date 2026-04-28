@@ -82,6 +82,18 @@ TARGET_ABS="$(cd "$TARGET" && pwd)"
 # Vendor imago: copy imago.asd, src/, theories/ into TARGET/imago/.
 mkdir -p "$TARGET_ABS/imago"
 cp    "$IMAGO_ROOT/imago.asd"  "$TARGET_ABS/imago/imago.asd"
+
+# The vendored imago.asd references examples/echo, but we don't vendor
+# examples/ (per spec). Patch the asd to drop the examples module and
+# rebalance the trailing parens.
+sed -i.bak \
+  -e '/^   ;; examples\/self-modifying\.lisp is intentionally NOT registered/,/^    :components ((:file "echo")))))$/d' \
+  "$TARGET_ABS/imago/imago.asd"
+sed -i.bak \
+  -e 's/"save-image"))))$/"save-image"))))))/' \
+  "$TARGET_ABS/imago/imago.asd"
+rm -f "$TARGET_ABS/imago/imago.asd.bak"
+
 cp -R "$IMAGO_ROOT/src"        "$TARGET_ABS/imago/src"
 cp -R "$IMAGO_ROOT/theories"   "$TARGET_ABS/imago/theories"
 
