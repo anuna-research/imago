@@ -287,4 +287,9 @@ cat > "$TARGET_ABS/.gitignore" <<EOF
 /$NAME
 EOF
 
-echo "✓ Scaffolded $NAME at $TARGET"
+cat <<EOF
+✓ Scaffolded $NAME at $TARGET
+  cd $TARGET
+  bash bin/build.sh        # ~30s, produces ./$NAME
+  ./$NAME --echo "hi"
+EOF

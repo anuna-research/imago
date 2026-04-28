@@ -128,6 +128,15 @@ expect_success ".gitignore covers fasls"             grep -q '\*.fasl' "$VENDOR_
 expect_success ".gitignore anchors binary name"      grep -q '^/vendor-test$' "$VENDOR_TARGET/.gitignore"
 
 # ---------------------------------------------------------------------------
+echo "# success-output hint"
+HINT_TARGET="$TMP_ROOT/hint-test"
+HINT_OUT="$(bash "$SCAFFOLDER" hint-test "$HINT_TARGET" 2>&1)"
+expect_success "output mentions 'Scaffolded'"        grep -q 'Scaffolded' <<< "$HINT_OUT"
+expect_success "output mentions cd <target>"        grep -q "cd $HINT_TARGET" <<< "$HINT_OUT"
+expect_success "output mentions bin/build.sh"       grep -q 'bin/build.sh' <<< "$HINT_OUT"
+expect_success "output mentions ./hint-test"        grep -q '\./hint-test' <<< "$HINT_OUT"
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
