@@ -32,19 +32,19 @@
 ; TASKS
 ; -----------------------------------------------------------------------------
 
-(given task-scope)               ; pin down thesis, venue, length, audience
-(given task-lit-review)          ; survey adjacent literature
-(given task-outline)             ; section-by-section outline with claims
-(given task-draft-intro)         ; abstract + introduction + contributions
-(given task-draft-background)    ; defeasible logic + LLM agents primer
-(given task-draft-system)        ; the three-layer safety stack
-(given task-draft-eval)          ; empirical runs from EXPERIMENT-LOG.md
-(given task-draft-related)       ; related work
-(given task-draft-discussion)    ; limitations, future work, conclusion
-(given task-review-scope)        ; hugo approves scope
-(given task-review-claims)       ; hugo validates technical claims after drafts land
-(given task-assemble)            ; coherence pass: transitions, voice, length
-(given task-format-final)        ; apply venue style, BibTeX, final pass
+(given task-scope)                  ; pin down thesis, venue, length, audience
+(given task-lit-review)             ; survey adjacent literature
+(given task-outline)                ; section-by-section outline with claims
+(given task-draft-intro)            ; abstract + introduction
+(given task-draft-bitter-lesson)    ; §2 the bitter lesson applied to runtimes
+(given task-draft-substrate)        ; §3 amputable substrate principles
+(given task-draft-existence-proof)  ; §4 anuna-imago as existence proof
+(given task-draft-related)          ; §5 related stances
+(given task-draft-discussion)       ; §6 conclusion (also: limitations)
+(given task-review-scope)           ; hugo approves scope
+(given task-review-claims)          ; hugo validates technical claims after drafts land
+(given task-assemble)               ; coherence pass: transitions, voice, length
+(given task-format-final)           ; pandoc → LaTeX → PDF, build refs.bib
 
 ; Initial readiness — only `scope` has no deps.
 (given no-deps-scope)
@@ -70,28 +70,28 @@
   (acceptance "Outline covers all sections; per-paragraph claims are concrete (not 'discuss X' but 'we show that X')."))
 
 (meta task-draft-intro
-  (description "Draft abstract + introduction + bulleted contributions list. ~600 words. Frames the problem (LLM agents writing code to themselves), the gap in current approaches (mostly sandboxing, no formal-logic gates), and the contribution (three-layer stack with defeasible reasoner). Output: docs/paper/sections/01-intro.md.")
-  (acceptance "Abstract under 200 words, intro under 500 words, contributions bulleted and numbered."))
+  (description "Draft title + abstract + introduction. Working title: 'The amputable substrate: agent runtimes designed against the bitter lesson'. ~150 words abstract + ~400 words intro. Frames the problem: agent runtimes embedding model-capability assumptions age badly. State the thesis upfront. Output: docs/paper/sections/01-intro.md.")
+  (acceptance "Abstract under 200 words. Intro under 450 words. Thesis is in the first paragraph."))
 
-(meta task-draft-background
-  (description "Draft the background section: defeasible logic primer (just enough notation to read floor invariants), LLM agent harness primer, self-modification in dynamic languages. ~700 words. Output: docs/paper/sections/02-background.md.")
-  (acceptance "Self-contained for a reader who knows neither defeasible logic nor agent harnesses."))
+(meta task-draft-bitter-lesson
+  (description "Draft §2: the bitter lesson, applied to runtimes. ~400 words. Argue with named examples that current frameworks have already paid migration cost for assumptions that aged badly — planner modules superseded, prompt templates replaced by tool-use, output parsers replaced by structured outputs. Cite Sutton 2019. Output: docs/paper/sections/02-bitter-lesson.md.")
+  (acceptance "At least 3 concrete framework-decision-that-aged-badly examples. Cites Sutton's bitter-lesson essay. Argument is structural, not roasting specific tools by name."))
 
-(meta task-draft-system
-  (description "Draft the system section: describe the three-layer safety stack (pre-filter denylist, defeasible-logic reasoner querying the floor invariants, handler with rollback register). Include a worked example showing a vetoed call. ~1200 words. Output: docs/paper/sections/03-system.md.")
-  (acceptance "Worked example present. Diagram or pseudocode for the layer-by-layer flow. Cites SPEC-012 and ADR-012."))
+(meta task-draft-substrate
+  (description "Draft §3: the amputable substrate principles. ~500 words. Three principles, each ~150 words: (i) every layer redefinable at runtime without restart, (ii) the artifact IS the heap (image distribution), (iii) safety from invariants, not pipelines. Each principle states the consequence — what design decisions follow, what they refuse to encode. Output: docs/paper/sections/03-substrate.md.")
+  (acceptance "Three principles, each with consequence-paragraph. No implementation details — pure architectural argument."))
 
-(meta task-draft-eval
-  (description "Draft the empirical evaluation section based on EXPERIMENT-LOG.md. Six goal-driven runs with GLM 5.1; flagship result is 'Add persistent memory to yourself' achieved in 6 turns with 18 redefinitions, 3 legitimate vetoes. Compare prescribed-mode vs goal-driven-mode. Discuss limitations. ~800 words. Output: docs/paper/sections/04-eval.md.")
-  (acceptance "Reproduces the EXPERIMENT-LOG.md numbers verbatim where cited. Limitations honest about single model, small N."))
+(meta task-draft-existence-proof
+  (description "Draft §4: anuna-imago as existence proof. ~400 words. Cite scope (~4100 LOC), substrate (SBCL CLOS + save-lisp-and-die), and one worked example: live redefinition of provider-stream! surviving an image save. Brief one-paragraph nod to the SPEC-012 self-modification port as a concrete instance of 'safety from invariants.' Not a product pitch — explicitly note the cost (CL/SBCL lock-in). Output: docs/paper/sections/04-existence-proof.md.")
+  (acceptance "Includes the worked redefinition example. Acknowledges the SBCL/CL cost. Under 450 words."))
 
 (meta task-draft-related
-  (description "Draft related work section. Position against the 3 strongest prior works identified in lit-review. ~400 words. Output: docs/paper/sections/05-related.md.")
-  (acceptance "Each cited work has a one-line distinction from this paper's contribution."))
+  (description "Draft §5: related stances. ~250 words. Position against (a) the Smalltalk image lineage / Lisp Machines (similar substrate spirit, different problem domain), (b) recent agent-framework critiques in the AI-engineering blogosphere, (c) capability-routing literature in distributed systems. Output: docs/paper/sections/05-related.md.")
+  (acceptance "At least 3 distinct positioning anchors. Each cited with a one-line distinction."))
 
 (meta task-draft-discussion
-  (description "Draft discussion + limitations + conclusion. Honest about: single agent runtime (CL/SBCL), defeasible logic engine dependency, manual floor authoring. ~500 words. Output: docs/paper/sections/06-discussion.md.")
-  (acceptance "Limitations section is honest, not dismissive. Conclusion ties back to thesis."))
+  (description "Draft §6: conclusion. ~100 words. Concise restatement; acknowledge the wager (this position could be wrong if model capability plateaus). Output: docs/paper/sections/06-conclusion.md.")
+  (acceptance "Under 150 words. Honest about the wager."))
 
 (meta task-review-claims
   (description "Hugo reads the system + eval drafts and validates technical claims. Specifically: are the three layers described correctly, do the EXPERIMENT-LOG numbers match, are the safety-layer-symbols category descriptions accurate. Asserts (given approved-claims) when validated.")
@@ -131,15 +131,15 @@
 (normally r-ready-draft-intro
   (and task-draft-intro completed-outline completed-lit-review)
   ready-draft-intro)
-(normally r-ready-draft-background
-  (and task-draft-background completed-outline completed-lit-review)
-  ready-draft-background)
-(normally r-ready-draft-system
-  (and task-draft-system completed-outline completed-lit-review)
-  ready-draft-system)
-(normally r-ready-draft-eval
-  (and task-draft-eval completed-outline completed-lit-review)
-  ready-draft-eval)
+(normally r-ready-draft-bitter-lesson
+  (and task-draft-bitter-lesson completed-outline completed-lit-review)
+  ready-draft-bitter-lesson)
+(normally r-ready-draft-substrate
+  (and task-draft-substrate completed-outline completed-lit-review)
+  ready-draft-substrate)
+(normally r-ready-draft-existence-proof
+  (and task-draft-existence-proof completed-outline completed-lit-review)
+  ready-draft-existence-proof)
 (normally r-ready-draft-related
   (and task-draft-related completed-outline completed-lit-review)
   ready-draft-related)
@@ -147,18 +147,20 @@
   (and task-draft-discussion completed-outline completed-lit-review)
   ready-draft-discussion)
 
-; Hugo's claims review gates on the two technical drafts (system + eval).
+; Hugo's claims review gates on the two anuna-imago-specific drafts:
+; the substrate principles (architectural claims) and the existence proof
+; (factual claims about the codebase).
 (normally r-ready-review-claims
-  (and task-review-claims completed-draft-system completed-draft-eval)
+  (and task-review-claims completed-draft-substrate completed-draft-existence-proof)
   ready-review-claims)
 
 ; Assembly gates on ALL drafts complete + claims approved.
 (normally r-ready-assemble
   (and task-assemble
        completed-draft-intro
-       completed-draft-background
-       completed-draft-system
-       completed-draft-eval
+       completed-draft-bitter-lesson
+       completed-draft-substrate
+       completed-draft-existence-proof
        completed-draft-related
        completed-draft-discussion
        approved-claims)
@@ -177,12 +179,12 @@
 (normally r-assign-scope-me        (and ready-scope agent-me-available)             assign-to-scope-me)
 (normally r-assign-lit-me          (and ready-lit-review agent-me-available)        assign-to-lit-review-me)
 (normally r-assign-outline-me      (and ready-outline agent-me-available)           assign-to-outline-me)
-(normally r-assign-intro-me        (and ready-draft-intro agent-me-available)       assign-to-draft-intro-me)
-(normally r-assign-background-me   (and ready-draft-background agent-me-available)  assign-to-draft-background-me)
-(normally r-assign-system-me       (and ready-draft-system agent-me-available)      assign-to-draft-system-me)
-(normally r-assign-eval-me         (and ready-draft-eval agent-me-available)        assign-to-draft-eval-me)
-(normally r-assign-related-me      (and ready-draft-related agent-me-available)     assign-to-draft-related-me)
-(normally r-assign-discussion-me   (and ready-draft-discussion agent-me-available)  assign-to-draft-discussion-me)
+(normally r-assign-intro-me           (and ready-draft-intro agent-me-available)            assign-to-draft-intro-me)
+(normally r-assign-bitter-lesson-me   (and ready-draft-bitter-lesson agent-me-available)    assign-to-draft-bitter-lesson-me)
+(normally r-assign-substrate-me       (and ready-draft-substrate agent-me-available)        assign-to-draft-substrate-me)
+(normally r-assign-existence-proof-me (and ready-draft-existence-proof agent-me-available)  assign-to-draft-existence-proof-me)
+(normally r-assign-related-me         (and ready-draft-related agent-me-available)          assign-to-draft-related-me)
+(normally r-assign-discussion-me      (and ready-draft-discussion agent-me-available)       assign-to-draft-discussion-me)
 (normally r-assign-assemble-me     (and ready-assemble agent-me-available)          assign-to-assemble-me)
 (normally r-assign-format-me       (and ready-format-final agent-me-available)      assign-to-format-final-me)
 
@@ -215,3 +217,119 @@
 (normally r-propagate-review-scope-from-scope-stale-v1 stale-v1-scope upstream-blocked-review-scope)
 (normally r-propagate-review-scope-from-scope-timeout-v1 timeout-v1-scope upstream-blocked-review-scope)
 (normally r-propagate-review-scope-from-scope-blocked upstream-blocked-scope upstream-blocked-review-scope)
+
+(claims agent:me
+  :at "2026-04-28T13:31:14Z"
+  (given completed-scope))
+
+(claims agent:hugo
+  :at "2026-04-28T13:34:38Z"
+  (given claim-v1-review-scope)
+  (normally r-cl-state-v1-review-scope claim-v1-review-scope state-claimed-v1-review-scope)
+  (normally r-cl-chain-v1-review-scope state-claimed-v1-review-scope claimed-review-scope)
+)
+
+(claims agent:hugo
+  :at "2026-04-28T13:34:38Z"
+  (given approved-scope))
+
+(claims agent:hugo
+  :at "2026-04-28T13:34:38Z"
+  (given completed-review-scope))
+
+(claims agent:me
+  :at "2026-04-28T13:35:00Z"
+  (given claim-v1-lit-review)
+  (normally r-cl-state-v1-lit-review claim-v1-lit-review state-claimed-v1-lit-review)
+  (normally r-cl-chain-v1-lit-review state-claimed-v1-lit-review claimed-lit-review)
+)
+
+;; Propagation rules: failures in 'lit-review' block downstream tasks
+(normally r-propagate-draft-bitter-lesson-from-lit-review-failed failed-lit-review upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-bitter-lesson-from-lit-review-permanently-failed permanently-failed-lit-review upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-bitter-lesson-from-lit-review-stale-v1 stale-v1-lit-review upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-bitter-lesson-from-lit-review-timeout-v1 timeout-v1-lit-review upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-bitter-lesson-from-lit-review-blocked upstream-blocked-lit-review upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-discussion-from-lit-review-failed failed-lit-review upstream-blocked-draft-discussion)
+(normally r-propagate-draft-discussion-from-lit-review-permanently-failed permanently-failed-lit-review upstream-blocked-draft-discussion)
+(normally r-propagate-draft-discussion-from-lit-review-stale-v1 stale-v1-lit-review upstream-blocked-draft-discussion)
+(normally r-propagate-draft-discussion-from-lit-review-timeout-v1 timeout-v1-lit-review upstream-blocked-draft-discussion)
+(normally r-propagate-draft-discussion-from-lit-review-blocked upstream-blocked-lit-review upstream-blocked-draft-discussion)
+(normally r-propagate-draft-existence-proof-from-lit-review-failed failed-lit-review upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-existence-proof-from-lit-review-permanently-failed permanently-failed-lit-review upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-existence-proof-from-lit-review-stale-v1 stale-v1-lit-review upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-existence-proof-from-lit-review-timeout-v1 timeout-v1-lit-review upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-existence-proof-from-lit-review-blocked upstream-blocked-lit-review upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-intro-from-lit-review-failed failed-lit-review upstream-blocked-draft-intro)
+(normally r-propagate-draft-intro-from-lit-review-permanently-failed permanently-failed-lit-review upstream-blocked-draft-intro)
+(normally r-propagate-draft-intro-from-lit-review-stale-v1 stale-v1-lit-review upstream-blocked-draft-intro)
+(normally r-propagate-draft-intro-from-lit-review-timeout-v1 timeout-v1-lit-review upstream-blocked-draft-intro)
+(normally r-propagate-draft-intro-from-lit-review-blocked upstream-blocked-lit-review upstream-blocked-draft-intro)
+(normally r-propagate-draft-related-from-lit-review-failed failed-lit-review upstream-blocked-draft-related)
+(normally r-propagate-draft-related-from-lit-review-permanently-failed permanently-failed-lit-review upstream-blocked-draft-related)
+(normally r-propagate-draft-related-from-lit-review-stale-v1 stale-v1-lit-review upstream-blocked-draft-related)
+(normally r-propagate-draft-related-from-lit-review-timeout-v1 timeout-v1-lit-review upstream-blocked-draft-related)
+(normally r-propagate-draft-related-from-lit-review-blocked upstream-blocked-lit-review upstream-blocked-draft-related)
+(normally r-propagate-draft-substrate-from-lit-review-failed failed-lit-review upstream-blocked-draft-substrate)
+(normally r-propagate-draft-substrate-from-lit-review-permanently-failed permanently-failed-lit-review upstream-blocked-draft-substrate)
+(normally r-propagate-draft-substrate-from-lit-review-stale-v1 stale-v1-lit-review upstream-blocked-draft-substrate)
+(normally r-propagate-draft-substrate-from-lit-review-timeout-v1 timeout-v1-lit-review upstream-blocked-draft-substrate)
+(normally r-propagate-draft-substrate-from-lit-review-blocked upstream-blocked-lit-review upstream-blocked-draft-substrate)
+
+;; Transitive propagation: upstream-blocked cascades through dependency chain
+(normally r-propagate-assemble-from-draft-bitter-lesson-blocked upstream-blocked-draft-bitter-lesson upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-discussion-blocked upstream-blocked-draft-discussion upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-existence-proof-blocked upstream-blocked-draft-existence-proof upstream-blocked-assemble)
+(normally r-propagate-review-claims-from-draft-existence-proof-blocked upstream-blocked-draft-existence-proof upstream-blocked-review-claims)
+(normally r-propagate-assemble-from-draft-intro-blocked upstream-blocked-draft-intro upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-related-blocked upstream-blocked-draft-related upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-substrate-blocked upstream-blocked-draft-substrate upstream-blocked-assemble)
+(normally r-propagate-review-claims-from-draft-substrate-blocked upstream-blocked-draft-substrate upstream-blocked-review-claims)
+(normally r-propagate-format-final-from-assemble-blocked upstream-blocked-assemble upstream-blocked-format-final)
+
+(claims agent:me
+  :at "2026-04-28T13:36:02Z"
+  (given completed-lit-review))
+
+(claims agent:me
+  :at "2026-04-28T13:36:02Z"
+  (given claim-v1-outline)
+  (normally r-cl-state-v1-outline claim-v1-outline state-claimed-v1-outline)
+  (normally r-cl-chain-v1-outline state-claimed-v1-outline claimed-outline)
+)
+
+;; Propagation rules: failures in 'outline' block downstream tasks
+(normally r-propagate-draft-bitter-lesson-from-outline-failed failed-outline upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-bitter-lesson-from-outline-permanently-failed permanently-failed-outline upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-bitter-lesson-from-outline-stale-v1 stale-v1-outline upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-bitter-lesson-from-outline-timeout-v1 timeout-v1-outline upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-bitter-lesson-from-outline-blocked upstream-blocked-outline upstream-blocked-draft-bitter-lesson)
+(normally r-propagate-draft-discussion-from-outline-failed failed-outline upstream-blocked-draft-discussion)
+(normally r-propagate-draft-discussion-from-outline-permanently-failed permanently-failed-outline upstream-blocked-draft-discussion)
+(normally r-propagate-draft-discussion-from-outline-stale-v1 stale-v1-outline upstream-blocked-draft-discussion)
+(normally r-propagate-draft-discussion-from-outline-timeout-v1 timeout-v1-outline upstream-blocked-draft-discussion)
+(normally r-propagate-draft-discussion-from-outline-blocked upstream-blocked-outline upstream-blocked-draft-discussion)
+(normally r-propagate-draft-existence-proof-from-outline-failed failed-outline upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-existence-proof-from-outline-permanently-failed permanently-failed-outline upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-existence-proof-from-outline-stale-v1 stale-v1-outline upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-existence-proof-from-outline-timeout-v1 timeout-v1-outline upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-existence-proof-from-outline-blocked upstream-blocked-outline upstream-blocked-draft-existence-proof)
+(normally r-propagate-draft-intro-from-outline-failed failed-outline upstream-blocked-draft-intro)
+(normally r-propagate-draft-intro-from-outline-permanently-failed permanently-failed-outline upstream-blocked-draft-intro)
+(normally r-propagate-draft-intro-from-outline-stale-v1 stale-v1-outline upstream-blocked-draft-intro)
+(normally r-propagate-draft-intro-from-outline-timeout-v1 timeout-v1-outline upstream-blocked-draft-intro)
+(normally r-propagate-draft-intro-from-outline-blocked upstream-blocked-outline upstream-blocked-draft-intro)
+(normally r-propagate-draft-related-from-outline-failed failed-outline upstream-blocked-draft-related)
+(normally r-propagate-draft-related-from-outline-permanently-failed permanently-failed-outline upstream-blocked-draft-related)
+(normally r-propagate-draft-related-from-outline-stale-v1 stale-v1-outline upstream-blocked-draft-related)
+(normally r-propagate-draft-related-from-outline-timeout-v1 timeout-v1-outline upstream-blocked-draft-related)
+(normally r-propagate-draft-related-from-outline-blocked upstream-blocked-outline upstream-blocked-draft-related)
+(normally r-propagate-draft-substrate-from-outline-failed failed-outline upstream-blocked-draft-substrate)
+(normally r-propagate-draft-substrate-from-outline-permanently-failed permanently-failed-outline upstream-blocked-draft-substrate)
+(normally r-propagate-draft-substrate-from-outline-stale-v1 stale-v1-outline upstream-blocked-draft-substrate)
+(normally r-propagate-draft-substrate-from-outline-timeout-v1 timeout-v1-outline upstream-blocked-draft-substrate)
+(normally r-propagate-draft-substrate-from-outline-blocked upstream-blocked-outline upstream-blocked-draft-substrate)
+
+(claims agent:me
+  :at "2026-04-28T13:37:23Z"
+  (given completed-outline))
