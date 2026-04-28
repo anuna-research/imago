@@ -79,4 +79,10 @@ fi
 mkdir -p "$TARGET"
 TARGET_ABS="$(cd "$TARGET" && pwd)"
 
+# Vendor imago: copy imago.asd, src/, theories/ into TARGET/imago/.
+mkdir -p "$TARGET_ABS/imago"
+cp    "$IMAGO_ROOT/imago.asd"  "$TARGET_ABS/imago/imago.asd"
+cp -R "$IMAGO_ROOT/src"        "$TARGET_ABS/imago/src"
+cp -R "$IMAGO_ROOT/theories"   "$TARGET_ABS/imago/theories"
+
 echo "✓ Scaffolded $NAME at $TARGET"

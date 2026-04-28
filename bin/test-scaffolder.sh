@@ -70,6 +70,19 @@ expect_failure "non-empty target without --force"    bash "$SCAFFOLDER" foo "$NO
 expect_success "non-empty target WITH --force"       bash "$SCAFFOLDER" foo "$NONEMPTY" --force
 
 # ---------------------------------------------------------------------------
+echo "# vendoring"
+VENDOR_TARGET="$TMP_ROOT/vendor-test"
+expect_success "scaffolds into fresh target"         bash "$SCAFFOLDER" vendor-test "$VENDOR_TARGET"
+expect_success "imago.asd vendored"                  test -f "$VENDOR_TARGET/imago/imago.asd"
+expect_success "imago/src/ vendored"                 test -d "$VENDOR_TARGET/imago/src"
+expect_success "imago/src/packages.lisp vendored"    test -f "$VENDOR_TARGET/imago/src/packages.lisp"
+expect_success "imago/theories/ vendored"            test -d "$VENDOR_TARGET/imago/theories"
+expect_success "self-modification-floor vendored"    test -f "$VENDOR_TARGET/imago/theories/self-modification-floor.spl"
+expect_failure "plugins/ NOT vendored"               test -d "$VENDOR_TARGET/imago/plugins"
+expect_failure "test/ NOT vendored"                  test -d "$VENDOR_TARGET/imago/test"
+expect_failure "examples/ NOT vendored"              test -d "$VENDOR_TARGET/imago/examples"
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
