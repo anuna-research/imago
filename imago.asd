@@ -46,7 +46,9 @@
                  (:module "providers"
                   :depends-on ("packages" "turn-loop" "tools" "save-image")
                   :components ((:file "stub")
-                               (:file "anthropic" :depends-on ("stub"))))
+                               (:file "anthropic"  :depends-on ("stub"))))
+                 ;; OpenRouter is shipped as a plugin — see imago/openrouter
+                 ;; sub-system below. Not loaded by default.
                  (:file "save-image" :depends-on ("packages" "hooks"
                                                    "receipt-log"))
                  (:file "identity"   :depends-on ("packages" "receipt-log"
@@ -97,3 +99,28 @@
                  (:file "fileops-tools-tests" :depends-on ("m1-tests"))
                  (:file "identity-tests" :depends-on ("m1-tests"))
                  (:file "m12-tests" :depends-on ("m1-tests"))))))
+
+;; ---------------------------------------------------------------------------
+;; Plugins — opt-in subsystems. Load via (ql:quickload :imago/<plugin>) or
+;; (asdf:load-system :imago/<plugin>). Not pulled in by the main :imago
+;; system — these are explicit imports for capabilities that don't belong
+;; in the core 2k LOC harness.
+;; ---------------------------------------------------------------------------
+
+(defsystem #:imago/openrouter
+  :name "imago/openrouter"
+  :description "OpenRouter (OpenAI-compatible) provider driver for imago — opt-in plugin. Use any OpenRouter-served model (GLM, GPT, Gemini, Mistral, Qwen, …) by passing its slug as :model."
+  :version "0.1.0"
+  :license "Apache-2.0"
+  :depends-on (#:imago)
+  :components ((:module "plugins/openrouter"
+                :components ((:file "openrouter")))))
+
+(defsystem #:imago/openrouter/test
+  :name "imago/openrouter/test"
+  :description "Test suite for the OpenRouter plugin. Stubbed HTTP — no live API key needed."
+  :version "0.1.0"
+  :license "Apache-2.0"
+  :depends-on (#:imago/openrouter #:imago/test)
+  :components ((:module "plugins/openrouter"
+                :components ((:file "test")))))

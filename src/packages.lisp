@@ -133,6 +133,18 @@
    #:auth-headers
    #:*anthropic-http-post*
 
+   ;; --- OpenRouter provider (post-spec; OpenAI-compatible) ---
+   #:openrouter-provider
+   #:make-openrouter-provider
+   #:openrouter-api-key
+   #:openrouter-model
+   #:openrouter-base-url
+   #:openrouter-max-tokens
+   #:openrouter-temperature
+   #:openrouter-site-url
+   #:openrouter-app-name
+   #:*openrouter-http-post*
+
    ;; --- M6 / cbcl FFI ---
    #:*cbcl-ffi-library-path*
    #:ensure-cbcl-ffi-loaded

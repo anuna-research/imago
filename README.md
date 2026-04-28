@@ -331,6 +331,35 @@ Those are exactly the "agent framework" abstractions this project's
 bitter-lesson stance refuses — schema-volatile across providers, and
 better served by MCP servers or per-project tool modules.
 
+#### Plugins (opt-in ASDF subsystems)
+
+Capabilities that don't belong in the core 2k LOC harness ship as
+plugins under [`plugins/`](./plugins). Load with
+`(ql:quickload :imago/<plugin>)`; main `:imago` system stays unaware.
+
+| Plugin | Load with | Provides |
+|---|---|---|
+| `imago/openrouter` | `(ql:quickload :imago/openrouter)` | OpenAI-compatible driver for any [OpenRouter](https://openrouter.ai)-served model: GLM, GPT, Claude, Gemini, Qwen, Mistral, … Pass the slug as `:model`, e.g. `"z-ai/glm-5.1"` (default), `"openai/gpt-4o"`, `"anthropic/claude-opus-4-7"` |
+
+```lisp
+;; Example: GLM 5.1 via OpenRouter
+(ql:quickload :imago/openrouter)
+(let ((provider (anuna-imago:make-openrouter-provider
+                  :model "z-ai/glm-5.1"
+                  :app-name "imago-experiment"        ; optional, dashboard label
+                  :site-url "https://example.com")))   ; optional
+  ;; OPENROUTER_API_KEY in env, or :api-key here.
+  (make-instance 'anuna-imago:agent
+                 :id 'glm
+                 :provider provider
+                 :system-prompt "You are concise."
+                 :tools '(anuna-imago:harness-list-tools)))
+```
+
+The plugin reuses the existing `provider-stream!` contract — the same
+agent definition, supervision, hook chain, and self-modification port
+work unchanged with any OpenRouter-served model.
+
 #### Opt-in: self-modification port
 
 A `harness-eval` tool — submit a Common Lisp source form, get it
@@ -529,6 +558,10 @@ anuna-imago/
 │   ├── ADR-013-self-mod-oq-decisions.md
 │   │                                 OQ-001..004 resolutions
 │   └── CHECKING.md                   :clean t audit checklist
+├── plugins/                          opt-in subsystems — load via
+│   └── openrouter/                   (ql:quickload :imago/<plugin>)
+│       ├── openrouter.lisp           OpenRouter (OpenAI-compatible) driver
+│       └── test.lisp                 stubbed-HTTP test suite
 ├── plan.spl                          SPEC-011 implementation plan (hence)
 ├── plan.spec-012.spl                 SPEC-012 implementation plan (hence)
 └── .github/workflows/ci.yml          matrix CI + LOC-budget gate
