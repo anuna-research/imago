@@ -41,7 +41,7 @@
 
 - ¶1 (~80 words). Define the term. *Amputable substrate*: a runtime where every layer is removable, replaceable, or redefinable in flight. The framework provides infrastructure; the user provides the choices the framework would otherwise have made for them. Name the three principles to be developed.
 - ¶2 — Principle 1: every layer redefinable at runtime without restart (~140 words).
-  - Claim: late binding everywhere — methods are dispatch points, not call sites.
+  - Claim: late binding everywhere — methods are dispatch points, not call sites. The lineage runs through McCarthy's metacircular `eval` [McCarthy 1960] and its descendants in Lisp and Smalltalk.
   - Consequence: when a built-in turns out to encode an obsolete assumption, you redefine it at the live REPL instead of filing a framework migration ticket.
   - Consequence: the framework refuses to bake "the right way to do X" into a closed implementation. Instead it exposes the seams where X is dispatched.
   - Concrete: in CLOS, `defmethod` is a runtime operation. Tool dispatch, hook chain, provider streaming — all method calls — are all redefinable.
@@ -69,7 +69,7 @@
 
 ## §5. Related stances — 250 words
 
-- ¶1 (~80 words). The Smalltalk-image / Lisp-Machine lineage [Goldberg & Robson 1983]. Same substrate spirit (image-as-artifact, late binding, REPL); applied to *integrated development*, not LLM-agent runtimes. We claim the spirit transfers and the bitter lesson makes it newly important.
+- ¶1 (~80 words). The Lisp / Smalltalk-image lineage [McCarthy 1960; Goldberg & Robson 1983]. Same substrate spirit (eval/apply self-reference, late binding, image-as-artifact); applied to *integrated development*, not LLM-agent runtimes. We claim the spirit transfers and the bitter lesson makes it newly important.
 - ¶2 (~80 words). Anthropic's "Building Effective Agents" [Anthropic 2024] argues empirically that simpler agent loops outperform complex multi-agent orchestration frameworks. We arrive at a convergent practical stance via a different argument (bitter-lesson → substrate). Both directions point at the same conclusion.
 - ¶3 (~90 words). The Erlang/OTP supervision tradition [Armstrong 2003]. anuna-imago's `make-supervisor` is a direct CLOS port of Armstrong's one-for-one supervisor. The contribution is not the supervisor — the contribution is *limiting framework scope to such established prior art* and pushing everything else to user code.
 

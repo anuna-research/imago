@@ -37,7 +37,18 @@ unless space allows.
 
 ---
 
-## Thread 2 — The Smalltalk-image / Lisp-Machine lineage
+## Thread 2 — The Lisp / Smalltalk-image lineage
+
+### ⭐ McCarthy, J. (1960). "Recursive Functions of Symbolic Expressions and Their Computation by Machine, Part I." *Communications of the ACM* 3(4):184–195.
+
+The foundational Lisp paper. Introduces S-expressions, the metacircular
+`eval` / `apply` duality, and the idea that a language can interpret its own
+representation. **Position to:** primary provenance for §3 Principle 1
+("every layer redefinable"). The substrate spirit anuna-imago inherits is
+the Lisp tradition's, not Smalltalk's — Smalltalk later applied the same
+ideas to a different problem domain. We cite McCarthy as the origin of
+late-binding / runtime-redefinable computation, then Goldberg & Robson as
+its full image-based development environment.
 
 ### ⭐ Goldberg, A. & Robson, D. (1983). *Smalltalk-80: The Language and its Implementation.*
 
@@ -133,9 +144,11 @@ length.
 
 1. **Sutton (2019)** — The bitter lesson. We extend it from research methods
    to runtime architecture; he doesn't make this step explicitly.
-2. **Goldberg & Robson (1983)** — Smalltalk image. Same substrate spirit;
-   we apply it to LLM-agent runtimes specifically and argue the bitter lesson
-   makes it newly important.
+2. **McCarthy (1960) + Goldberg & Robson (1983)** — The Lisp / Smalltalk
+   image lineage. Same substrate spirit; we apply it to LLM-agent runtimes
+   specifically and argue the bitter lesson makes it newly important. Cite
+   McCarthy as origin of metacircular / redefinable computation; Goldberg
+   & Robson as its full IDE realisation.
 3. **Anthropic (2024)** — "Building Effective Agents." Convergent practical
    stance; we provide the theoretical-framework argument (bitter lesson →
    amputable substrate).

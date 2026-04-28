@@ -333,3 +333,113 @@
 (claims agent:me
   :at "2026-04-28T13:37:23Z"
   (given completed-outline))
+
+(claims agent:me
+  :at "2026-04-28T13:41:26Z"
+  (given claim-v1-draft-intro)
+  (normally r-cl-state-v1-draft-intro claim-v1-draft-intro state-claimed-v1-draft-intro)
+  (normally r-cl-chain-v1-draft-intro state-claimed-v1-draft-intro claimed-draft-intro)
+)
+
+;; Propagation rules: failures in 'draft-intro' block downstream tasks
+(normally r-propagate-assemble-from-draft-intro-failed failed-draft-intro upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-intro-permanently-failed permanently-failed-draft-intro upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-intro-stale-v1 stale-v1-draft-intro upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-intro-timeout-v1 timeout-v1-draft-intro upstream-blocked-assemble)
+
+(claims agent:me
+  :at "2026-04-28T13:41:52Z"
+  (given completed-draft-intro))
+
+(claims agent:me
+  :at "2026-04-28T13:41:52Z"
+  (given claim-v1-draft-bitter-lesson)
+  (normally r-cl-state-v1-draft-bitter-lesson claim-v1-draft-bitter-lesson state-claimed-v1-draft-bitter-lesson)
+  (normally r-cl-chain-v1-draft-bitter-lesson state-claimed-v1-draft-bitter-lesson claimed-draft-bitter-lesson)
+)
+
+;; Propagation rules: failures in 'draft-bitter-lesson' block downstream tasks
+(normally r-propagate-assemble-from-draft-bitter-lesson-failed failed-draft-bitter-lesson upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-bitter-lesson-permanently-failed permanently-failed-draft-bitter-lesson upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-bitter-lesson-stale-v1 stale-v1-draft-bitter-lesson upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-bitter-lesson-timeout-v1 timeout-v1-draft-bitter-lesson upstream-blocked-assemble)
+
+(claims agent:me
+  :at "2026-04-28T13:42:16Z"
+  (given completed-draft-bitter-lesson))
+
+(claims agent:me
+  :at "2026-04-28T13:42:16Z"
+  (given claim-v1-draft-substrate)
+  (normally r-cl-state-v1-draft-substrate claim-v1-draft-substrate state-claimed-v1-draft-substrate)
+  (normally r-cl-chain-v1-draft-substrate state-claimed-v1-draft-substrate claimed-draft-substrate)
+)
+
+;; Propagation rules: failures in 'draft-substrate' block downstream tasks
+(normally r-propagate-assemble-from-draft-substrate-failed failed-draft-substrate upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-substrate-permanently-failed permanently-failed-draft-substrate upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-substrate-stale-v1 stale-v1-draft-substrate upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-substrate-timeout-v1 timeout-v1-draft-substrate upstream-blocked-assemble)
+(normally r-propagate-review-claims-from-draft-substrate-failed failed-draft-substrate upstream-blocked-review-claims)
+(normally r-propagate-review-claims-from-draft-substrate-permanently-failed permanently-failed-draft-substrate upstream-blocked-review-claims)
+(normally r-propagate-review-claims-from-draft-substrate-stale-v1 stale-v1-draft-substrate upstream-blocked-review-claims)
+(normally r-propagate-review-claims-from-draft-substrate-timeout-v1 timeout-v1-draft-substrate upstream-blocked-review-claims)
+
+(claims agent:me
+  :at "2026-04-28T13:42:45Z"
+  (given completed-draft-substrate))
+
+(claims agent:me
+  :at "2026-04-28T13:42:45Z"
+  (given claim-v1-draft-existence-proof)
+  (normally r-cl-state-v1-draft-existence-proof claim-v1-draft-existence-proof state-claimed-v1-draft-existence-proof)
+  (normally r-cl-chain-v1-draft-existence-proof state-claimed-v1-draft-existence-proof claimed-draft-existence-proof)
+)
+
+;; Propagation rules: failures in 'draft-existence-proof' block downstream tasks
+(normally r-propagate-assemble-from-draft-existence-proof-failed failed-draft-existence-proof upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-existence-proof-permanently-failed permanently-failed-draft-existence-proof upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-existence-proof-stale-v1 stale-v1-draft-existence-proof upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-existence-proof-timeout-v1 timeout-v1-draft-existence-proof upstream-blocked-assemble)
+(normally r-propagate-review-claims-from-draft-existence-proof-failed failed-draft-existence-proof upstream-blocked-review-claims)
+(normally r-propagate-review-claims-from-draft-existence-proof-permanently-failed permanently-failed-draft-existence-proof upstream-blocked-review-claims)
+(normally r-propagate-review-claims-from-draft-existence-proof-stale-v1 stale-v1-draft-existence-proof upstream-blocked-review-claims)
+(normally r-propagate-review-claims-from-draft-existence-proof-timeout-v1 timeout-v1-draft-existence-proof upstream-blocked-review-claims)
+
+(claims agent:me
+  :at "2026-04-28T13:43:16Z"
+  (given completed-draft-existence-proof))
+
+(claims agent:me
+  :at "2026-04-28T13:43:16Z"
+  (given claim-v1-draft-related)
+  (normally r-cl-state-v1-draft-related claim-v1-draft-related state-claimed-v1-draft-related)
+  (normally r-cl-chain-v1-draft-related state-claimed-v1-draft-related claimed-draft-related)
+)
+
+;; Propagation rules: failures in 'draft-related' block downstream tasks
+(normally r-propagate-assemble-from-draft-related-failed failed-draft-related upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-related-permanently-failed permanently-failed-draft-related upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-related-stale-v1 stale-v1-draft-related upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-related-timeout-v1 timeout-v1-draft-related upstream-blocked-assemble)
+
+(claims agent:me
+  :at "2026-04-28T13:43:38Z"
+  (given completed-draft-related))
+
+(claims agent:me
+  :at "2026-04-28T13:43:38Z"
+  (given claim-v1-draft-discussion)
+  (normally r-cl-state-v1-draft-discussion claim-v1-draft-discussion state-claimed-v1-draft-discussion)
+  (normally r-cl-chain-v1-draft-discussion state-claimed-v1-draft-discussion claimed-draft-discussion)
+)
+
+;; Propagation rules: failures in 'draft-discussion' block downstream tasks
+(normally r-propagate-assemble-from-draft-discussion-failed failed-draft-discussion upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-discussion-permanently-failed permanently-failed-draft-discussion upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-discussion-stale-v1 stale-v1-draft-discussion upstream-blocked-assemble)
+(normally r-propagate-assemble-from-draft-discussion-timeout-v1 timeout-v1-draft-discussion upstream-blocked-assemble)
+
+(claims agent:me
+  :at "2026-04-28T13:43:52Z"
+  (given completed-draft-discussion))
