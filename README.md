@@ -2,6 +2,7 @@
 
 <!-- PROJECT SHIELDS -->
 [![Apache 2.0 License][license-shield]][license-url]
+[![Status: Experimental][status-shield]][status-url]
 [![Common Lisp][cl-shield]][cl-url]
 [![SBCL 2.6+][sbcl-shield]][sbcl-url]
 [![Tests][tests-shield]][tests-url]
@@ -18,9 +19,6 @@
     <br />
     Build your agent at the REPL · save it as a single binary ·
     redefine any function in flight without restart.
-    <br />
-    <br />
-    <a href="https://codeberg.org/anuna/anuna-code/src/branch/main/spec/SPEC-011-image-harness.md"><strong>Read the spec »</strong></a>
     <br />
     <br />
     <a href="#try-it">Try it</a>
@@ -83,9 +81,9 @@ routing, image distribution, runtime safety invariants. If a layer turns
 out to encode an obsolete assumption, you redefine it at the live REPL
 instead of filing a framework migration ticket.
 
-This is the working implementation of [SPEC-011][spec-url], constrained
-to roughly 2000 lines of Common Lisp. The runtime is supervised processes.
-The wire is CBCL. The substrate is fully redefinable in flight.
+The implementation is constrained to roughly 2000 lines of Common Lisp.
+The runtime is supervised processes. The wire is CBCL. The substrate is
+fully redefinable in flight.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -281,8 +279,8 @@ style rules — before exposing these to an agent.
 | `harness-list-directory` | `:read` | Sorted file + subdirectory names |
 
 What's deliberately **not** shipped: HTTP fetch, web search, shell exec.
-Those are exactly the "agent framework" abstractions SPEC-011's
-bitter-lesson stance refused — schema-volatile across providers, and
+Those are exactly the "agent framework" abstractions this project's
+bitter-lesson stance refuses — schema-volatile across providers, and
 better served by MCP servers or per-project tool modules. Two opt-in
 trapdoors (`harness-eval` and `harness-redefine-method`) for
 self-modification will live in `examples/self-modifying.lisp` so the
@@ -737,8 +735,6 @@ more information.
 
 Project Link: <https://codeberg.org/anuna/imago>
 
-Spec: <https://codeberg.org/anuna/anuna-code/src/branch/main/spec/SPEC-011-image-harness.md>
-
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 
@@ -746,7 +742,6 @@ Spec: <https://codeberg.org/anuna/anuna-code/src/branch/main/spec/SPEC-011-image
 <!-- ACKNOWLEDGMENTS -->
 ## Acknowledgments
 
-* [SPEC-011][spec-url] — the original specification this implementation derives from
 * [SBCL][sbcl-url] — the runtime that makes image-as-artifact + live redefinition real
 * [websocket-driver][wsd-url] — clean WS protocol implementation, server + client
 * [dexador][dex-url] — HTTP+SSE used by the Anthropic provider
@@ -800,4 +795,5 @@ Further reading, in roughly the order you'd want to read them:
 [cbcl-tile]:        https://img.shields.io/badge/cbcl--rs-Lean_verified-darkgreen?style=flat-square
 [cbcl-url]:         https://codeberg.org/anuna/cbcl-rs
 
-[spec-url]:         https://codeberg.org/anuna/anuna-code/src/branch/main/spec/SPEC-011-image-harness.md
+[status-shield]:    https://img.shields.io/badge/status-experimental-orange.svg?style=for-the-badge
+[status-url]:       #about-the-project
