@@ -85,4 +85,16 @@ cp    "$IMAGO_ROOT/imago.asd"  "$TARGET_ABS/imago/imago.asd"
 cp -R "$IMAGO_ROOT/src"        "$TARGET_ABS/imago/src"
 cp -R "$IMAGO_ROOT/theories"   "$TARGET_ABS/imago/theories"
 
+# Generate <name>.asd at the project root.
+cat > "$TARGET_ABS/$NAME.asd" <<EOF
+(defsystem #:$NAME
+  :name "$NAME"
+  :description "An agent built on anuna-imago."
+  :version "0.1.0"
+  :license "TODO"
+  :depends-on (#:imago)
+  :components ((:module "src"
+                :components ((:file "agent")))))
+EOF
+
 echo "✓ Scaffolded $NAME at $TARGET"

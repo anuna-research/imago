@@ -83,6 +83,12 @@ expect_failure "test/ NOT vendored"                  test -d "$VENDOR_TARGET/ima
 expect_failure "examples/ NOT vendored"              test -d "$VENDOR_TARGET/imago/examples"
 
 # ---------------------------------------------------------------------------
+echo "# .asd generation"
+expect_success ".asd file exists"                    test -f "$VENDOR_TARGET/vendor-test.asd"
+expect_success ".asd has correct system name"        grep -q '#:vendor-test' "$VENDOR_TARGET/vendor-test.asd"
+expect_success ".asd depends on imago"               grep -q ':depends-on (#:imago)' "$VENDOR_TARGET/vendor-test.asd"
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
