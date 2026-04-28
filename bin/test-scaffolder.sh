@@ -107,6 +107,16 @@ expect_success "build.sh names binary correctly"     grep -q '"vendor-test"' "$V
 expect_success "build.sh saves with toplevel"        grep -q "vendor-test::toplevel" "$VENDOR_TARGET/bin/build.sh"
 
 # ---------------------------------------------------------------------------
+echo "# smoke test + run-tests.sh generation"
+expect_success "test/smoke.lisp exists"              test -f "$VENDOR_TARGET/test/smoke.lisp"
+expect_success "smoke.lisp uses correct package"     grep -q '(in-package #:vendor-test)' "$VENDOR_TARGET/test/smoke.lisp"
+expect_success "smoke.lisp defines run-smoke"        grep -q '(defun run-smoke' "$VENDOR_TARGET/test/smoke.lisp"
+expect_success "bin/run-tests.sh exists"             test -f "$VENDOR_TARGET/bin/run-tests.sh"
+expect_success "run-tests.sh is executable"          test -x "$VENDOR_TARGET/bin/run-tests.sh"
+expect_success "run-tests.sh loads system first"     grep -q ':vendor-test' "$VENDOR_TARGET/bin/run-tests.sh"
+expect_success "run-tests.sh calls run-smoke"        grep -q 'vendor-test::run-smoke' "$VENDOR_TARGET/bin/run-tests.sh"
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -190,4 +190,48 @@ sbcl --no-userinit --no-sysinit --non-interactive \\
 EOF
 chmod +x "$TARGET_ABS/bin/build.sh"
 
+# Generate test/smoke.lisp.
+mkdir -p "$TARGET_ABS/test"
+cat > "$TARGET_ABS/test/smoke.lisp" <<EOF
+;;;; test/smoke.lisp — minimal smoke test
+;;;; Asserts the agent can be built, spawned, asked, and drained.
+;;;; Extend this with real assertions as your agent grows behaviour.
+
+(in-package #:$NAME)
+
+(defun run-smoke ()
+  (let* ((sup   (anuna-imago:make-supervisor 'smoke-sup))
+         (agent (build-agent)))
+    (anuna-imago:spawn-agent! sup agent)
+    (sleep 0.05)
+    (let ((reply (anuna-imago:ask-agent agent "ping")))
+      (assert (getf reply :text) ()
+              "Expected a non-empty :text in reply, got ~S" reply)
+      (format t "~&✓ smoke: agent replied ~S~%" (getf reply :text)))
+    (anuna-imago:send! (anuna-imago:agent-mailbox agent) :shutdown)
+    (sleep 0.05)
+    (anuna-imago:drain-supervisor! sup)
+    :ok))
+EOF
+
+# Generate bin/run-tests.sh.
+cat > "$TARGET_ABS/bin/run-tests.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "\$(dirname "\$0")/.."
+
+QL_SETUP="\${HOME}/quicklisp/setup.lisp"
+[[ -f "\$QL_SETUP" ]] || QL_SETUP="\${HOME}/.quicklisp/setup.lisp"
+[[ -f "\$QL_SETUP" ]] || { echo "quicklisp not found; install it first"; exit 1; }
+
+sbcl --no-userinit --no-sysinit --non-interactive \\
+     --load "\$QL_SETUP" \\
+     --eval "(push (truename \\"./\\")       asdf:*central-registry*)" \\
+     --eval "(push (truename \\"./imago/\\") asdf:*central-registry*)" \\
+     --eval "(asdf:load-system :$NAME)" \\
+     --load "test/smoke.lisp" \\
+     --eval "($NAME::run-smoke)"
+EOF
+chmod +x "$TARGET_ABS/bin/run-tests.sh"
+
 echo "✓ Scaffolded $NAME at $TARGET"
