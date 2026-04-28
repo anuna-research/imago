@@ -1,6 +1,6 @@
 # §1. Introduction
 
-**Title.** *The amputable substrate: agent runtimes designed against the bitter lesson.*
+**Title.** *Modular, self-evolving agent runtimes.*
 
 ## Abstract
 
@@ -11,7 +11,8 @@ bitter lesson: as model capability climbs, scaffolding becomes obsolete and
 the framework's value collapses into migration burden. We argue that agent
 runtimes should commit to *operational scaffolding only* — supervision,
 identity, audit, capability routing — and treat every other layer as an
-*amputable substrate* that the user can redefine in flight. Three principles
+part of a *modular, self-evolving runtime* — one the user can redefine in
+flight, and one the agent itself can extend under safety gates. Three principles
 follow: every layer redefinable at runtime without restart, the runtime
 artifact is the heap, and safety comes from invariants, not pipelines. We
 offer **anuna-imago**, a ~4100-LOC SBCL Common Lisp harness, as an existence

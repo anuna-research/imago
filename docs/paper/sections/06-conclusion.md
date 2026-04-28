@@ -2,7 +2,7 @@
 
 Agent runtimes should commit to operational scaffolding only — supervision,
 identity, audit, capability routing — and treat every other layer as an
-amputable substrate the user can redefine in flight. Three principles
+modular, self-evolving runtime that the user, or the agent itself, can redefine in flight. Three principles
 implement the position: live redefinition, image-as-artifact, invariants
 not pipelines. anuna-imago, ~4100 LOC of Common Lisp, demonstrates that the
 position is realisable. The wager is plain: if model capability plateaus in

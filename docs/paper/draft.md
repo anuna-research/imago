@@ -1,4 +1,4 @@
-# The amputable substrate: agent runtimes designed against the bitter lesson
+# Modular, self-evolving agent runtimes
 
 <div class="meta">
 
@@ -8,7 +8,7 @@
 
 ## Abstract
 
-Most LLM-agent frameworks today embed assumptions about what models can or cannot do — planner modules, prompt-template engines, output parsers, hand-written tool-dispatch logic. Such assumptions age badly under Sutton's bitter lesson: as model capability climbs, scaffolding becomes obsolete and the framework's value collapses into migration burden. We argue that agent runtimes should commit to *operational scaffolding only* — supervision, identity, audit, capability routing — and treat every other layer as an *amputable substrate* that the user can redefine in flight. Three principles follow: every layer redefinable at runtime without restart, the runtime artifact is the heap, and safety comes from invariants, not pipelines. We offer **anuna-imago**, a ~4100-LOC SBCL Common Lisp harness, as an existence proof. We acknowledge the wager openly: if model capability plateaus, the prescriptive frameworks were correct to bake in scaffolding.
+Most LLM-agent frameworks today embed assumptions about what models can or cannot do — planner modules, prompt-template engines, output parsers, hand-written tool-dispatch logic. Such assumptions age badly under Sutton's bitter lesson: as model capability climbs, scaffolding becomes obsolete and the framework's value collapses into migration burden. We argue that agent runtimes should commit to *operational scaffolding only* — supervision, identity, audit, capability routing — and treat every other layer as part of a *modular, self-evolving runtime* — one the user can redefine in flight, and one the agent itself can extend under safety gates. Three principles follow: every layer redefinable at runtime without restart, the runtime artifact is the heap, and safety comes from invariants, not pipelines. We offer **anuna-imago**, a ~4100-LOC SBCL Common Lisp harness, as an existence proof. We acknowledge the wager openly: if model capability plateaus, the prescriptive frameworks were correct to bake in scaffolding.
 
 ## 1. Introduction
 
@@ -30,9 +30,9 @@ A natural counterargument is that *every* framework needs *some* opinion — the
 
 The migration cost of capability-tracking opinions is underdiscussed. Each time a model generation obsoletes a framework abstraction, engineering teams choose between rewriting against the new framework idiom (paying migration debt) or carrying dead code paths (paying maintenance debt). Neither outcome rewards the original choice. A framework that confines itself to operational concerns *cannot owe* this migration debt, because the operations themselves did not change.
 
-## 3. The amputable substrate
+## 3. The modular, self-evolving runtime
 
-We use *amputable substrate* to name a runtime in which every layer is removable, replaceable, or redefinable in flight. The framework provides infrastructure for the choices that don't depend on model capability; the user provides the choices that do. Three principles make the term concrete.
+We use *modular, self-evolving runtime* to name an agent harness in which (a) every layer is replaceable or redefinable while the system runs, and (b) the agent itself can extend or rewrite its own runtime under safety gates. The framework provides infrastructure for the choices that don't depend on model capability; the user — or, where invariants permit, the agent — provides the choices that do. Three principles make the term concrete.
 
 ### 3.1 Every layer redefinable at runtime without restart
 
@@ -98,7 +98,7 @@ The position has antecedents and convergent neighbours.
 
 ## 6. Conclusion
 
-Agent runtimes should commit to operational scaffolding only — supervision, identity, audit, capability routing — and treat every other layer as an amputable substrate the user can redefine in flight. Three principles implement the position: live redefinition, image-as-artifact, invariants not pipelines. anuna-imago, ~4100 LOC of Common Lisp, demonstrates that the position is realisable. The wager is plain: if model capability plateaus in the next several years, prescriptive frameworks were correct to bake in scaffolding and we paid for under-engineering. If capability continues climbing, prescriptive frameworks pay migration debt forever and the substrate position wins by attrition. The artifact is at `codeberg.org/anuna/imago`. Take it apart.
+Agent runtimes should commit to operational scaffolding only — supervision, identity, audit, capability routing — and treat every other layer as part of a modular, self-evolving runtime that the user, or the agent itself, can redefine in flight. Three principles implement the position: live redefinition, image-as-artifact, invariants not pipelines. anuna-imago, ~4100 LOC of Common Lisp, demonstrates that the position is realisable. The wager is plain: if model capability plateaus in the next several years, prescriptive frameworks were correct to bake in scaffolding and we paid for under-engineering. If capability continues climbing, prescriptive frameworks pay migration debt forever and the modular-runtime position wins by attrition. The artifact is at `codeberg.org/anuna/imago`. Take it apart.
 
 ## References
 

@@ -1,9 +1,12 @@
-# §3. The amputable substrate
+# §3. The modular, self-evolving runtime
 
-We use *amputable substrate* to name a runtime in which every layer is
-removable, replaceable, or redefinable in flight. The framework provides
-infrastructure for the choices that don't depend on model capability; the
-user provides the choices that do. Three principles make the term concrete.
+We use *modular, self-evolving runtime* to name an agent harness in which
+(a) every layer is replaceable or redefinable while the system runs, and
+(b) the agent itself can extend or rewrite its own runtime under safety
+gates. The framework provides infrastructure for the choices that don't
+depend on model capability; the user — or, where invariants permit, the
+agent — provides the choices that do. Three principles make the term
+concrete.
 
 ## Principle 1: every layer redefinable at runtime without restart
 
