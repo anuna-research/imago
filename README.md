@@ -329,10 +329,59 @@ style rules — before exposing these to an agent.
 What's deliberately **not** shipped: HTTP fetch, web search, shell exec.
 Those are exactly the "agent framework" abstractions this project's
 bitter-lesson stance refuses — schema-volatile across providers, and
-better served by MCP servers or per-project tool modules. Two opt-in
-trapdoors (`harness-eval` and `harness-redefine-method`) for
-self-modification will live in `examples/self-modifying.lisp` so the
-author has to consciously enable them.
+better served by MCP servers or per-project tool modules.
+
+#### Opt-in: self-modification port
+
+A `harness-eval` tool — submit a Common Lisp source form, get it
+evaluated in the harness's runtime — plus five introspection siblings
+live in [`examples/self-modifying.lisp`](./examples/self-modifying.lisp)
+under explicit author opt-in. The file is **not** loaded by ASDF; the
+author must `(load …)` it and call `(install-self-modification-tools!)`
+after loading a defeasible-logic theory. Three layers gate every
+`harness-eval` call:
+
+1. **Pre-filter** — fast structural denylist (`unintern`,
+   `delete-package`, `(setf (symbol-function …) …)`, `eval`, `load`,
+   reader-macro mutators, `sb-thread:interrupt-thread`, `defmethod`
+   against any safety-layer generic, etc.).
+2. **Reasoner** — the form is lifted to facts (operator, target,
+   defmethod-targets, free-symbols incl. body-buried) and the active
+   Spindle theory is queried for `(forbidden eval-call …)`. The shipped
+   floor invariants block any mention of any safety-layer symbol.
+3. **Handler** — evaluates in a worker thread under a timeout (default
+   1 s, max 30 s), captures method-set diffs for rollback, writes a
+   verbatim audit-log entry, updates a queryable origin index.
+
+The full surface is specified in
+[`specs/SPEC-012-self-modification-port.md`](./specs/SPEC-012-self-modification-port.md);
+the in-context adversarial review of CON-002/003 found 11 bypass shapes
+and is recorded in
+[`architecture/ADR-012-self-mod-adversarial-review.md`](./architecture/ADR-012-self-mod-adversarial-review.md).
+Operators can `(unregister-tool! 'harness-eval)` from the REPL at any
+time and re-snapshot the image without it.
+
+```lisp
+;; Opt-in pattern:
+(load "examples/self-modifying.lisp")
+(let* ((floor (uiop:read-file-string "theories/self-modification-floor.spl"))
+       (handle (load-theory floor)))
+  (install-invariant-filter! :theory-handle handle)
+  (install-self-modification-tools!))   ; → :ok | :no-active-theory
+```
+
+Six tools register together (`*self-modification-tool-names*`). The five
+siblings give the LLM agent enough runtime context to use `harness-eval`
+without trial-and-error against the safety stack:
+
+| Name | Permission | Returns |
+|---|---|---|
+| `harness-eval` | `:eval` | The evaluated value, or a structured rejection / veto / error / timeout plist (see CON-001 prose in the tool's `:description`) |
+| `harness-list-safety-layer` | `:read` | The forbidden symbol set, optionally filtered by `:prefix` — "what NOT to redefine" |
+| `harness-redefine-history` | `:read` | Per-symbol summary `{:symbol :event-count :latest}`, or with `:symbol` the most-recent N events for that symbol |
+| `harness-list-rollbacks` | `:read` | Lightweight summary of `*rollback-register*` — index, kind, symbol, installed-at, rolled-back |
+| `harness-rollback` | `:execute` | Re-installs the prior method/fdefinition for `:index`. Returns `{:status :ok|:no-such-record|:already-rolled-back :index N}`. Itself audited |
+| `harness-query-self-mod-receipts` | `:read` | Recent harness-eval audit-log entries (distinct from `harness-query-receipts`, which reads the SPEC-011 ASK/reply log) |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -454,20 +503,34 @@ anuna-imago/
 │   ├── wss-transport.lisp            websocket-driver-backed transport
 │   ├── cbcl-ffi.lisp                 CBCL parser via FFI to cbcl-rs
 │   ├── reasoner.lisp                 Spindle IPC + invariant filter
+│   ├── self-modification.lisp        SPEC-012 harness-eval (handler,
+│   │                                 prefilter, lift, origin index, rollback)
 │   │
 │   └── providers/
 │       ├── stub.lisp                 canned-response provider for tests
 │       └── anthropic.lisp            Messages API + mockable HTTP
 │
-├── test/                             milestone suites (M1–M11) plus
+├── test/                             milestone suites (M1–M11, M12) plus
 │                                     M7-WSS, M7-Producer, builtin-tools,
 │                                     fileops-tools, identity
-├── examples/echo.lisp                reference echo agent
+├── examples/
+│   ├── echo.lisp                     reference echo agent
+│   └── self-modifying.lisp           opt-in install-self-modification-tools!
+│                                     (NOT registered by ASDF — REQ-001)
+├── theories/
+│   └── self-modification-floor.spl   SPEC-012 floor invariants (Spindle)
+├── specs/
+│   └── SPEC-012-self-modification-port.md  agent self-modification port
 ├── architecture/
 │   ├── ADR-001-image-runtime.md      why SBCL (not ECL)
 │   ├── ADR-002-identity.md           why did:key (not did:web/plc)
+│   ├── ADR-012-self-mod-adversarial-review.md
+│   │                                 11 bypass shapes + IMPL+ amendments
+│   ├── ADR-013-self-mod-oq-decisions.md
+│   │                                 OQ-001..004 resolutions
 │   └── CHECKING.md                   :clean t audit checklist
-├── plan.spl                          implementation plan (hence)
+├── plan.spl                          SPEC-011 implementation plan (hence)
+├── plan.spec-012.spl                 SPEC-012 implementation plan (hence)
 └── .github/workflows/ci.yml          matrix CI + LOC-budget gate
 ```
 
@@ -691,6 +754,55 @@ docstrings live with the definitions in `src/`.
 (register-receipt-log-for-clean! log)            ; for :clean t flush
 ```
 
+### Self-modification (SPEC-012, opt-in)
+
+```lisp
+;; Registration — load examples/self-modifying.lisp first; not in ASDF.
+(install-self-modification-tools! &key audit-log-path)
+   → :ok | :no-active-theory | :already-installed
+(uninstall-self-modification-tools!)             → :ok
+
+;; Tool dispatch (the handler returns a plist; never raises)
+;; CON-001 contract:
+;;   (:status :ok        :phase :evaluated   :value … :stdout … :elapsed-ms …)
+;;   (:status :rejected  :phase :pre-filter  :rule … :reason …)
+;;   (:status :vetoed    :phase :reasoner    :goal … :derivation … :time-ms …)
+;;   (:status :error     :phase :evaluation  :condition-type … :message …)
+;;   (:status :timeout   :phase :evaluation  :elapsed-ms …)
+
+;; Pre-filter (CON-002 + ADR-012 §A1)
+*prefilter-denylist*                             ; alist op → rule keyword
+(%harness-eval-prefilter form)                   → :pass | (:status :rejected …)
+
+;; Lift (CON-003 + ADR-012 §A4)
+(%lift-form form)
+   → (:operator … :target … :qualifier … :specialisers …
+      :free-symbols … :defmethod-targets … :defgeneric-targets …
+      :defun-targets …)
+
+;; Safety-layer set — defeasible mentions/2 floor (ADR-012 §A1)
+*safety-layer-symbols*
+
+;; Origin index (CON-005)
+*redefine-history*                               ; hash-table sym → events
+(redefine-history symbol)                        → (event …)
+(last-redefinition symbol)                       → event | nil
+(all-redefined-symbols)                          → (sym …)
+
+;; Rollback register (CON-006 + ADR-013 OQ-004 union shape)
+*rollback-register*                              ; vector of records
+(rollback! index)                                → :ok | :no-such-record |
+                                                   :already-rolled-back
+(rollback-records)                               → (record …)
+(find-rollback-records-for symbol)               → (record …)
+
+;; Result-printing bound (ADR-013 OQ-003)
+*harness-eval-result-truncate-bytes*             ; default 4096
+
+;; Audit log instance — opened by install-self-modification-tools!
+*harness-eval-audit-log*                         ; receipt-log instance | nil
+```
+
 ### Image distribution
 
 ```lisp
@@ -728,16 +840,20 @@ docstrings live with the definitions in `src/`.
 - [x] Producer-gateway (cross-process agent composition)
 - [x] Opt-in fileops tools (`install-fileops-tools!`)
 - [x] did:key cryptographic identity (Ed25519, ADR-002)
+- [x] SPEC-012 self-modification port (`harness-eval`, opt-in via
+      `examples/self-modifying.lisp`; ADR-012 / ADR-013)
+- [ ] SPEC-012 t10 — save-image! survival integration test
+- [ ] SPEC-012 t11 — NFR perf benchmarks (TEST-018 latency,
+      TEST-020 1000-form FP corpus, TEST-022 origin-index size)
 - [ ] R4 frame-level signing on every CBCL message (needs cbcl-rs FFI)
 - [ ] Streaming SSE for the Anthropic provider
 - [ ] CI matrix M6 step (cbcl-rs cdylib build)
-- [ ] `examples/self-modifying.lisp` (`harness-eval` opt-in)
 - [ ] Bedrock provider driver
 - [ ] Vertex provider driver
 
-By the numbers: **2928 LOC** harness, **~2900 LOC** tests, **~63 MB** image
+By the numbers: **~4100 LOC** harness, **~3340 LOC** tests, **~63 MB** image
 (full-agent profile incl. provider + WSS + identity), **165 ms** p90 cold
-start, **17 test suites** × **290+ checks**, all green.
+start, **18 test suites** × **390+ checks**, all green.
 
 See the [open issues](https://codeberg.org/anuna/imago/issues) for
 proposed features and known issues.
@@ -809,9 +925,14 @@ Further reading, in roughly the order you'd want to read them:
 * [`architecture/ADR-001-image-runtime.md`](./architecture/ADR-001-image-runtime.md) — why SBCL specifically
 * [`architecture/ADR-002-identity.md`](./architecture/ADR-002-identity.md) — why did:key for agent identity (and what's deferred)
 * [`architecture/CHECKING.md`](./architecture/CHECKING.md) — what `:clean t` actually does at save time
-* [`plan.spl`](./plan.spl) — implementation plan as defeasible-logic rules; query with `hence plan board plan.spl`
+* [`plan.spl`](./plan.spl) — SPEC-011 implementation plan as defeasible-logic rules; query with `hence plan board plan.spl`
 * [`test/m4-tests.lisp`](./test/m4-tests.lisp) — the most readable end-to-end exercise of the runtime
 * [`test/m7-wss-tests.lisp`](./test/m7-wss-tests.lisp) — gateway round-trip over a real WebSocket on loopback
+* [`specs/SPEC-012-self-modification-port.md`](./specs/SPEC-012-self-modification-port.md) — agent self-modification port spec
+* [`architecture/ADR-012-self-mod-adversarial-review.md`](./architecture/ADR-012-self-mod-adversarial-review.md) — 11 bypass shapes the spec floor missed, and the IMPL+ amendments that close them
+* [`architecture/ADR-013-self-mod-oq-decisions.md`](./architecture/ADR-013-self-mod-oq-decisions.md) — OQ-001..004 resolutions (timeout, packages, printer bounds, defun rollback)
+* [`plan.spec-012.spl`](./plan.spec-012.spl) — SPEC-012 implementation plan
+* [`test/m12-tests.lisp`](./test/m12-tests.lisp) — 22 test functions exercising the safety stack and recursion-safety properties
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -824,9 +945,9 @@ Further reading, in roughly the order you'd want to read them:
 [cl-url]:           https://common-lisp.net/
 [sbcl-shield]:      https://img.shields.io/badge/SBCL-2.6%2B-darkgreen.svg?style=for-the-badge
 [sbcl-url]:         https://www.sbcl.org/
-[tests-shield]:     https://img.shields.io/badge/tests-17_suites_green-success.svg?style=for-the-badge
+[tests-shield]:     https://img.shields.io/badge/tests-18_suites_green-success.svg?style=for-the-badge
 [tests-url]:        ./test/
-[loc-shield]:       https://img.shields.io/badge/LOC-2928-informational.svg?style=for-the-badge
+[loc-shield]:       https://img.shields.io/badge/LOC-4094-informational.svg?style=for-the-badge
 [loc-url]:          ./src/
 
 [sbcl-tile]:        https://img.shields.io/badge/SBCL-image_runtime-darkgreen?style=flat-square
