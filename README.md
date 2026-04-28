@@ -409,13 +409,28 @@ in `*safety-layer-symbols*` — so goals like *"add logging to all tool
 calls"* will hit `:vetoed` because the obvious implementation
 mentions `dispatch-tool!`. Goals that fit the v0.1 floor:
 
-- "Define utility functions and use them via subsequent harness-eval calls."
-- "Build a small library of string utilities (palindrome, capitalize words, etc.) and demonstrate calling them on test inputs."
+- "Add persistent memory to yourself." (Empirically achieved by GLM 5.1
+  in 6 turns: 18 symbols redefined, 19 rollback records, 3 legitimate
+  vetoes — see [`architecture/EXPERIMENT-LOG.md`](./architecture/EXPERIMENT-LOG.md).)
+- "Build a small library of string utilities (palindrome, capitalize
+  words, etc.) and demonstrate calling them on test inputs."
 - "Define a memoize macro and apply it to a slow function you also define."
-- "Implement a simple in-memory key-value cache as a defclass with put/get methods, and exercise it."
+- "Implement a simple in-memory key-value cache as a defclass with
+  put/get methods, and exercise it."
+
+When the floor fires, the rejected reply carries a `:hint` field naming
+the *category* of the offending mention — e.g. `EVAL-CLASS` for any of
+`eval` / `read` / `load` / `compile` — and suggests an alternative class
+of operations. The `harness-list-safety-layer` tool also accepts
+`:by-category t` to return categorised symbols with rationale up front.
+Without these, agents tend to retry from the same forbidden category one
+symbol at a time; with them, GLM 5.1 typically pivots to a working
+approach in 1-2 vetoes.
 
 Wrapping/replacing existing harness behavior is largely deferred to a
-future `harness-advise` tool (ADR-005, v0.2).
+future `harness-advise` tool (ADR-005, v0.2). The empirical journey
+that shaped this surface — six goal-driven runs, four follow-up fixes —
+is logged in [`architecture/EXPERIMENT-LOG.md`](./architecture/EXPERIMENT-LOG.md).
 
 #### Opt-in: self-modification port
 
@@ -1024,6 +1039,7 @@ Further reading, in roughly the order you'd want to read them:
 * [`specs/SPEC-012-self-modification-port.md`](./specs/SPEC-012-self-modification-port.md) — agent self-modification port spec
 * [`architecture/ADR-012-self-mod-adversarial-review.md`](./architecture/ADR-012-self-mod-adversarial-review.md) — 11 bypass shapes the spec floor missed, and the IMPL+ amendments that close them
 * [`architecture/ADR-013-self-mod-oq-decisions.md`](./architecture/ADR-013-self-mod-oq-decisions.md) — OQ-001..004 resolutions (timeout, packages, printer bounds, defun rollback)
+* [`architecture/EXPERIMENT-LOG.md`](./architecture/EXPERIMENT-LOG.md) — six goal-driven runs that shaped SPEC-012, with each finding mapped to the commit that fixed it
 * [`plan.spec-012.spl`](./plan.spec-012.spl) — SPEC-012 implementation plan
 * [`test/m12-tests.lisp`](./test/m12-tests.lisp) — 22 test functions exercising the safety stack and recursion-safety properties
 
