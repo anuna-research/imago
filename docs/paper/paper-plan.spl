@@ -443,3 +443,46 @@
 (claims agent:me
   :at "2026-04-28T13:43:52Z"
   (given completed-draft-discussion))
+
+(claims agent:hugo
+  :at "2026-04-28T13:46:02Z"
+  (given claim-v1-review-claims)
+  (normally r-cl-state-v1-review-claims claim-v1-review-claims state-claimed-v1-review-claims)
+  (normally r-cl-chain-v1-review-claims state-claimed-v1-review-claims claimed-review-claims)
+)
+
+(claims agent:hugo
+  :at "2026-04-28T13:46:02Z"
+  (given approved-claims))
+
+(claims agent:hugo
+  :at "2026-04-28T13:46:02Z"
+  (given completed-review-claims))
+
+(claims agent:me
+  :at "2026-04-28T13:46:02Z"
+  (given claim-v1-assemble)
+  (normally r-cl-state-v1-assemble claim-v1-assemble state-claimed-v1-assemble)
+  (normally r-cl-chain-v1-assemble state-claimed-v1-assemble claimed-assemble)
+)
+
+;; Propagation rules: failures in 'assemble' block downstream tasks
+(normally r-propagate-format-final-from-assemble-failed failed-assemble upstream-blocked-format-final)
+(normally r-propagate-format-final-from-assemble-permanently-failed permanently-failed-assemble upstream-blocked-format-final)
+(normally r-propagate-format-final-from-assemble-stale-v1 stale-v1-assemble upstream-blocked-format-final)
+(normally r-propagate-format-final-from-assemble-timeout-v1 timeout-v1-assemble upstream-blocked-format-final)
+
+(claims agent:me
+  :at "2026-04-28T13:47:59Z"
+  (given completed-assemble))
+
+(claims agent:me
+  :at "2026-04-28T13:47:59Z"
+  (given claim-v1-format-final)
+  (normally r-cl-state-v1-format-final claim-v1-format-final state-claimed-v1-format-final)
+  (normally r-cl-chain-v1-format-final state-claimed-v1-format-final claimed-format-final)
+)
+
+(claims agent:me
+  :at "2026-04-28T13:48:51Z"
+  (given completed-format-final))

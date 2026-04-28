@@ -1,0 +1,157 @@
+/* paper.css — academic position-paper styling for mdpdf */
+
+@page {
+  size: A4;
+  margin: 22mm 24mm 22mm 24mm;
+}
+
+html, body {
+  font-family: "Charter", "Georgia", "Palatino", "Palatino Linotype", serif;
+  font-size: 10.5pt;
+  line-height: 1.45;
+  color: #111;
+  text-align: justify;
+  hyphens: auto;
+  -webkit-hyphens: auto;
+}
+
+/* ---- title block ------------------------------------------------------- */
+
+h1:first-of-type {
+  font-size: 18pt;
+  font-weight: 600;
+  text-align: center;
+  margin: 0 0 0.4em 0;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+}
+
+.meta, h1 + p:first-of-type, h1 + blockquote {
+  text-align: center;
+  font-size: 9.5pt;
+  color: #444;
+  margin-bottom: 1.6em;
+}
+
+.meta p {
+  margin: 0.15em 0;
+}
+
+/* ---- section headings -------------------------------------------------- */
+
+h2 {
+  font-family: "Charter", "Georgia", serif;
+  font-size: 12pt;
+  font-weight: 600;
+  margin: 1.6em 0 0.5em 0;
+  border-bottom: 0.4pt solid #ccc;
+  padding-bottom: 0.15em;
+  page-break-after: avoid;
+}
+
+h3 {
+  font-size: 10.8pt;
+  font-weight: 600;
+  margin: 1.1em 0 0.35em 0;
+  font-style: italic;
+  page-break-after: avoid;
+}
+
+/* abstract gets a slightly different treatment */
+h2:first-of-type {  /* the "Abstract" heading */
+  font-style: italic;
+  font-weight: 500;
+  border-bottom: none;
+  text-align: center;
+  font-size: 11pt;
+  margin-top: 0.4em;
+  margin-bottom: 0.4em;
+}
+
+h2:first-of-type + p {
+  /* the abstract paragraph */
+  margin: 0 1.5em 1.6em 1.5em;
+  font-size: 10pt;
+  line-height: 1.4;
+}
+
+/* ---- prose ------------------------------------------------------------- */
+
+p {
+  margin: 0 0 0.6em 0;
+  orphans: 2;
+  widows: 2;
+}
+
+/* tighten leading paragraph after a heading */
+h2 + p, h3 + p {
+  margin-top: 0;
+}
+
+/* ---- code -------------------------------------------------------------- */
+
+code {
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 9pt;
+  background: #f4f4f1;
+  padding: 0.05em 0.3em;
+  border-radius: 2px;
+}
+
+pre {
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 8.6pt;
+  line-height: 1.35;
+  background: #f6f6f3;
+  border-left: 1.5pt solid #ccc;
+  padding: 0.55em 0.8em;
+  margin: 0.5em 0 0.7em 0;
+  overflow-x: auto;
+  page-break-inside: avoid;
+}
+
+pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  border-radius: 0;
+}
+
+/* ---- emphasis ---------------------------------------------------------- */
+
+strong {
+  font-weight: 600;
+}
+
+em {
+  font-style: italic;
+}
+
+/* ---- references list --------------------------------------------------- */
+
+h2:last-of-type + ul,  /* the references list immediately after the last h2 */
+h2 + ul {
+  list-style: none;
+  padding-left: 0;
+  font-size: 9.5pt;
+  line-height: 1.35;
+}
+
+ul li {
+  margin-bottom: 0.35em;
+  padding-left: 1.2em;
+  text-indent: -1.2em;
+  text-align: left;
+  hyphens: none;
+}
+
+/* ---- page-break hints -------------------------------------------------- */
+
+h1, h2 {
+  page-break-after: avoid;
+}
+
+p, ul, pre {
+  orphans: 3;
+  widows: 3;
+}
