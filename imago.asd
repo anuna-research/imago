@@ -55,7 +55,17 @@
                  ;; dispatch on AGENT-IDENTITY vs bearer-string.
                  (:file "main"       :depends-on ("packages" "supervisor"
                                                    "agent" "turn-loop"
-                                                   "providers" "save-image"))))
+                                                   "providers" "save-image"))
+                 ;; SPEC-012 self-modification port (scaffolded; tool itself
+                 ;; is registered explicitly by examples/self-modifying.lisp,
+                 ;; NOT loaded here, per REQ-001 / REQ-012).
+                 (:file "self-modification" :depends-on ("packages" "tools"
+                                                          "hooks" "reasoner"
+                                                          "receipt-log"
+                                                          "save-image"))))
+   ;; examples/self-modifying.lisp is intentionally NOT registered as an ASDF
+   ;; component — loading the system MUST NOT install the harness-eval tool
+   ;; (REQ-001). Authors who want self-modification load the file explicitly.
    (:module "examples"
     :depends-on ("src")
     :components ((:file "echo")))))
@@ -85,4 +95,5 @@
                  (:file "m11-tests" :depends-on ("m1-tests"))
                  (:file "builtin-tools-tests" :depends-on ("m1-tests"))
                  (:file "fileops-tools-tests" :depends-on ("m1-tests"))
-                 (:file "identity-tests" :depends-on ("m1-tests"))))))
+                 (:file "identity-tests" :depends-on ("m1-tests"))
+                 (:file "m12-tests" :depends-on ("m1-tests"))))))

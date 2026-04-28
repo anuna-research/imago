@@ -1,0 +1,560 @@
+; =============================================================================
+; IMPL-IMAGO-SELFMOD — Implementation Plan for SPEC-012
+; =============================================================================
+; Decomposes SPEC-012 (agent self-modification port) into decision, scaffold,
+; component, integration, theory, test, and review tasks. The spec is in
+; status `draft` and carries four open questions (OQ-001..OQ-004) that the
+; spec itself flags as gating: "human decision before the IMPL plan
+; converges". The spec also mandates an adversarial review of CON-002 and
+; CON-003 in a fresh context BEFORE any IMPL plan begins. Both gates are
+; modelled as tasks here so readiness rules block component work until
+; those facts are asserted.
+;
+; Source spec : specs/SPEC-012-self-modification-port.md
+; Builds on   : SPEC-011 implementation (already complete in src/)
+;
+; Agent roles:
+;   - decisions : human or human-supervised resolutions of OQ-001..OQ-004
+;                 and the spec's required adversarial review
+;   - impl      : the harness developer building the port
+;   - reviewer  : verification before merge against the safety threat models
+
+(meta plan
+  (id "IMPL-IMAGO-SELFMOD")
+  (title "anuna-imago — agent self-modification port (SPEC-012)")
+  (version "0.1.0")
+  (status "draft")
+  (created "2026-04-28")
+  (spec "specs/SPEC-012-self-modification-port.md")
+  (description "Build the harness-eval port: opt-in tool registered by examples/self-modifying.lisp, three-layer safety stack (pre-filter, reasoner, handler), receipt-log audit, queryable origin index, per-call rollback register, starter theory file, and recursion-safety test corpus. Gated on resolution of OQ-001..OQ-004 and on a fresh-context adversarial review of CON-002 and CON-003."))
+
+; -----------------------------------------------------------------------------
+; AGENTS
+; -----------------------------------------------------------------------------
+
+(given agent-decisions-available)
+(given agent-impl-available)
+(given agent-reviewer-available)
+
+; -----------------------------------------------------------------------------
+; TASKS — decision gates (the spec's "before IMPL plan begins" checkpoints)
+; -----------------------------------------------------------------------------
+
+(given task-d00-adversarial-review)
+(given task-d01-timeout-mechanism)
+(given task-d02-package-isolation)
+(given task-d03-result-serialisation)
+(given task-d04-non-method-rollback)
+
+(given no-deps-d00-adversarial-review)
+(given no-deps-d01-timeout-mechanism)
+(given no-deps-d02-package-isolation)
+(given no-deps-d03-result-serialisation)
+(given no-deps-d04-non-method-rollback)
+
+; -----------------------------------------------------------------------------
+; TASKS — implementation
+; -----------------------------------------------------------------------------
+
+(given task-t01-scaffold)
+(given task-t02-prefilter)
+(given task-t03-lift)
+(given task-t04-receipt)
+(given task-t05-origin-index)
+(given task-t06-rollback)
+(given task-t07-handler)
+(given task-t08-theory-floor)
+(given task-t09-install-fn)
+(given task-t10-persistence)
+(given task-t11-tests)
+(given task-t12-review)
+
+; =============================================================================
+; TASK METADATA
+; =============================================================================
+
+(meta task-d00-adversarial-review
+  (description "Fresh-context adversarial review of CON-002 (pre-filter denylist) and CON-003 (reasoner floor invariants + safety-layer generics set). Reviewer mandate per spec Stance section: 'find a sequence of harness-eval calls that defeats the safety stack'. Output: written report with at minimum (a) confirmation of the safety-layer generics set (additions/removals), (b) any bypass shape not covered by CON-002, (c) any rule omission in the floor invariants. Asserts (given decided-d00-adversarial-review) when complete and any spec amendments are merged.")
+  (acceptance "Review report committed under architecture/ADR-012-self-mod-adversarial-review.md or equivalent. Spec amended if review surfaces gaps. Without this fact, no IMPL task may start (gate per Stance §Anti-Slop).")
+  (implements "spec Stance / Anti-Slop / Adversarial Review")
+  (gates "all impl tasks"))
+
+(meta task-d01-timeout-mechanism
+  (description "Decide OQ-001: SBCL with-timeout (SIGALRM, heap-unsafe) vs worker-thread + terminate-thread (heap-safe, ~ms overhead). Spec recommends worker-thread. Output: ADR-006 documenting the chosen mechanism and the failure modes it does NOT cover.")
+  (acceptance "ADR-006 file present. Decision asserted as (given decided-d01-timeout-mechanism). Handler implementation (t07) reads from this decision.")
+  (implements "OQ-001 → ADR-006"))
+
+(meta task-d02-package-isolation
+  (description "Decide OQ-002: accept that an agent can (in-package :anuna-imago) inside a submitted form (option a, recommended) vs strip top-level in-package calls (option b). Spec recommends a. Output: ADR-007 documenting the decision and the operator-facing wording for what the :package argument actually buys.")
+  (acceptance "ADR-007 file present. Decision asserted as (given decided-d02-package-isolation). Pre-filter (t02) and handler (t07) align with the chosen behaviour.")
+  (implements "OQ-002 → ADR-007"))
+
+(meta task-d03-result-serialisation
+  (description "Decide OQ-003: bound prin1 with *print-circle*, *print-length*, *print-level*, and a 4 KB truncation (recommended) vs a stricter type whitelist. Spec recommends bounding without whitelist. Output: ADR-008 with concrete values for the print-* specials and the truncation threshold.")
+  (acceptance "ADR-008 file present. Decision asserted as (given decided-d03-result-serialisation). Handler (t07) reads the values from this ADR or a constant in the handler module that cites the ADR.")
+  (implements "OQ-003 → ADR-008"))
+
+(meta task-d04-non-method-rollback
+  (description "Decide OQ-004: extend *rollback-register* to capture prior symbol-function for defun (recommended) and document defparameter as best-effort. Output: REQ-013 amendment to SPEC-012 OR an ADR-009 if amendment is rejected, plus updated CON-006 record shape if the extension is taken.")
+  (acceptance "Spec or ADR file updated. Decision asserted as (given decided-d04-non-method-rollback). Rollback register implementation (t06) and origin index (t05) reflect the decision.")
+  (implements "OQ-004 → REQ-013 (proposed) or ADR-009"))
+
+(meta task-t01-scaffold
+  (description "Bring the file skeleton into existence. Adds src/self-modification.lisp (empty defpackage-respecting file with section headers per CON-001..CON-006), examples/self-modifying.lisp (empty install function stub returning :not-implemented), theories/ directory with self-modification-floor.spl skeleton, test/m12-tests.lisp skeleton. Updates imago.asd with the new src component (DOES NOT register self-modifying.lisp under examples since registration must remain explicit per REQ-001). Updates packages.lisp to export the new public API symbols (harness-eval, install-self-modification-tools!, *redefine-history*, redefine-history, last-redefinition, all-redefined-symbols, *rollback-register*, rollback!, rollback-records, find-rollback-records-for, %harness-eval-prefilter, %harness-eval-handler, %lift-form). NO behaviour yet — this is the seam.")
+  (acceptance "(asdf:load-system :imago) compiles cleanly with the new src/self-modification.lisp loaded. test/m12-tests.lisp compiles. Default tool list (TEST-001 / TEST-017) still matches baseline — the install function exists but does nothing yet.")
+  (implements "structural prerequisite for REQ-002, REQ-007, REQ-008")
+  (loc-budget "~80 LOC of scaffolding"))
+
+(meta task-t02-prefilter
+  (description "Implement %harness-eval-prefilter per CON-002. Pure structural inspector: given a CL form, returns :pass or (:rejected :rule <kw> :reason <str>). Top-level operator denylist enumerated in CON-002 table; defmethod against any safety-layer generic also rejected. Does NOT macroexpand. Does NOT walk body. Threaded by *prefilter-denylist* defparameter so the rules are inspectable from the REPL. Also exports %prefilter-rule-keywords for tests.")
+  (acceptance "TEST-005 passes (one example per CON-002 row). %harness-eval-prefilter is itself in the safety-layer generics set so it cannot be redefined by the port. The denylist is a defparameter, not hard-coded inside a defun, so operators can inspect the floor.")
+  (implements "REQ-004, CON-002, REQ-010 (a)–(c)")
+  (loc-budget "~80 LOC"))
+
+(meta task-t03-lift
+  (description "Implement %lift-form per CON-003. Given a parsed CL form (post-prefilter), produce the plist (:operator :target :qualifier :specialisers :free-symbols). Free-symbol extraction is a single pass: collect symbols in functional position (car of each form recursively) plus first arg of funcall/apply. NO macroexpansion. NO eval. Pure function so it can be unit-tested without harness state. Docstring cites CON-003 verbatim for the expected shape.")
+  (acceptance "TEST-006 property 1 passes: forms differing only in whitespace/comments/package prefixes produce equal plists. TEST-006 property 2 passes: forms with different bodies or targets produce non-equal plists. Test corpus includes the HP-003 narrow defmethod, the TEST-015 progn composite, defun, defparameter, and a defmacro form.")
+  (implements "REQ-005 (lift portion), CON-003 lift contract")
+  (loc-budget "~120 LOC"))
+
+(meta task-t04-receipt
+  (description "Implement %tool-receipt! per CON-004. Writes a fixed-shape plist entry to the harness-eval audit log: :tool, :agent-id, :timestamp, :form (verbatim), :result-phase, :result-tag, :elapsed-ms, :result-summary. Reuses the receipt-log machinery (open/close/append) from src/receipt-log.lisp BUT with a separate log-file path (default: alongside the SPEC-011 receipt log) so SPEC-011 receipt-shape invariants are not perturbed. Registers the log via register-receipt-log-for-clean! so save-image! flushes it. Verbatim form NEVER truncated/normalised; large prin1 values written to a content-addressed binary side-channel and referenced by sha-256 hex from :result-summary.")
+  (acceptance "TEST-007 passes: a form with leading comment is recorded byte-identical. The audit log file is opened on install, registered for save-clean. Reads via read-receipts return the plist intact. Side-channel large values round-trip through their hash.")
+  (implements "REQ-006, CON-004")
+  (loc-budget "~150 LOC"))
+
+(meta task-t05-origin-index
+  (description "Implement *redefine-history* and the public API per CON-005. Hash-table symbol → list-of-events, most-recent-first. Event shape exactly per CON-005. Verbatim form preserved when ≤500 bytes; sha-256 hex otherwise. Public functions: redefine-history, last-redefinition, all-redefined-symbols. Internal: %record-definition!. Records when the evaluated form's top-level operator is one of: defun defmethod defgeneric defmacro defparameter defvar defclass defstruct. The decision from t-d04 may extend this set or its rollback linkage.")
+  (acceptance "TEST-008 passes: three sequential redefinitions of f produce three events in order with correct prior-spec. NFR-005 / TEST-022 storage budget: ≤2 KB per event when verbatim ≤500 bytes; query latency p95 ≤10 ms at 10⁴ entries.")
+  (implements "REQ-007, CON-005")
+  (loc-budget "~120 LOC"))
+
+(meta task-t06-rollback
+  (description "Implement *rollback-register* and the public API per CON-006. Vector of records pushed when an evaluated form redefines a method. Captures the prior method object via find-method BEFORE installation. Public functions: rollback!, rollback-records, find-rollback-records-for. rollback! re-installs prior method (or remove-method if prior was nil), enters its own receipt-log entry tagged :result-phase :rollback, and pushes a new origin-index event with :agent-id :rollback. Per t-d04 decision, may also handle defun rollback by capturing prior symbol-function.")
+  (acceptance "TEST-009 passes: a method redefined via harness-eval is restored by (rollback! 0); the rollback itself appears in the receipt log and origin index. Rollback of a method that had no prior calls remove-method, not install.")
+  (implements "REQ-008, CON-006")
+  (loc-budget "~150 LOC"))
+
+(meta task-t07-handler
+  (description "Implement %harness-eval-handler — the orchestrator. For each call: (1) parse form via read-from-string in a controlled package; (2) %harness-eval-prefilter; (3) on pass, %lift-form, assert per-call facts in the active theory under unwind-protect, query (forbidden eval-call <form-id>), retract; (4) on -Δ/-∂, evaluate the form under the timeout mechanism chosen in t-d01 in the package chosen per t-d02 with print-* bounds per t-d03; (5) capture prior method (delegating to t06) iff defmethod; (6) call %record-definition! iff a definition operator; (7) %tool-receipt! at every termination point. Always returns a structured plist per CON-001 — never raises to the caller. The handler is itself in the safety-layer generics set.")
+  (acceptance "TEST-002, TEST-003 (all four sub-cases), TEST-004 (property over all four phases) pass. NFR-001 latency budget: p95 ≤100 ms over 1000 calls of a 50-form defmethod with reasoner stub. Audit completeness (NFR-002 sampling): 100% receipt-log entries vs tool-call frames.")
+  (implements "REQ-002, REQ-003, CON-001")
+  (loc-budget "~250 LOC"))
+
+(meta task-t08-theory-floor
+  (description "Author theories/self-modification-floor.spl per CON-003. Contains: safety-layer-generic/1 facts (9 names enumerated in CON-003), the six floor-invariant rules over forbidden(eval-call,F), and the predicate-arity declarations Spindle needs to parse defmethod-targets/2, defun-targets/2, mentions/2 without unknown-predicate errors at query time. Also writes a separate fixture theories/self-mod-test-stub.spl used by tests where the reasoner is stubbed to return canned results without an actual Spindle service.")
+  (acceptance "Loading the floor theory via load-theory-from-file produces a non-nil handle. install-self-modification-tools! verification check (CON-003 'floor-invariants-missing') passes when the floor is loaded; fails when an empty theory is loaded.")
+  (implements "REQ-005, CON-003")
+  (loc-budget "~50 lines of SPL"))
+
+(meta task-t09-install-fn
+  (description "Author examples/self-modifying.lisp per REQ-001. Defines (install-self-modification-tools!): pushes :eval onto *valid-permissions*, ensures :anuna-imago-user package exists with (:use :cl :anuna-imago), verifies a theory handle is bound and contains the floor invariants (CON-003), opens the harness-eval audit receipt log, registers it for clean, then registers harness-eval as a tool with permission :eval and handler #'%harness-eval-handler. Also defines (uninstall-self-modification-tools!): unregister tool, close audit log, optionally remove :eval from *valid-permissions* if no other tool uses it. Ships with a brief operator README inline.")
+  (acceptance "TEST-001 passes: default agent has no harness-eval. TEST-010 passes: :eval permission honoured by policy denial. TEST-017 passes: default tool list unchanged. (load \"examples/self-modifying.lisp\") then (install-self-modification-tools!) succeeds; without a loaded theory it returns :no-active-theory.")
+  (implements "REQ-001, REQ-009, REQ-012")
+  (loc-budget "~100 LOC"))
+
+(meta task-t10-persistence
+  (description "Wire the save-image! survival path per REQ-011. Audit log goes through register-receipt-log-for-clean! (already done in t04). The active theory handle, *redefine-history*, *rollback-register*, the registered tool, and the wired hook are all in the saved heap by virtue of being defvar/defparameter or registry entries. Add a smoke test that saves an image with the port installed, boots the binary in a sub-SBCL, and confirms list-tools, the theory handle, *redefine-history*, *rollback-register* are all populated.")
+  (acceptance "TEST-016 passes: persistence integration test boots the saved image via uiop:run-program and verifies the four artefacts are present. No new code in save-image.lisp — the seam is already correct.")
+  (implements "REQ-011")
+  (loc-budget "~30 LOC of integration test only"))
+
+(meta task-t11-tests
+  (description "Complete the test corpus for SPEC-012 in test/m12-tests.lisp. Includes: TEST-001 default no harness-eval; TEST-002 evaluated value; TEST-003 three rejection shapes; TEST-004 property-based over all four phases; TEST-005 prefilter denylist coverage (one per CON-002 row); TEST-006 lift stability + leak-free unwind-protect (1000 calls); TEST-007 verbatim receipt; TEST-008 origin-index ordering; TEST-009 rollback round-trip; TEST-010 :eval permission; TEST-011..TEST-015 recursion-safety (five sub-cases); TEST-016 persistence (driven by t10); TEST-017 default tool list unchanged; TEST-018 latency p95; TEST-019 audit completeness sampling (short-window stand-in for 30 days); TEST-020 prefilter false-positive rate against a 1000-form corpus (corpus authored here); TEST-021 reasoner adjudication latency; TEST-022 origin-index storage and query latency. Reasoner is stubbed via *reasoner-ipc-call* throughout (no real Spindle dep at unit-test time).")
+  (acceptance "asdf:test-system :imago green for the m12-tests component. Test count ≥22 distinct test definitions corresponding to TEST-001..TEST-022. The 1000-form corpus is committed under test/fixtures/spec-012-corpus.lisp so the false-positive metric is reproducible.")
+  (implements "TEST-001..TEST-022, NFR-001..NFR-005")
+  (loc-budget "~600 LOC of tests + ~200 LOC corpus"))
+
+(meta task-t12-review
+  (description "Final review against the safety-stack threat model. Reviewer rebuilds the spec's threat model from CON-002 / CON-003 in their own words, runs the recursion-safety subset (TEST-011..TEST-015) under -O0 and -O3 (compiled vs interpreted), and attempts at least three new bypass shapes not enumerated in the spec or t-d00 review. Documents findings in architecture/SELF-MOD-REVIEW.md. The review either green-lights merge or files a blocker that loops back to t-d00.")
+  (acceptance "Review document committed. All safety-stack tests green under both compilation modes. No filed blockers, or all blockers resolved.")
+  (implements "spec Stance / Anti-Slop closing review"))
+
+; =============================================================================
+; READINESS RULES
+; =============================================================================
+
+; --- decisions: ready immediately, no deps ---
+
+(normally r-ready-d00
+  (and task-d00-adversarial-review no-deps-d00-adversarial-review)
+  ready-d00-adversarial-review)
+
+(normally r-ready-d01
+  (and task-d01-timeout-mechanism no-deps-d01-timeout-mechanism)
+  ready-d01-timeout-mechanism)
+
+(normally r-ready-d02
+  (and task-d02-package-isolation no-deps-d02-package-isolation)
+  ready-d02-package-isolation)
+
+(normally r-ready-d03
+  (and task-d03-result-serialisation no-deps-d03-result-serialisation)
+  ready-d03-result-serialisation)
+
+(normally r-ready-d04
+  (and task-d04-non-method-rollback no-deps-d04-non-method-rollback)
+  ready-d04-non-method-rollback)
+
+; --- scaffold: needs adversarial review only (it doesn't bind any of the
+;     OQ decisions yet — those bind handler / rollback / prefilter shape) ---
+
+(normally r-ready-t01
+  (and task-t01-scaffold decided-d00-adversarial-review)
+  ready-t01-scaffold)
+
+; --- prefilter: needs scaffold + the package-isolation decision (because
+;     d02 may add an in-package strip rule to the denylist) ---
+
+(normally r-ready-t02
+  (and task-t02-prefilter completed-t01-scaffold decided-d02-package-isolation)
+  ready-t02-prefilter)
+
+; --- lift: needs scaffold; pure form parser, no decision deps ---
+
+(normally r-ready-t03
+  (and task-t03-lift completed-t01-scaffold)
+  ready-t03-lift)
+
+; --- receipt: needs scaffold ---
+
+(normally r-ready-t04
+  (and task-t04-receipt completed-t01-scaffold)
+  ready-t04-receipt)
+
+; --- origin index: needs scaffold + d04 (which may extend the rollback
+;     linkage shape on the event record) ---
+
+(normally r-ready-t05
+  (and task-t05-origin-index completed-t01-scaffold decided-d04-non-method-rollback)
+  ready-t05-origin-index)
+
+; --- rollback: needs scaffold + d04 (which may add defun rollback) ---
+
+(normally r-ready-t06
+  (and task-t06-rollback completed-t01-scaffold decided-d04-non-method-rollback)
+  ready-t06-rollback)
+
+; --- handler: integrates 02–06 + needs all three runtime-policy decisions ---
+
+(normally r-ready-t07
+  (and task-t07-handler
+       completed-t02-prefilter
+       completed-t03-lift
+       completed-t04-receipt
+       completed-t05-origin-index
+       completed-t06-rollback
+       decided-d01-timeout-mechanism
+       decided-d02-package-isolation
+       decided-d03-result-serialisation)
+  ready-t07-handler)
+
+; --- theory floor: needs lift (so the predicates ground on the right shape) ---
+
+(normally r-ready-t08
+  (and task-t08-theory-floor completed-t03-lift)
+  ready-t08-theory-floor)
+
+; --- install fn: needs handler + theory floor ---
+
+(normally r-ready-t09
+  (and task-t09-install-fn completed-t07-handler completed-t08-theory-floor)
+  ready-t09-install-fn)
+
+; --- persistence: needs install fn (it's an integration test on top) ---
+
+(normally r-ready-t10
+  (and task-t10-persistence completed-t09-install-fn)
+  ready-t10-persistence)
+
+; --- tests: need everything above except review ---
+
+(normally r-ready-t11
+  (and task-t11-tests completed-t10-persistence)
+  ready-t11-tests)
+
+; --- final review: needs the test corpus green ---
+
+(normally r-ready-t12
+  (and task-t12-review completed-t11-tests)
+  ready-t12-review)
+
+; =============================================================================
+; ASSIGNMENT RULES
+; =============================================================================
+
+(normally r-assign-d00 (and ready-d00-adversarial-review agent-decisions-available)
+  assign-to-d00-adversarial-review-decisions)
+(normally r-assign-d01 (and ready-d01-timeout-mechanism      agent-decisions-available)
+  assign-to-d01-timeout-mechanism-decisions)
+(normally r-assign-d02 (and ready-d02-package-isolation      agent-decisions-available)
+  assign-to-d02-package-isolation-decisions)
+(normally r-assign-d03 (and ready-d03-result-serialisation   agent-decisions-available)
+  assign-to-d03-result-serialisation-decisions)
+(normally r-assign-d04 (and ready-d04-non-method-rollback    agent-decisions-available)
+  assign-to-d04-non-method-rollback-decisions)
+
+(normally r-assign-t01 (and ready-t01-scaffold     agent-impl-available) assign-to-t01-scaffold-impl)
+(normally r-assign-t02 (and ready-t02-prefilter    agent-impl-available) assign-to-t02-prefilter-impl)
+(normally r-assign-t03 (and ready-t03-lift         agent-impl-available) assign-to-t03-lift-impl)
+(normally r-assign-t04 (and ready-t04-receipt      agent-impl-available) assign-to-t04-receipt-impl)
+(normally r-assign-t05 (and ready-t05-origin-index agent-impl-available) assign-to-t05-origin-index-impl)
+(normally r-assign-t06 (and ready-t06-rollback     agent-impl-available) assign-to-t06-rollback-impl)
+(normally r-assign-t07 (and ready-t07-handler      agent-impl-available) assign-to-t07-handler-impl)
+(normally r-assign-t08 (and ready-t08-theory-floor agent-impl-available) assign-to-t08-theory-floor-impl)
+(normally r-assign-t09 (and ready-t09-install-fn   agent-impl-available) assign-to-t09-install-fn-impl)
+(normally r-assign-t10 (and ready-t10-persistence  agent-impl-available) assign-to-t10-persistence-impl)
+(normally r-assign-t11 (and ready-t11-tests        agent-impl-available) assign-to-t11-tests-impl)
+
+(normally r-assign-t12 (and ready-t12-review       agent-reviewer-available)
+  assign-to-t12-review-reviewer)
+
+; =============================================================================
+; RULE METADATA — explain the non-obvious dependencies
+; =============================================================================
+
+(meta r-ready-t01
+  (description "Scaffold blocks on the adversarial review only — not on any of the OQ decisions, because the file skeleton doesn't bind any runtime policy.")
+  (justification "Spec Stance §Anti-Slop: 'this spec MUST be reviewed in a fresh context against the threat models in CON-002 and CON-003 before any IMPL plan begins'."))
+
+(meta r-ready-t02
+  (description "Pre-filter binds on d02 because the package-isolation decision may add or remove an in-package strip rule.")
+  (justification "OQ-002 explicitly couples to the pre-filter: option (b) would put an in-package strip in the denylist; option (a) explicitly does not."))
+
+(meta r-ready-t05
+  (description "Origin index binds on d04 because the event record may need a defun-rollback link.")
+  (justification "OQ-004 may extend rollback to defun, which would make the origin-index event carry a :rollback-ref for non-method definitions too."))
+
+(meta r-ready-t06
+  (description "Rollback register binds on d04 — the decision IS about its scope.")
+  (justification "OQ-004 directly determines whether *rollback-register* captures non-method redefinitions."))
+
+(meta r-ready-t07
+  (description "Handler binds on d01, d02, d03 because all three are runtime policies the handler enforces.")
+  (justification "d01 = how the handler enforces :timeout. d02 = which package the handler reads-and-evaluates in. d03 = how the handler renders the result string."))
+
+(meta r-ready-t12
+  (description "Final review is reviewer-driven, not impl-driven.")
+  (justification "Per spec Stance §Anti-Slop closing review, the recursion-safety subset must be re-verified by an independent reviewer attempting fresh bypass shapes."))
+
+; =============================================================================
+; CLAIMS — decisions recorded 2026-04-28
+; =============================================================================
+;
+; All five decision tasks resolved on 2026-04-28 by supervisor:hugo (operator
+; explicitly waived the spec's "fresh context" gate for d00 given the repo's
+; experimental status). Outputs:
+;   d00 → architecture/ADR-012-self-mod-adversarial-review.md (11 bypass
+;          findings; amendments A1..A7 baked into the implementation as IMPL+
+;          beyond the v0.1 spec floor)
+;   d01..d04 → architecture/ADR-013-self-mod-oq-decisions.md (one combined
+;              file accepting the spec's recommendations for all four OQs)
+
+(claims supervisor:hugo
+  :at "2026-04-28T12:00:00Z"
+  :note "Adversarial review performed in-context per repo experimental stance; 11 bypass findings recorded in ADR-012 with amendments A1..A7 to be implemented."
+  (given decided-d00-adversarial-review)
+  (given completed-d00-adversarial-review))
+
+(claims supervisor:hugo
+  :at "2026-04-28T12:00:00Z"
+  :note "OQ-001..OQ-004 all resolved with spec-recommended options per ADR-013."
+  (given decided-d01-timeout-mechanism)
+  (given completed-d01-timeout-mechanism)
+  (given decided-d02-package-isolation)
+  (given completed-d02-package-isolation)
+  (given decided-d03-result-serialisation)
+  (given completed-d03-result-serialisation)
+  (given decided-d04-non-method-rollback)
+  (given completed-d04-non-method-rollback))
+
+(claims agent:impl
+  :at "2026-04-28T01:31:50Z"
+  (given claim-v1-t01-scaffold)
+  (normally r-cl-state-v1-t01-scaffold claim-v1-t01-scaffold state-claimed-v1-t01-scaffold)
+  (normally r-cl-chain-v1-t01-scaffold state-claimed-v1-t01-scaffold claimed-t01-scaffold)
+)
+
+;; Propagation rules: failures in 't01-scaffold' block downstream tasks
+(normally r-propagate-t02-prefilter-from-t01-scaffold-failed failed-t01-scaffold upstream-blocked-t02-prefilter)
+(normally r-propagate-t02-prefilter-from-t01-scaffold-permanently-failed permanently-failed-t01-scaffold upstream-blocked-t02-prefilter)
+(normally r-propagate-t02-prefilter-from-t01-scaffold-stale-v1 stale-v1-t01-scaffold upstream-blocked-t02-prefilter)
+(normally r-propagate-t02-prefilter-from-t01-scaffold-timeout-v1 timeout-v1-t01-scaffold upstream-blocked-t02-prefilter)
+(normally r-propagate-t02-prefilter-from-t01-scaffold-blocked upstream-blocked-t01-scaffold upstream-blocked-t02-prefilter)
+(normally r-propagate-t03-lift-from-t01-scaffold-failed failed-t01-scaffold upstream-blocked-t03-lift)
+(normally r-propagate-t03-lift-from-t01-scaffold-permanently-failed permanently-failed-t01-scaffold upstream-blocked-t03-lift)
+(normally r-propagate-t03-lift-from-t01-scaffold-stale-v1 stale-v1-t01-scaffold upstream-blocked-t03-lift)
+(normally r-propagate-t03-lift-from-t01-scaffold-timeout-v1 timeout-v1-t01-scaffold upstream-blocked-t03-lift)
+(normally r-propagate-t03-lift-from-t01-scaffold-blocked upstream-blocked-t01-scaffold upstream-blocked-t03-lift)
+(normally r-propagate-t04-receipt-from-t01-scaffold-failed failed-t01-scaffold upstream-blocked-t04-receipt)
+(normally r-propagate-t04-receipt-from-t01-scaffold-permanently-failed permanently-failed-t01-scaffold upstream-blocked-t04-receipt)
+(normally r-propagate-t04-receipt-from-t01-scaffold-stale-v1 stale-v1-t01-scaffold upstream-blocked-t04-receipt)
+(normally r-propagate-t04-receipt-from-t01-scaffold-timeout-v1 timeout-v1-t01-scaffold upstream-blocked-t04-receipt)
+(normally r-propagate-t04-receipt-from-t01-scaffold-blocked upstream-blocked-t01-scaffold upstream-blocked-t04-receipt)
+(normally r-propagate-t05-origin-index-from-t01-scaffold-failed failed-t01-scaffold upstream-blocked-t05-origin-index)
+(normally r-propagate-t05-origin-index-from-t01-scaffold-permanently-failed permanently-failed-t01-scaffold upstream-blocked-t05-origin-index)
+(normally r-propagate-t05-origin-index-from-t01-scaffold-stale-v1 stale-v1-t01-scaffold upstream-blocked-t05-origin-index)
+(normally r-propagate-t05-origin-index-from-t01-scaffold-timeout-v1 timeout-v1-t01-scaffold upstream-blocked-t05-origin-index)
+(normally r-propagate-t05-origin-index-from-t01-scaffold-blocked upstream-blocked-t01-scaffold upstream-blocked-t05-origin-index)
+(normally r-propagate-t06-rollback-from-t01-scaffold-failed failed-t01-scaffold upstream-blocked-t06-rollback)
+(normally r-propagate-t06-rollback-from-t01-scaffold-permanently-failed permanently-failed-t01-scaffold upstream-blocked-t06-rollback)
+(normally r-propagate-t06-rollback-from-t01-scaffold-stale-v1 stale-v1-t01-scaffold upstream-blocked-t06-rollback)
+(normally r-propagate-t06-rollback-from-t01-scaffold-timeout-v1 timeout-v1-t01-scaffold upstream-blocked-t06-rollback)
+(normally r-propagate-t06-rollback-from-t01-scaffold-blocked upstream-blocked-t01-scaffold upstream-blocked-t06-rollback)
+
+;; Transitive propagation: upstream-blocked cascades through dependency chain
+(normally r-propagate-t07-handler-from-t02-prefilter-blocked upstream-blocked-t02-prefilter upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t03-lift-blocked upstream-blocked-t03-lift upstream-blocked-t07-handler)
+(normally r-propagate-t08-theory-floor-from-t03-lift-blocked upstream-blocked-t03-lift upstream-blocked-t08-theory-floor)
+(normally r-propagate-t07-handler-from-t04-receipt-blocked upstream-blocked-t04-receipt upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t05-origin-index-blocked upstream-blocked-t05-origin-index upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t06-rollback-blocked upstream-blocked-t06-rollback upstream-blocked-t07-handler)
+(normally r-propagate-t09-install-fn-from-t07-handler-blocked upstream-blocked-t07-handler upstream-blocked-t09-install-fn)
+(normally r-propagate-t09-install-fn-from-t08-theory-floor-blocked upstream-blocked-t08-theory-floor upstream-blocked-t09-install-fn)
+(normally r-propagate-t10-persistence-from-t09-install-fn-blocked upstream-blocked-t09-install-fn upstream-blocked-t10-persistence)
+(normally r-propagate-t11-tests-from-t10-persistence-blocked upstream-blocked-t10-persistence upstream-blocked-t11-tests)
+(normally r-propagate-t12-review-from-t11-tests-blocked upstream-blocked-t11-tests upstream-blocked-t12-review)
+
+(claims agent:impl
+  :at "2026-04-28T01:35:33Z"
+  (given completed-t01-scaffold))
+
+(claims agent:impl
+  :at "2026-04-28T01:44:31Z"
+  (given claim-v1-t02-prefilter)
+  (normally r-cl-state-v1-t02-prefilter claim-v1-t02-prefilter state-claimed-v1-t02-prefilter)
+  (normally r-cl-chain-v1-t02-prefilter state-claimed-v1-t02-prefilter claimed-t02-prefilter)
+)
+
+;; Propagation rules: failures in 't02-prefilter' block downstream tasks
+(normally r-propagate-t07-handler-from-t02-prefilter-failed failed-t02-prefilter upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t02-prefilter-permanently-failed permanently-failed-t02-prefilter upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t02-prefilter-stale-v1 stale-v1-t02-prefilter upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t02-prefilter-timeout-v1 timeout-v1-t02-prefilter upstream-blocked-t07-handler)
+
+(claims agent:impl
+  :at "2026-04-28T01:44:31Z"
+  (given completed-t02-prefilter))
+
+(claims agent:impl
+  :at "2026-04-28T01:44:31Z"
+  (given claim-v1-t03-lift)
+  (normally r-cl-state-v1-t03-lift claim-v1-t03-lift state-claimed-v1-t03-lift)
+  (normally r-cl-chain-v1-t03-lift state-claimed-v1-t03-lift claimed-t03-lift)
+)
+
+;; Propagation rules: failures in 't03-lift' block downstream tasks
+(normally r-propagate-t07-handler-from-t03-lift-failed failed-t03-lift upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t03-lift-permanently-failed permanently-failed-t03-lift upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t03-lift-stale-v1 stale-v1-t03-lift upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t03-lift-timeout-v1 timeout-v1-t03-lift upstream-blocked-t07-handler)
+(normally r-propagate-t08-theory-floor-from-t03-lift-failed failed-t03-lift upstream-blocked-t08-theory-floor)
+(normally r-propagate-t08-theory-floor-from-t03-lift-permanently-failed permanently-failed-t03-lift upstream-blocked-t08-theory-floor)
+(normally r-propagate-t08-theory-floor-from-t03-lift-stale-v1 stale-v1-t03-lift upstream-blocked-t08-theory-floor)
+(normally r-propagate-t08-theory-floor-from-t03-lift-timeout-v1 timeout-v1-t03-lift upstream-blocked-t08-theory-floor)
+
+(claims agent:impl
+  :at "2026-04-28T01:44:31Z"
+  (given completed-t03-lift))
+
+(claims agent:impl
+  :at "2026-04-28T01:44:32Z"
+  (given claim-v1-t04-receipt)
+  (normally r-cl-state-v1-t04-receipt claim-v1-t04-receipt state-claimed-v1-t04-receipt)
+  (normally r-cl-chain-v1-t04-receipt state-claimed-v1-t04-receipt claimed-t04-receipt)
+)
+
+;; Propagation rules: failures in 't04-receipt' block downstream tasks
+(normally r-propagate-t07-handler-from-t04-receipt-failed failed-t04-receipt upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t04-receipt-permanently-failed permanently-failed-t04-receipt upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t04-receipt-stale-v1 stale-v1-t04-receipt upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t04-receipt-timeout-v1 timeout-v1-t04-receipt upstream-blocked-t07-handler)
+
+(claims agent:impl
+  :at "2026-04-28T01:44:32Z"
+  (given completed-t04-receipt))
+
+(claims agent:impl
+  :at "2026-04-28T01:44:32Z"
+  (given claim-v1-t05-origin-index)
+  (normally r-cl-state-v1-t05-origin-index claim-v1-t05-origin-index state-claimed-v1-t05-origin-index)
+  (normally r-cl-chain-v1-t05-origin-index state-claimed-v1-t05-origin-index claimed-t05-origin-index)
+)
+
+;; Propagation rules: failures in 't05-origin-index' block downstream tasks
+(normally r-propagate-t07-handler-from-t05-origin-index-failed failed-t05-origin-index upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t05-origin-index-permanently-failed permanently-failed-t05-origin-index upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t05-origin-index-stale-v1 stale-v1-t05-origin-index upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t05-origin-index-timeout-v1 timeout-v1-t05-origin-index upstream-blocked-t07-handler)
+
+(claims agent:impl
+  :at "2026-04-28T01:44:32Z"
+  (given completed-t05-origin-index))
+
+(claims agent:impl
+  :at "2026-04-28T01:44:32Z"
+  (given claim-v1-t06-rollback)
+  (normally r-cl-state-v1-t06-rollback claim-v1-t06-rollback state-claimed-v1-t06-rollback)
+  (normally r-cl-chain-v1-t06-rollback state-claimed-v1-t06-rollback claimed-t06-rollback)
+)
+
+;; Propagation rules: failures in 't06-rollback' block downstream tasks
+(normally r-propagate-t07-handler-from-t06-rollback-failed failed-t06-rollback upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t06-rollback-permanently-failed permanently-failed-t06-rollback upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t06-rollback-stale-v1 stale-v1-t06-rollback upstream-blocked-t07-handler)
+(normally r-propagate-t07-handler-from-t06-rollback-timeout-v1 timeout-v1-t06-rollback upstream-blocked-t07-handler)
+
+(claims agent:impl
+  :at "2026-04-28T01:44:32Z"
+  (given completed-t06-rollback))
+
+(claims agent:impl
+  :at "2026-04-28T01:49:40Z"
+  (given claim-v1-t07-handler)
+  (normally r-cl-state-v1-t07-handler claim-v1-t07-handler state-claimed-v1-t07-handler)
+  (normally r-cl-chain-v1-t07-handler state-claimed-v1-t07-handler claimed-t07-handler)
+)
+
+;; Propagation rules: failures in 't07-handler' block downstream tasks
+(normally r-propagate-t09-install-fn-from-t07-handler-failed failed-t07-handler upstream-blocked-t09-install-fn)
+(normally r-propagate-t09-install-fn-from-t07-handler-permanently-failed permanently-failed-t07-handler upstream-blocked-t09-install-fn)
+(normally r-propagate-t09-install-fn-from-t07-handler-stale-v1 stale-v1-t07-handler upstream-blocked-t09-install-fn)
+(normally r-propagate-t09-install-fn-from-t07-handler-timeout-v1 timeout-v1-t07-handler upstream-blocked-t09-install-fn)
+
+(claims agent:impl
+  :at "2026-04-28T01:49:40Z"
+  (given completed-t07-handler))
+
+(claims agent:impl
+  :at "2026-04-28T01:49:40Z"
+  (given claim-v1-t08-theory-floor)
+  (normally r-cl-state-v1-t08-theory-floor claim-v1-t08-theory-floor state-claimed-v1-t08-theory-floor)
+  (normally r-cl-chain-v1-t08-theory-floor state-claimed-v1-t08-theory-floor claimed-t08-theory-floor)
+)
+
+;; Propagation rules: failures in 't08-theory-floor' block downstream tasks
+(normally r-propagate-t09-install-fn-from-t08-theory-floor-failed failed-t08-theory-floor upstream-blocked-t09-install-fn)
+(normally r-propagate-t09-install-fn-from-t08-theory-floor-permanently-failed permanently-failed-t08-theory-floor upstream-blocked-t09-install-fn)
+(normally r-propagate-t09-install-fn-from-t08-theory-floor-stale-v1 stale-v1-t08-theory-floor upstream-blocked-t09-install-fn)
+(normally r-propagate-t09-install-fn-from-t08-theory-floor-timeout-v1 timeout-v1-t08-theory-floor upstream-blocked-t09-install-fn)
+
+(claims agent:impl
+  :at "2026-04-28T01:49:40Z"
+  (given completed-t08-theory-floor))
+
+(claims agent:impl
+  :at "2026-04-28T01:49:40Z"
+  (given claim-v1-t09-install-fn)
+  (normally r-cl-state-v1-t09-install-fn claim-v1-t09-install-fn state-claimed-v1-t09-install-fn)
+  (normally r-cl-chain-v1-t09-install-fn state-claimed-v1-t09-install-fn claimed-t09-install-fn)
+)
+
+;; Propagation rules: failures in 't09-install-fn' block downstream tasks
+(normally r-propagate-t10-persistence-from-t09-install-fn-failed failed-t09-install-fn upstream-blocked-t10-persistence)
+(normally r-propagate-t10-persistence-from-t09-install-fn-permanently-failed permanently-failed-t09-install-fn upstream-blocked-t10-persistence)
+(normally r-propagate-t10-persistence-from-t09-install-fn-stale-v1 stale-v1-t09-install-fn upstream-blocked-t10-persistence)
+(normally r-propagate-t10-persistence-from-t09-install-fn-timeout-v1 timeout-v1-t09-install-fn upstream-blocked-t10-persistence)
+
+(claims agent:impl
+  :at "2026-04-28T01:49:40Z"
+  (given completed-t09-install-fn))

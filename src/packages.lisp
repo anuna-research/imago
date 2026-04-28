@@ -241,4 +241,34 @@
    #:proof-result-positive-p
    #:invariant-filter-hook
    #:install-invariant-filter!
-   #:uninstall-invariant-filter!))
+   #:uninstall-invariant-filter!
+
+   ;; --- SPEC-012 / self-modification port ---
+   ;; Pre-filter (CON-002) + amendment A1 / A2 from ADR-012.
+   #:*prefilter-denylist*
+   #:%harness-eval-prefilter
+   ;; Lift function (CON-003).
+   #:%lift-form
+   ;; Safety-layer symbol set (ADR-012 §A1, generalised over CON-003).
+   #:*safety-layer-symbols*
+   ;; Receipt (CON-004) — separate audit log instance for harness-eval.
+   #:*harness-eval-audit-log*
+   #:%tool-receipt!
+   ;; Origin index (CON-005).
+   #:*redefine-history*
+   #:redefine-history
+   #:last-redefinition
+   #:all-redefined-symbols
+   ;; Rollback register (CON-006 + ADR-013 OQ-004 union shape).
+   #:*rollback-register*
+   #:rollback!
+   #:rollback-records
+   #:find-rollback-records-for
+   ;; Handler (CON-001).
+   #:%harness-eval-handler
+   ;; Bounds for result serialisation (ADR-013 OQ-003).
+   #:*harness-eval-result-truncate-bytes*
+   ;; Tool registration (REQ-001) — installed from examples/self-modifying.lisp.
+   #:install-self-modification-tools!
+   #:uninstall-self-modification-tools!
+   #:*self-modification-tool-names*))

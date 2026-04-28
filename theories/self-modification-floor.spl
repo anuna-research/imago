@@ -1,0 +1,85 @@
+;;;; theories/self-modification-floor.spl — SPEC-012 floor invariants
+;;;;
+;;;; This is a Spindle theory file. Loaded by the harness reasoner via
+;;;; (load-theory <text>) before INSTALL-SELF-MODIFICATION-TOOLS! is called.
+;;;; The handler asserts per-call facts grounding the predicates below
+;;;; before each query, then retracts under unwind-protect.
+;;;;
+;;;; ADR-012 §A1 generalises the spec's four mentions/2 rules into one rule
+;;;; over a single safety-layer-symbol/1 fact set. The fact set lives in
+;;;; *safety-layer-symbols* (src/self-modification.lisp); the handler's
+;;;; %assert-floor-facts! function asserts one safety-layer-symbol(S)
+;;;; fact per element of that list when the theory is loaded.
+;;;;
+;;;; Predicates
+;;;;
+;;;;   operator-of(F, OP)            — the top-level operator of form F
+;;;;   defmethod-targets(F, G)       — F has a defmethod against generic G,
+;;;;                                    incl. body-buried defmethods
+;;;;   defgeneric-targets(F, G)      — F has a defgeneric for generic G
+;;;;                                    (ADR-012 §A4)
+;;;;   defun-targets(F, S)           — F has a defun (or defmacro) for S
+;;;;   mentions(F, S)                — symbol S appears in functional position
+;;;;                                    in F's body
+;;;;   safety-layer-symbol(S)        — S is in the safety-layer set (asserted
+;;;;                                    by the handler at install time)
+;;;;
+;;;; Floor invariants — REQ-005 / CON-003 + ADR-012 §A1
+;;;;
+;;;;   forbidden(eval-call, F) :- defmethod-targets(F, G),
+;;;;                              safety-layer-symbol(G).
+;;;;   forbidden(eval-call, F) :- defgeneric-targets(F, G),
+;;;;                              safety-layer-symbol(G).
+;;;;   forbidden(eval-call, F) :- defun-targets(F, S),
+;;;;                              safety-layer-symbol(S).
+;;;;   forbidden(eval-call, F) :- mentions(F, S),
+;;;;                              safety-layer-symbol(S).
+
+(meta theory
+  (id "SELF-MOD-FLOOR")
+  (title "SPEC-012 floor invariants — IMPL+ amendments per ADR-012")
+  (version "0.1.0")
+  (status "active")
+  (created "2026-04-28")
+  (spec "specs/SPEC-012-self-modification-port.md")
+  (description "Floor invariants the active reasoner theory MUST contain when harness-eval is registered. Operators may extend the theory; they cannot reduce it below this floor."))
+
+;; -- Floor invariants -----------------------------------------------------
+
+(always r-forbid-defmethod-target
+  (and (defmethod-targets ?f ?g)
+       (safety-layer-symbol ?g))
+  (forbidden eval-call ?f))
+
+(always r-forbid-defgeneric-target
+  (and (defgeneric-targets ?f ?g)
+       (safety-layer-symbol ?g))
+  (forbidden eval-call ?f))
+
+(always r-forbid-defun-target
+  (and (defun-targets ?f ?s)
+       (safety-layer-symbol ?s))
+  (forbidden eval-call ?f))
+
+(always r-forbid-mentions
+  (and (mentions ?f ?s)
+       (safety-layer-symbol ?s))
+  (forbidden eval-call ?f))
+
+;; -- Rule metadata --------------------------------------------------------
+
+(meta r-forbid-defmethod-target
+  (description "Defmethod against any safety-layer symbol is forbidden, whether at top level or buried in a body — closes ADR-012 §F5/§F6.")
+  (justification "Top-level defmethod is also caught by the prefilter; this rule is the reasoner's mirror for body-buried cases."))
+
+(meta r-forbid-defgeneric-target
+  (description "Defgeneric of a safety-layer generic drops all methods, opening dispatch hijack.")
+  (justification "ADR-012 §A4: prefilter rejects top-level; this rule covers buried."))
+
+(meta r-forbid-defun-target
+  (description "Redefining a safety-layer function via defun bypasses defmethod entirely.")
+  (justification "Catches the case where the safety-layer name is a function, not a generic."))
+
+(meta r-forbid-mentions
+  (description "Generalised mentions/2 floor invariant per ADR-012 §A1.")
+  (justification "Replaces the spec's four enumerated rules. Closes F1, F2, F7, F8, F9, F10 in one shot by treating any reference to a safety-layer symbol in functional position as forbidden."))
