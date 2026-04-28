@@ -1,0 +1,217 @@
+; =============================================================================
+; PAPER-IMAGO — Drafting plan for a short academic paper based on anuna-imago
+; =============================================================================
+; Goal: a short (4–6 page) paper presenting anuna-imago's most novel
+; contribution. Coordinated via hence so that scope is locked before
+; drafting, and prose is reviewed before assembly.
+;
+; Agents:
+;   - me    : the LLM drafter (researches, outlines, drafts prose)
+;   - hugo  : the project author / reviewer (validates scope and key claims)
+;
+; Plan is intentionally small — each task is a coherent half-day of work,
+; and dependencies enforce the right ordering (scope first, lit review and
+; outline before drafts, drafts before assembly, assembly before format).
+
+(meta plan
+  (id "PAPER-IMAGO")
+  (title "anuna-imago — short academic paper")
+  (version "0.1.0")
+  (status "active")
+  (created "2026-04-28")
+  (description "Draft a short academic paper based on the anuna-imago project. Working assumption: the paper's contribution is defeasible-logic-gated self-modification for LLM agents — three-layer safety stack (pre-filter / reasoner / handler), with empirical evidence from the EXPERIMENT-LOG.md runs. Final scope is the first task and must be approved before any drafting begins."))
+
+; -----------------------------------------------------------------------------
+; AGENTS
+; -----------------------------------------------------------------------------
+
+(given agent-me-available)
+(given agent-hugo-available)
+
+; -----------------------------------------------------------------------------
+; TASKS
+; -----------------------------------------------------------------------------
+
+(given task-scope)               ; pin down thesis, venue, length, audience
+(given task-lit-review)          ; survey adjacent literature
+(given task-outline)             ; section-by-section outline with claims
+(given task-draft-intro)         ; abstract + introduction + contributions
+(given task-draft-background)    ; defeasible logic + LLM agents primer
+(given task-draft-system)        ; the three-layer safety stack
+(given task-draft-eval)          ; empirical runs from EXPERIMENT-LOG.md
+(given task-draft-related)       ; related work
+(given task-draft-discussion)    ; limitations, future work, conclusion
+(given task-review-scope)        ; hugo approves scope
+(given task-review-claims)       ; hugo validates technical claims after drafts land
+(given task-assemble)            ; coherence pass: transitions, voice, length
+(given task-format-final)        ; apply venue style, BibTeX, final pass
+
+; Initial readiness — only `scope` has no deps.
+(given no-deps-scope)
+
+; =============================================================================
+; TASK METADATA
+; =============================================================================
+
+(meta task-scope
+  (description "Determine the paper's thesis, venue, target length, and audience. Working hypothesis: contribution is defeasible-logic-gated self-modification with empirical backing. Output: a one-page scope doc at docs/paper/SCOPE.md covering thesis statement, target venue (workshop/blog/preprint), audience (PL/AI/safety), length cap (pages or words), and excluded scope.")
+  (acceptance "docs/paper/SCOPE.md committed; reviewed and approved by hugo (task-review-scope)."))
+
+(meta task-review-scope
+  (description "Hugo reviews the scope doc and approves or requests changes. Asserts (given approved-scope) when ready to gate the rest of the work.")
+  (acceptance "Hugo confirms scope is correct; (given approved-scope) asserted."))
+
+(meta task-lit-review
+  (description "Survey related work in three threads: (1) LLM agent safety (function-call gating, sandboxing, capability lattices), (2) self-modifying programs (Smalltalk image, MetaCircular, Schism — and recent LLM-driven code-edit agents), (3) defeasible logic in AI (Antoniou, Maher; Spindle/SPINdle implementations). Goal: 10–15 citations identifying what's novel here. Output: docs/paper/LIT-REVIEW.md with annotated bibliography.")
+  (acceptance "Bibliography of 10+ entries, each with 1-2 sentence relevance note. Identifies the strongest 3 prior works the paper should explicitly position against."))
+
+(meta task-outline
+  (description "Produce a section-by-section outline with one bulleted claim per paragraph. Sections: abstract, intro, background, system, evaluation, related, discussion, conclusion. Each section has a target word/page count summing to the agreed length. Output: docs/paper/OUTLINE.md.")
+  (acceptance "Outline covers all sections; per-paragraph claims are concrete (not 'discuss X' but 'we show that X')."))
+
+(meta task-draft-intro
+  (description "Draft abstract + introduction + bulleted contributions list. ~600 words. Frames the problem (LLM agents writing code to themselves), the gap in current approaches (mostly sandboxing, no formal-logic gates), and the contribution (three-layer stack with defeasible reasoner). Output: docs/paper/sections/01-intro.md.")
+  (acceptance "Abstract under 200 words, intro under 500 words, contributions bulleted and numbered."))
+
+(meta task-draft-background
+  (description "Draft the background section: defeasible logic primer (just enough notation to read floor invariants), LLM agent harness primer, self-modification in dynamic languages. ~700 words. Output: docs/paper/sections/02-background.md.")
+  (acceptance "Self-contained for a reader who knows neither defeasible logic nor agent harnesses."))
+
+(meta task-draft-system
+  (description "Draft the system section: describe the three-layer safety stack (pre-filter denylist, defeasible-logic reasoner querying the floor invariants, handler with rollback register). Include a worked example showing a vetoed call. ~1200 words. Output: docs/paper/sections/03-system.md.")
+  (acceptance "Worked example present. Diagram or pseudocode for the layer-by-layer flow. Cites SPEC-012 and ADR-012."))
+
+(meta task-draft-eval
+  (description "Draft the empirical evaluation section based on EXPERIMENT-LOG.md. Six goal-driven runs with GLM 5.1; flagship result is 'Add persistent memory to yourself' achieved in 6 turns with 18 redefinitions, 3 legitimate vetoes. Compare prescribed-mode vs goal-driven-mode. Discuss limitations. ~800 words. Output: docs/paper/sections/04-eval.md.")
+  (acceptance "Reproduces the EXPERIMENT-LOG.md numbers verbatim where cited. Limitations honest about single model, small N."))
+
+(meta task-draft-related
+  (description "Draft related work section. Position against the 3 strongest prior works identified in lit-review. ~400 words. Output: docs/paper/sections/05-related.md.")
+  (acceptance "Each cited work has a one-line distinction from this paper's contribution."))
+
+(meta task-draft-discussion
+  (description "Draft discussion + limitations + conclusion. Honest about: single agent runtime (CL/SBCL), defeasible logic engine dependency, manual floor authoring. ~500 words. Output: docs/paper/sections/06-discussion.md.")
+  (acceptance "Limitations section is honest, not dismissive. Conclusion ties back to thesis."))
+
+(meta task-review-claims
+  (description "Hugo reads the system + eval drafts and validates technical claims. Specifically: are the three layers described correctly, do the EXPERIMENT-LOG numbers match, are the safety-layer-symbols category descriptions accurate. Asserts (given approved-claims) when validated.")
+  (acceptance "Hugo confirms or corrects the technical content; (given approved-claims) asserted."))
+
+(meta task-assemble
+  (description "Stitch the section drafts into a single document. Smooth transitions, eliminate duplication, ensure consistent voice and tense (past for empirical, present for system description). Length-check against the cap. Output: docs/paper/draft.md.")
+  (acceptance "Single coherent document under the agreed length cap."))
+
+(meta task-format-final
+  (description "Apply the chosen venue's style (LaTeX, Markdown for blog, etc.). Build the BibTeX file from the lit review. Final proofread. Output: docs/paper/final.{tex,md} + docs/paper/refs.bib.")
+  (acceptance "Compiles / renders cleanly. All citations resolve."))
+
+; =============================================================================
+; READINESS RULES — encode dependencies
+; =============================================================================
+
+; Scope is ready immediately.
+(normally r-ready-scope
+  (and task-scope no-deps-scope)
+  ready-scope)
+
+; Hugo's scope review unlocks once scope is drafted.
+(normally r-ready-review-scope
+  (and task-review-scope completed-scope)
+  ready-review-scope)
+
+; Lit review and outline both gate on approved scope.
+(normally r-ready-lit
+  (and task-lit-review approved-scope)
+  ready-lit-review)
+(normally r-ready-outline
+  (and task-outline approved-scope)
+  ready-outline)
+
+; Drafts gate on outline AND lit-review (so they have structure + sources).
+(normally r-ready-draft-intro
+  (and task-draft-intro completed-outline completed-lit-review)
+  ready-draft-intro)
+(normally r-ready-draft-background
+  (and task-draft-background completed-outline completed-lit-review)
+  ready-draft-background)
+(normally r-ready-draft-system
+  (and task-draft-system completed-outline completed-lit-review)
+  ready-draft-system)
+(normally r-ready-draft-eval
+  (and task-draft-eval completed-outline completed-lit-review)
+  ready-draft-eval)
+(normally r-ready-draft-related
+  (and task-draft-related completed-outline completed-lit-review)
+  ready-draft-related)
+(normally r-ready-draft-discussion
+  (and task-draft-discussion completed-outline completed-lit-review)
+  ready-draft-discussion)
+
+; Hugo's claims review gates on the two technical drafts (system + eval).
+(normally r-ready-review-claims
+  (and task-review-claims completed-draft-system completed-draft-eval)
+  ready-review-claims)
+
+; Assembly gates on ALL drafts complete + claims approved.
+(normally r-ready-assemble
+  (and task-assemble
+       completed-draft-intro
+       completed-draft-background
+       completed-draft-system
+       completed-draft-eval
+       completed-draft-related
+       completed-draft-discussion
+       approved-claims)
+  ready-assemble)
+
+; Final formatting gates on assembly.
+(normally r-ready-format
+  (and task-format-final completed-assemble)
+  ready-format-final)
+
+; =============================================================================
+; ASSIGNMENT RULES — me drafts, hugo reviews
+; =============================================================================
+
+; Drafting tasks → me
+(normally r-assign-scope-me        (and ready-scope agent-me-available)             assign-to-scope-me)
+(normally r-assign-lit-me          (and ready-lit-review agent-me-available)        assign-to-lit-review-me)
+(normally r-assign-outline-me      (and ready-outline agent-me-available)           assign-to-outline-me)
+(normally r-assign-intro-me        (and ready-draft-intro agent-me-available)       assign-to-draft-intro-me)
+(normally r-assign-background-me   (and ready-draft-background agent-me-available)  assign-to-draft-background-me)
+(normally r-assign-system-me       (and ready-draft-system agent-me-available)      assign-to-draft-system-me)
+(normally r-assign-eval-me         (and ready-draft-eval agent-me-available)        assign-to-draft-eval-me)
+(normally r-assign-related-me      (and ready-draft-related agent-me-available)     assign-to-draft-related-me)
+(normally r-assign-discussion-me   (and ready-draft-discussion agent-me-available)  assign-to-draft-discussion-me)
+(normally r-assign-assemble-me     (and ready-assemble agent-me-available)          assign-to-assemble-me)
+(normally r-assign-format-me       (and ready-format-final agent-me-available)      assign-to-format-final-me)
+
+; Review tasks → hugo
+(normally r-assign-review-scope    (and ready-review-scope agent-hugo-available)    assign-to-review-scope-hugo)
+(normally r-assign-review-claims   (and ready-review-claims agent-hugo-available)   assign-to-review-claims-hugo)
+
+; =============================================================================
+; RULE METADATA — capture intent
+; =============================================================================
+
+(meta r-ready-draft-intro
+  (description "Drafts only start once we have an outline AND a literature pool to cite from")
+  (justification "Avoids drafting prose with no idea what we're claiming or what we're citing"))
+
+(meta r-ready-assemble
+  (description "Assembly waits for ALL drafts and Hugo's claims review")
+  (justification "Cheaper to fix technical errors before stitching than after"))
+
+(claims agent:me
+  :at "2026-04-28T13:27:58Z"
+  (given claim-v1-scope)
+  (normally r-cl-state-v1-scope claim-v1-scope state-claimed-v1-scope)
+  (normally r-cl-chain-v1-scope state-claimed-v1-scope claimed-scope)
+)
+
+;; Propagation rules: failures in 'scope' block downstream tasks
+(normally r-propagate-review-scope-from-scope-failed failed-scope upstream-blocked-review-scope)
+(normally r-propagate-review-scope-from-scope-permanently-failed permanently-failed-scope upstream-blocked-review-scope)
+(normally r-propagate-review-scope-from-scope-stale-v1 stale-v1-scope upstream-blocked-review-scope)
+(normally r-propagate-review-scope-from-scope-timeout-v1 timeout-v1-scope upstream-blocked-review-scope)
+(normally r-propagate-review-scope-from-scope-blocked upstream-blocked-scope upstream-blocked-review-scope)
