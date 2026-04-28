@@ -735,8 +735,6 @@ more information.
 <!-- CONTACT -->
 ## Contact
 
-Hugo O'Connor — hugo.oconnor@gmail.com
-
 Project Link: <https://codeberg.org/anuna/imago>
 
 Spec: <https://codeberg.org/anuna/anuna-code/src/branch/main/spec/SPEC-011-image-harness.md>
