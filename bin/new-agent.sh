@@ -234,4 +234,57 @@ sbcl --no-userinit --no-sysinit --non-interactive \\
 EOF
 chmod +x "$TARGET_ABS/bin/run-tests.sh"
 
+# Generate README.md.
+cat > "$TARGET_ABS/README.md" <<EOF
+# $NAME
+
+An agent built on [anuna-imago](./imago/), vendored at scaffold time.
+
+## Build and run
+
+    bash bin/build.sh                    # ~30s
+    ./$NAME --echo "hello"
+    ./$NAME --serve 60                   # serve for 60s, drain on SIGTERM
+
+## What's in here
+
+| Path | What |
+|---|---|
+| \`src/agent.lisp\`   | Your agent. Tools, hooks, provider, prompt — start here. |
+| \`imago/\`           | Vendored harness. Edit freely; you own this copy. |
+| \`test/smoke.lisp\`  | Smoke test. \`bash bin/run-tests.sh\` |
+| \`bin/build.sh\`     | Builds the binary via \`save-image!\`. |
+
+## Next steps
+
+1. Edit \`src/agent.lisp\` — change the system prompt, add a tool.
+2. Swap \`make-stub-provider\` for a real one. See \`imago/README.md\`
+   "Build your own agent" for Anthropic, OpenRouter, and Z.ai examples.
+3. Add identity (\`generate-identity\`) if you'll connect to a router.
+4. Read [\`architecture/CHECKING.md\`](https://codeberg.org/anuna/imago/src/branch/main/architecture/CHECKING.md)
+   before saving images with secrets in scope.
+
+## Updating the vendored harness
+
+Vendored is vendored — upstream fixes don't flow in automatically. To pull
+a newer imago:
+
+    rm -rf imago/
+    cp -R /path/to/anuna-imago/{imago.asd,src,theories} imago/
+
+Or re-run \`bin/new-agent.sh\` against an empty directory and diff.
+EOF
+
+# Generate LICENSE placeholder.
+cat > "$TARGET_ABS/LICENSE" <<EOF
+TODO: choose a license. See https://choosealicense.com/.
+EOF
+
+# Generate .gitignore.
+cat > "$TARGET_ABS/.gitignore" <<EOF
+*.fasl
+.DS_Store
+/$NAME
+EOF
+
 echo "✓ Scaffolded $NAME at $TARGET"

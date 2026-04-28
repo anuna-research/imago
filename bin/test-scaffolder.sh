@@ -117,6 +117,17 @@ expect_success "run-tests.sh loads system first"     grep -q ':vendor-test' "$VE
 expect_success "run-tests.sh calls run-smoke"        grep -q 'vendor-test::run-smoke' "$VENDOR_TARGET/bin/run-tests.sh"
 
 # ---------------------------------------------------------------------------
+echo "# README, LICENSE, .gitignore generation"
+expect_success "README.md exists"                    test -f "$VENDOR_TARGET/README.md"
+expect_success "README mentions project name"        grep -q '# vendor-test' "$VENDOR_TARGET/README.md"
+expect_success "README mentions ./imago/"            grep -q 'imago/' "$VENDOR_TARGET/README.md"
+expect_success "LICENSE exists"                      test -f "$VENDOR_TARGET/LICENSE"
+expect_success "LICENSE is a TODO placeholder"       grep -q 'TODO' "$VENDOR_TARGET/LICENSE"
+expect_success ".gitignore exists"                   test -f "$VENDOR_TARGET/.gitignore"
+expect_success ".gitignore covers fasls"             grep -q '\*.fasl' "$VENDOR_TARGET/.gitignore"
+expect_success ".gitignore anchors binary name"      grep -q '^/vendor-test$' "$VENDOR_TARGET/.gitignore"
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
