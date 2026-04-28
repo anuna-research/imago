@@ -55,3 +55,18 @@ self-modification port queries a Spindle defeasible-logic theory at every
 `harness-eval` call; the theory is the entire safety contract for that
 surface, and the framework's role is reduced to "ask the reasoner, veto on
 positive verdict."
+
+## The harness accumulates
+
+Together, the three principles describe a harness that does not ship as a
+finished product but accumulates. The minimal commitment — supervision,
+identity, audit, capability routing — is the starting point, not the end.
+Beyond that, the harness grows in response to the requirements the agent
+and user team actually encounter in service of the task: a tool defined
+when a workflow demands it, a hook installed when behaviour needs to be
+observed, a method redefined when a default proves wrong. The runtime is
+the cumulative product of contact with real requirements, not the
+prediction of imagined ones. This is the inversion the bitter lesson asks
+for: instead of front-loading abstractions to anticipate model capability,
+the framework lets the abstractions emerge from use, and remain only as
+long as they remain useful.

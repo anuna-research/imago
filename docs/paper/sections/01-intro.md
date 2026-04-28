@@ -10,12 +10,14 @@ hand-written tool-dispatch logic. Such assumptions age badly under Sutton's
 bitter lesson: as model capability climbs, scaffolding becomes obsolete and
 the framework's value collapses into migration burden. We argue that agent
 runtimes should commit to *operational scaffolding only* — supervision,
-identity, audit, capability routing — and treat every other layer as an
+identity, audit, capability routing — and treat every other layer as
 part of a *modular, self-evolving runtime* — one the user can redefine in
 flight, and one the agent itself can extend under safety gates. Three principles
 follow: every layer redefinable at runtime without restart, the runtime
-artifact is the heap, and safety comes from invariants, not pipelines. We
-offer **anuna-imago**, a ~4100-LOC SBCL Common Lisp harness, as an existence
+artifact is the heap, and safety comes from invariants, not pipelines.
+The harness is not a finished product but accumulates over time, as the
+agent/user team meets the real requirements of each task. We offer
+**anuna-imago**, a ~4100-LOC SBCL Common Lisp harness, as an existence
 proof. We acknowledge the wager openly: if model capability plateaus, the
 prescriptive frameworks were correct to bake in scaffolding.
 
