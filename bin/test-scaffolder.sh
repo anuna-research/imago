@@ -89,6 +89,16 @@ expect_success ".asd has correct system name"        grep -q '#:vendor-test' "$V
 expect_success ".asd depends on imago"               grep -q ':depends-on (#:imago)' "$VENDOR_TARGET/vendor-test.asd"
 
 # ---------------------------------------------------------------------------
+echo "# src/agent.lisp generation"
+expect_success "src/agent.lisp exists"               test -f "$VENDOR_TARGET/src/agent.lisp"
+expect_success "defines #:vendor-test package"       grep -q '(defpackage #:vendor-test' "$VENDOR_TARGET/src/agent.lisp"
+expect_success "exports toplevel"                    grep -q '#:toplevel' "$VENDOR_TARGET/src/agent.lisp"
+expect_success "defines build-agent"                 grep -q '(defun build-agent' "$VENDOR_TARGET/src/agent.lisp"
+expect_success "uses stub provider by default"       grep -q 'make-stub-provider' "$VENDOR_TARGET/src/agent.lisp"
+expect_success "registers greet tool"                grep -q "define-tool greet" "$VENDOR_TARGET/src/agent.lisp"
+expect_success "uses stamped capability"             grep -q '"vendor-test:reply"' "$VENDOR_TARGET/src/agent.lisp"
+
+# ---------------------------------------------------------------------------
 echo
 echo "result: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

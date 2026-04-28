@@ -97,4 +97,74 @@ cat > "$TARGET_ABS/$NAME.asd" <<EOF
                 :components ((:file "agent")))))
 EOF
 
+# Generate src/agent.lisp.
+mkdir -p "$TARGET_ABS/src"
+cat > "$TARGET_ABS/src/agent.lisp" <<EOF
+;;;; src/agent.lisp — your agent.
+;;;;
+;;;; Four sections below show the surfaces you'll most often edit:
+;;;;   1. Tools        — what the LLM can call
+;;;;   2. Hooks        — what runs around each turn
+;;;;   3. The agent    — provider, prompt, identity, capability
+;;;;   4. Toplevel     — what \`./$NAME\` does when launched
+;;;;
+;;;; Run \`./$NAME --echo "hello"\` after building. Then come back here
+;;;; and start changing things — the harness picks up redefinitions live.
+
+(defpackage #:$NAME
+  (:use #:cl)
+  (:export #:toplevel))
+
+(in-package #:$NAME)
+
+;;; ---------------------------------------------------------------- 1. Tools
+;;; Tools are functions the LLM can call. \`define-tool\` registers them
+;;; globally; the agent's \`:tools\` slot lists which ones it actually
+;;; exposes. See imago/src/tools.lisp for the full surface.
+
+(anuna-imago:define-tool greet
+  :description "Greet someone by name."
+  :schema      ((:name :type :string :required-p t :description "Person to greet"))
+  :handler     (lambda (args) (format nil "Hello, ~A." (getf args :name))))
+
+;; Add more tools here. Built-ins (harness-list-tools, harness-now, etc.)
+;; auto-register when imago loads — list them in :tools to expose them.
+
+
+;;; ---------------------------------------------------------------- 2. Hooks
+;;; Hooks fire around the turn loop. First handler to return :veto aborts
+;;; the chain. Uncomment to log every tool call this agent makes.
+
+;; (anuna-imago:register-hook :on-tool-call
+;;   (lambda (agent tool-name args)
+;;     (declare (ignore agent))
+;;     (format t "~&[tool] ~A ~S~%" tool-name args)
+;;     nil))                                          ; nil = don't veto
+
+
+;;; -------------------------------------------------------------- 3. The agent
+;;; Swap \`make-stub-provider\` for \`make-anthropic-provider\` (or one of
+;;; the plugins under imago/plugins/) once you have an API key.
+
+(defun build-agent ()
+  (make-instance 'anuna-imago:agent
+                 :id            '$NAME
+                 :capability    "$NAME:reply"
+                 :provider      (anuna-imago:make-stub-provider)
+                 :system-prompt "You are $NAME. Be concise."
+                 :tools         (cons 'greet anuna-imago:*builtin-tool-names*)))
+
+
+;;; --------------------------------------------------------------- 4. Toplevel
+;;; What runs when \`./$NAME\` launches. Keep this thin — agent logic
+;;; belongs in tools and hooks, not here.
+
+(defun toplevel ()
+  (let* ((sup   (anuna-imago:make-supervisor 'my-sup))
+         (agent (build-agent)))
+    (anuna-imago:spawn-agent! sup agent)
+    (sleep 0.05)
+    (anuna-imago:agent-main)))     ; reuses harness --echo / --serve / --version
+EOF
+
 echo "✓ Scaffolded $NAME at $TARGET"
