@@ -82,47 +82,62 @@ at the moment the reasoner adjudicated the call. Cleared between runs.")
 attribution to a form-id. Cleared on every query.")
 
 (defun %experiment-detect-trigger ()
-  "Walk *experiment-pending-facts* looking for a (mentions FORM-ID S) where
-S is a safety-layer symbol; return that S, or NIL. This is the symbol
-that 'caused' a +Δ in the floor-only stub."
-  (loop for fact-string in *experiment-pending-facts*
-        when (and (search "MENTIONS" fact-string :test #'char-equal))
-          do (dolist (s *safety-layer-symbols*)
-               (when (search (symbol-name s) fact-string :test #'char-equal)
-                 (return-from %experiment-detect-trigger s)))))
+  "Walk *experiment-pending-facts* (parsed s-exprs, not strings) for a
+(mentions|defmethod-targets|defgeneric-targets|defun-targets FORM-ID S)
+fact whose S is in *safety-layer-symbols* via EQ. Returns S or NIL.
+
+Earlier the stub stored facts as printed STRINGS and substring-matched
+symbol names — that produced false positives like vetoing READ-LINE
+because its name contains \"READ\". Now we keep the actual cons
+structures and do proper symbol comparison, matching what a real
+Spindle reasoner would do at the term-unification level."
+  (loop for fact in *experiment-pending-facts*
+        when (and (consp fact)
+                  (member (first fact)
+                          '(mentions defmethod-targets defgeneric-targets
+                            defun-targets))
+                  (>= (length fact) 3))
+          do (let ((sym (third fact)))
+               (when (and (symbolp sym)
+                          (member sym *safety-layer-symbols* :test #'eq))
+                 (return-from %experiment-detect-trigger sym)))))
 
 (defun %experiment-stub-call (op &rest args)
   (case op
     (:load-theory  :exp-handle)
     (:assert-fact
-     (let ((fact-string (princ-to-string (second args))))
-       (setf (gethash fact-string *experiment-asserted-facts*) t)
-       ;; Only attribute per-call facts to the trace. Install-time facts
-       ;; (safety-layer-symbol …) don't carry a form-id and are
-       ;; theory-static, so excluding them keeps the trace per-call clean.
-       (when (search "FORM-" fact-string)
-         (push fact-string *experiment-pending-facts*)))
+     (let ((fact (second args)))
+       (setf (gethash (princ-to-string fact) *experiment-asserted-facts*) t)
+       ;; Only attribute per-call facts to the trace. Install-time
+       ;; (safety-layer-symbol …) facts have a non-symbol or
+       ;; non-FORM- second element; per-call facts always tag with a
+       ;; FORM-N symbol via %assert-lift-facts!.
+       (when (and (consp fact) (>= (length fact) 2)
+                  (let ((fid (second fact)))
+                    (and (symbolp fid)
+                         (search "FORM-" (symbol-name fid)))))
+         (push fact *experiment-pending-facts*)))
      :ok)
     (:retract-fact
      (remhash (princ-to-string (second args)) *experiment-asserted-facts*)
      :ok)
     (:query
-     ;; Floor-only adjudication: forbid any form whose mentions/2 facts
-     ;; include a safety-layer symbol (mirrors r-forbid-mentions in the
-     ;; shipped floor theory).
+     ;; Floor-only adjudication: forbid any form whose mentions/2 (or
+     ;; def…-targets/2) facts include a safety-layer symbol via proper
+     ;; EQ symbol comparison.
      (let* ((goal       (second args))
             (form-id    (third goal))
             (trigger    (%experiment-detect-trigger))
-            (forbidden  trigger)
-            (verdict    (if forbidden :+delta :-delta))
+            (verdict    (if trigger :+delta :-delta))
             (derivation (cond
-                          (forbidden `((forbidden eval-call ,form-id)
-                                       (mentions ,form-id ,trigger)
-                                       (safety-layer-symbol ,trigger)))
+                          (trigger `((forbidden eval-call ,form-id)
+                                     (mentions ,form-id ,trigger)
+                                     (safety-layer-symbol ,trigger)))
                           (t nil))))
        (push (list :at (iso-8601-now)
                    :form-id form-id
-                   :facts (reverse *experiment-pending-facts*)
+                   :facts (mapcar #'princ-to-string
+                                   (reverse *experiment-pending-facts*))
                    :verdict verdict
                    :triggered-by trigger)
              *experiment-reasoner-trace*)
