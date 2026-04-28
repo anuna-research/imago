@@ -371,6 +371,30 @@ Both plugins reuse the existing `provider-stream!` contract — the same
 agent definition, supervision, hook chain, and self-modification port
 work unchanged with any served model.
 
+##### Multi-turn experiment runner
+
+[`examples/glm-self-mod-experiment.lisp`](./examples/glm-self-mod-experiment.lisp)
+is a research instrument, not a unit test. It spawns a GLM 5.1 agent
+against the Z.ai Coding Plan, runs a fixed six-prompt protocol that
+exercises tool-discovery → plan → implement → verify → forbidden-probe
+→ rollback, captures the harness state delta after each turn, and
+writes a markdown report under `/tmp/imago-experiments/` documenting
+the journey. Includes a floor-only stub reasoner so no live Spindle
+service is needed.
+
+```lisp
+(ql:quickload '(:imago :imago/zai))
+(load (merge-pathnames "examples/self-modifying.lisp"
+                       (asdf:system-source-directory :imago)))
+(load (merge-pathnames "examples/glm-self-mod-experiment.lisp"
+                       (asdf:system-source-directory :imago)))
+(anuna-imago::run-experiment)   ; → /tmp/imago-experiments/<ts>-glm-experiment.md
+```
+
+The generated report includes a falsification checklist (run-time
+observations to mark ✅ / ❌) and a list of failure modes to scan for
+during review.
+
 #### Opt-in: self-modification port
 
 A `harness-eval` tool — submit a Common Lisp source form, get it
