@@ -129,10 +129,16 @@ that contains a single text content block."
                 until (eq f :done)
                 do (push f frames))
           (setf frames (nreverse frames))
-          (check (= 1 (length frames)))
-          (let ((f (first frames)))
-            (check (eq :text (first f)))
-            (check (string= "Hello, world." (second f)))))))))
+          ;; Multi-step protocol now emits content frames + an
+          ;; :assistant-content + :stop-reason metadata frame per response.
+          ;; Filter to content frames for the count check.
+          (let* ((content-frames (remove-if-not (lambda (f) (eq :text (first f))) frames))
+                 (stop-reason   (second (find :stop-reason frames :key #'first))))
+            (check (= 1 (length content-frames)))
+            (let ((f (first content-frames)))
+              (check (eq :text (first f)))
+              (check (string= "Hello, world." (second f))))
+            (check (eq :end-turn stop-reason))))))))
 
 (defun test-stream-tool-use-frame ()
   (format t "~%-- anthropic-stream-tool-use-frame --~%")
@@ -152,12 +158,18 @@ that contains a single text content block."
                 until (eq f :done)
                 do (push f frames))
           (setf frames (nreverse frames))
-          (check (= 1 (length frames)))
-          (let ((f (first frames)))
-            (check (eq :tool-use (first f)))
-            (check (string= "toolu_1" (second f)))
-            (check (eq :greet (third f)))
-            (check (string= "World" (getf (fourth f) :name)))))))))
+          (let* ((tool-frames (remove-if-not (lambda (f) (eq :tool-use (first f))) frames))
+                 (stop-reason (second (find :stop-reason frames :key #'first))))
+            (check (= 1 (length tool-frames)))
+            (let ((f (first tool-frames)))
+              (check (eq :tool-use (first f)))
+              (check (string= "toolu_1" (second f)))
+              (check (eq :greet (third f)))
+              (check (string= "World" (getf (fourth f) :name))))
+            ;; Real Anthropic responses with tool_use carry stop_reason="tool_use",
+            ;; but the canned-helper fixture may set whatever the test author wrote.
+            (check (member stop-reason '(:tool-use :end-turn))
+                   "stop-reason emitted")))))))
 
 (defun test-stream-http-error-becomes-frame ()
   "An HTTP layer error should surface as an :error frame followed by :done,

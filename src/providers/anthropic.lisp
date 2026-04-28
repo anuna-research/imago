@@ -115,14 +115,33 @@ Bind to a stub in tests so M8 doesn't need a live API key.")
 (defgeneric build-request (provider message agent)
   (:documentation "Pure: produce the JSON-shaped request body (hash-table)."))
 
+;; %messages-list-p lives in turn-loop.lisp (protocol-level helper).
+
 (defmethod build-request ((p anthropic-provider) message agent)
-  (let* ((content (or (and (listp message) (ask-content message))
-                      (princ-to-string message)))
-         (req (%ht "model" (anthropic-model p)
+  "MESSAGE may be one of:
+  - a messages list: (((:role \"user\" :content \"...\")
+                       (:role \"assistant\" :content #(blocks))
+                       (:role \"user\" :content #(tool-results)))) — used by the
+    multi-step tool-use loop driver.
+  - an ask plist (legacy single-step path): wrapped as a single user
+    message of role \"user\".
+  - a string: same as ask plist.
+The shape is detected by %messages-list-p."
+  (let* ((messages-vec
+           (cond
+             ((%messages-list-p message)
+              (coerce (mapcar (lambda (m)
+                                (%ht "role"    (getf m :role)
+                                     "content" (getf m :content)))
+                              message)
+                      'vector))
+             (t
+              (vector (%ht "role" "user"
+                           "content" (or (and (listp message) (ask-content message))
+                                         (princ-to-string message)))))))
+         (req (%ht "model"      (anthropic-model p)
                    "max_tokens" (anthropic-max-tokens p)
-                   "messages" (vector
-                               (%ht "role" "user"
-                                    "content" content)))))
+                   "messages"   messages-vec)))
     (when (and (slot-boundp agent 'system-prompt)
                (stringp (agent-system-prompt agent))
                (not (string= "" (agent-system-prompt agent))))
@@ -151,13 +170,40 @@ Bind to a stub in tests so M8 doesn't need a live API key.")
 
 ;; ----------------------------------------------- response → frames ---
 
+(defun %anthropic-stop-reason-keyword (sr)
+  "Map Anthropic's stop_reason strings to canonical keywords for the
+multi-step driver. Unknown values pass through as :end-turn so the
+driver doesn't loop forever."
+  (cond
+    ((null sr)                     :end-turn)
+    ((string= sr "tool_use")       :tool-use)
+    ((string= sr "end_turn")       :end-turn)
+    ((string= sr "stop_sequence")  :end-turn)
+    ((string= sr "max_tokens")     :max-tokens)
+    ((string= sr "error")          :error)
+    (t                             :end-turn)))
+
 (defun %anthropic-response->frames (response-ht)
   "Walk the content blocks of a non-streaming Messages API response and
-return a list of canonical frames followed by :done."
+return a list of canonical frames followed by :done.
+
+Frames emitted, in order:
+  - (:text STRING)               — assistant text block
+  - (:tool-use ID NAME ARGS)     — assistant tool_use block; NAME interned
+                                    in :keyword for the legacy dispatch path
+  - (:assistant-content <vec>)   — the raw content vector for round-tripping
+                                    back to the API in the next iteration
+                                    (multi-step driver only; one per response)
+  - (:stop-reason :tool-use | :end-turn | :max-tokens | :error)
+                                  — emitted once per response
+  - (:error PLIST)               — only when stop_reason was \"error\"
+  - :done                        — sentinel"
   (let ((content (gethash "content" response-ht))
+        (raw-content nil)
         (frames  nil))
     (when (or (vectorp content) (listp content))
-      (loop for block across (if (listp content) (coerce content 'vector) content)
+      (setf raw-content (if (listp content) (coerce content 'vector) content))
+      (loop for block across raw-content
             for type = (gethash "type" block)
             do (cond
                  ((string= type "text")
@@ -171,10 +217,45 @@ return a list of canonical frames followed by :done."
                                                 (make-hash-table))))
                         frames))
                  (t nil))))                  ; unknown block — skip
-    (let ((stop-reason (gethash "stop_reason" response-ht)))
-      (when (string= stop-reason "error")
+    (let* ((stop-reason-str (gethash "stop_reason" response-ht))
+           (stop-reason     (%anthropic-stop-reason-keyword stop-reason-str)))
+      (when raw-content
+        (push (list :assistant-content raw-content) frames))
+      (push (list :stop-reason stop-reason) frames)
+      (when (eq stop-reason :error)
         (push (list :error (gethash "error" response-ht)) frames)))
     (nreverse (cons :done frames))))
+
+;; ----------------------------------------------- tool-results round-trip ---
+
+(defgeneric tool-results-message-content (provider results)
+  (:documentation "Build the user-message :content the multi-step driver
+appends after dispatching tool calls. Provider-specific shape — Anthropic
+expects a vector of {type:\"tool_result\", tool_use_id:ID, content:STRING}
+blocks."))
+
+(defmethod tool-results-message-content ((p anthropic-provider) results)
+  "RESULTS is a list of plists from handle-tool-frame:
+  (:id ID :name NAME :status :ok    :value V)
+  (:id ID :name NAME :status :error :error MSG)
+  (:id ID :name NAME :status :vetoed)
+The Anthropic shape ignores name and status; we squash everything to a
+human-readable string in :content."
+  (coerce
+   (mapcar
+    (lambda (r)
+      (let* ((id (getf r :id))
+             (status (getf r :status))
+             (content (cond
+                        ((eq status :ok)     (princ-to-string (getf r :value)))
+                        ((eq status :error)  (format nil "ERROR: ~A" (getf r :error)))
+                        ((eq status :vetoed) "VETOED by safety policy")
+                        (t (princ-to-string r)))))
+        (%ht "type"          "tool_result"
+             "tool_use_id"   id
+             "content"       content)))
+    results)
+   'vector))
 
 ;; ----------------------------------------------- stream! ---
 

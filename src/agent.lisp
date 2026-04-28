@@ -30,7 +30,18 @@ on their caller. Set by PROCESS-TURN; NIL outside a turn.")
    (identity      :initarg :identity :initform nil :accessor agent-identity-slot
                   :documentation "AGENT-IDENTITY (Ed25519 + did:key) or NIL.
 Only required when this agent connects to a router that enforces R4
-(Ed25519 signatures). See (agent-did agent) for the DID convenience.")))
+(Ed25519 signatures). See (agent-did agent) for the DID convenience.")
+   (message-history :initform nil :accessor agent-message-history
+                    :documentation "Provider-formatted messages from prior
+turns. Drive-conversation appends to this at the end of each turn so the
+next turn sees the full conversation. Provider-specific shape (e.g. for
+the Anthropic driver, list of (:role STRING :content STRING-or-VECTOR)
+plists). Reset by clearing the slot.")))
+
+(defun clear-agent-message-history! (agent)
+  "Drop the agent's conversation history. Useful between experiments or
+when starting a fresh task without restarting the agent."
+  (setf (agent-message-history agent) nil))
 
 (defun agent-did (agent)
   "Convenience: return the agent's did:key string, or NIL if no identity."

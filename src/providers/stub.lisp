@@ -24,15 +24,40 @@
          (when responder (list :responder responder))))
 
 (defmethod provider-stream! ((p stub-provider) agent message)
-  "Build the frame list, then return a closure consuming it."
+  "Build the frame list, then return a closure consuming it.
+
+Auto-appends a :stop-reason frame at the end:
+  - :tool-use   if the responder produced any (:tool-use …) frame
+  - :end-turn   otherwise
+This lets the multi-step driver use the stub for tool-use loop testing
+without each test needing to remember the frame protocol."
   (declare (ignore agent))
-  (let* ((response (funcall (stub-responder p) message))
-         (frames   (cond
+  ;; If the driver passed a messages-list (multi-step path), hand the
+  ;; responder just the latest user content so legacy responders that
+  ;; expect a single message keep working. The full history is ignored
+  ;; by the stub by design — single-step semantics.
+  (let* ((effective-msg (cond
+                          ((%messages-list-p message)
+                           (or (%last-user-content-from-messages message) ""))
+                          (t message)))
+         (response (funcall (stub-responder p) effective-msg))
+         (raw      (cond
                      ((stringp response)
                       (list (list :text response)))
                      ((listp response)
                       response)
-                     (t (list (list :text (princ-to-string response)))))))
+                     (t (list (list :text (princ-to-string response))))))
+         (has-tool-use (some (lambda (f)
+                               (and (consp f) (eq (first f) :tool-use)))
+                             raw))
+         (already-has-stop (some (lambda (f)
+                                   (and (consp f) (eq (first f) :stop-reason)))
+                                 raw))
+         (frames (cond
+                   (already-has-stop raw)
+                   (t (append raw
+                              (list (list :stop-reason
+                                          (if has-tool-use :tool-use :end-turn))))))))
     ;; A stream is a closure over the frame list; calling it pops one frame.
     (let ((cell (cons nil frames)))         ; sentinel head
       (lambda () (pop (cdr cell))))))

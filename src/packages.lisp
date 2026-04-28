@@ -42,8 +42,11 @@
    #:agent-theory
    #:agent-state
    #:agent-identity-slot
-   #:agent-did
+   #:agent-message-history
+   #:clear-agent-message-history!
    #:*current-agent*
+   #:tool-results-message-content
+   #:*max-tool-use-iterations*
    #:turn-loop
    #:handle-message
    #:on-spawn

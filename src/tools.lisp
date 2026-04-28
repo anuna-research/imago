@@ -66,16 +66,35 @@
   (tool-name tool))
 
 (defun unregister-tool! (name)
-  "Remove tool NAME from the registry. Returns T if removed, NIL if absent."
-  (sb-thread:with-mutex (*tool-registry-lock*)
-    (let ((had (nth-value 1 (gethash name *tool-registry*))))
-      (remhash name *tool-registry*)
-      had)))
+  "Remove tool NAME from the registry. Returns T if removed, NIL if absent.
+Accepts symbol, keyword, or string."
+  (let ((normalized (%normalize-tool-name name)))
+    (sb-thread:with-mutex (*tool-registry-lock*)
+      (let ((had (nth-value 1 (gethash normalized *tool-registry*))))
+        (remhash normalized *tool-registry*)
+        had))))
+
+(defun %normalize-tool-name (name)
+  "Coerce NAME (symbol, keyword, or string) to the canonical registry key
+— a non-keyword symbol in the :anuna-imago package. Provider drivers
+hand us strings or keywords (e.g. Anthropic's parser interns
+\"harness-version\" as :HARNESS-VERSION); the registry stores symbols
+from define-tool. This normalisation lets keyword/string lookups
+succeed."
+  (cond
+    ((and (symbolp name) (not (keywordp name))) name)
+    ((keywordp name)
+     (or (find-symbol (symbol-name name) :anuna-imago) name))
+    ((stringp name)
+     (or (find-symbol (string-upcase name) :anuna-imago)
+         (intern (string-upcase name) :anuna-imago)))
+    (t name)))
 
 (defun find-tool (name)
-  "Return the TOOL struct registered under NAME, or NIL."
+  "Return the TOOL struct registered under NAME, or NIL.
+Accepts symbol, keyword, or string — see %normalize-tool-name."
   (sb-thread:with-mutex (*tool-registry-lock*)
-    (gethash name *tool-registry*)))
+    (gethash (%normalize-tool-name name) *tool-registry*)))
 
 (defun list-tools ()
   "Snapshot of registered tool names."

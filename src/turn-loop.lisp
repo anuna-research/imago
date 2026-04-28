@@ -82,28 +82,149 @@ introspect on the agent whose turn they're handling."
          reply)))))
 
 
+(defun %messages-list-p (m)
+  "T if M is a list of message plists, each carrying :role and :content.
+Used by provider drivers to dispatch on the multi-step messages-list
+shape vs. the legacy single-message shape that provider-stream! used to
+require. Defined here in turn-loop.lisp because it's protocol-level."
+  (and (listp m)
+       (consp m)
+       (every (lambda (e) (and (listp e) (getf e :role) (getf e :content))) m)))
+
+(defun %last-user-content-from-messages (messages)
+  "Pull the latest 'user' role :content out of a messages-list. Used by
+single-step providers (e.g. stub-provider) so they can ignore the rest
+of the conversation history and just respond to the most recent prompt."
+  (loop for m in (reverse messages)
+        when (and (string= "user" (getf m :role))
+                  (stringp (getf m :content)))
+          return (getf m :content)))
+
+(defparameter *max-tool-use-iterations* 16
+  "Safety bound on the multi-step tool-use loop in drive-stream. After
+this many provider round-trips the loop exits even if the model is still
+emitting tool_use blocks. Prevents accidental infinite spend.")
+
+(defun %consume-stream (stream)
+  "Drain STREAM into a step plist:
+  (:text-parts (\"...\" ...)        ; assistant text fragments in order
+   :tool-uses ((:id ID :name NAME :args ARGS) ...)
+   :assistant-content RAW           ; opaque, provider's round-trip blob
+   :stop-reason :tool-use|:end-turn|:max-tokens|:error|nil
+   :error PLIST-OR-NIL)
+The provider may emit frames in any order; we accumulate until :done."
+  (let ((text-parts nil) (tool-uses nil) (assistant-content nil)
+        (stop-reason nil) (err nil))
+    (loop for frame = (stream-next-frame! stream)
+          until (eq frame :done)
+          do (case (and (consp frame) (first frame))
+               (:text              (push (second frame) text-parts))
+               (:tool-use          (push (list :id (second frame)
+                                               :name (third frame)
+                                               :args (fourth frame))
+                                         tool-uses))
+               (:assistant-content (setf assistant-content (second frame)))
+               (:stop-reason       (setf stop-reason (second frame)))
+               (:error             (setf err (rest frame)))))
+    (list :text-parts        (nreverse text-parts)
+          :tool-uses         (nreverse tool-uses)
+          :assistant-content assistant-content
+          :stop-reason       stop-reason
+          :error             err)))
+
+(defun %dispatch-tool-use (agent tool-use)
+  "Convert one (:id :name :args) plist into a tool-result plist via the
+existing :on-tool-call hook + dispatch path."
+  (let ((frame (list :tool-use
+                     (getf tool-use :id)
+                     (getf tool-use :name)
+                     (getf tool-use :args))))
+    (handle-tool-frame agent frame)))
+
 (defun drive-stream (agent msg)
-  "Open a provider stream, consume frames, dispatch tool calls, build reply."
-  (let ((provider (agent-provider agent))
-        (text     (make-string-output-stream))
-        (tools    nil))
+  "Multi-step provider loop with tool_result feedback and conversation
+history. For each iteration:
+
+  1. Build a messages list = agent's prior history + current user content.
+  2. provider-stream!, drain, get a step plist.
+  3. Append assistant-content to messages.
+  4. If stop-reason is :tool-use, dispatch each tool-use, add a user
+     message of tool_result blocks (provider-specific shape via
+     tool-results-message-content), loop. Else stop.
+  5. Persist the final messages list back to agent-message-history.
+
+Returns a reply plist. Bounded by *MAX-TOOL-USE-ITERATIONS* to prevent
+runaway spend."
+  (let ((provider (agent-provider agent)))
     (when (null provider)
       (return-from drive-stream
-        (make-reply "" :tool-results
-                    (list (list :error :no-provider)))))
-    (let ((stream (provider-stream! provider agent msg)))
-      (loop for frame = (stream-next-frame! stream)
-            until (eq frame :done)
-            do (case (and (consp frame) (first frame))
-                 (:text
-                  (write-string (second frame) text))
-                 (:tool-use
-                  (let ((tool-result (handle-tool-frame agent frame)))
-                    (push tool-result tools)))
-                 (:error
-                  (push (list :error (rest frame)) tools)))))
-    (make-reply (get-output-stream-string text)
-                :tool-results (nreverse tools))))
+        (make-reply "" :tool-results (list (list :error :no-provider)))))
+    (let* ((initial-content (cond
+                              ((and (listp msg) (ask-content msg))
+                               (ask-content msg))
+                              ((stringp msg) msg)
+                              (t (princ-to-string msg))))
+           (history (copy-list (agent-message-history agent)))
+           (messages (append history
+                             (list (list :role "user"
+                                         :content initial-content))))
+           (final-text (make-string-output-stream))
+           (all-tool-results nil))
+      (loop for iteration from 1 to *max-tool-use-iterations*
+            for stream = (provider-stream! provider agent messages)
+            for step   = (%consume-stream stream)
+            do
+               (dolist (part (getf step :text-parts))
+                 (write-string part final-text))
+               (when (getf step :error)
+                 (push (list :error (getf step :error)) all-tool-results))
+               ;; Append the assistant message verbatim (raw content, not text)
+               (when (getf step :assistant-content)
+                 (setf messages
+                       (append messages
+                               (list (list :role "assistant"
+                                           :content (getf step :assistant-content))))))
+               (cond
+                 ;; Provider returned tool-uses; try to continue the loop.
+                 ((and (eq (getf step :stop-reason) :tool-use)
+                       (getf step :tool-uses))
+                  (let* ((results (mapcar
+                                    (lambda (tu) (%dispatch-tool-use agent tu))
+                                    (getf step :tool-uses)))
+                         (tr-content
+                           (handler-case
+                               (tool-results-message-content provider results)
+                             (error () nil))))
+                    (setf all-tool-results (append all-tool-results results))
+                    (cond
+                      ;; Provider supports tool-result feedback: feed back, loop.
+                      (tr-content
+                       (setf messages
+                             (append messages
+                                     (list (list :role "user"
+                                                 :content tr-content)))))
+                      ;; No tool-result feedback shape defined for this
+                      ;; provider — treat tool-use as terminal (legacy
+                      ;; single-shot semantics; e.g. stub-provider in M4
+                      ;; tests). Persist history and return.
+                      (t
+                       (setf (agent-message-history agent) messages)
+                       (return (make-reply (get-output-stream-string final-text)
+                                           :tool-results all-tool-results))))))
+                 ;; Done
+                 (t
+                  (setf (agent-message-history agent) messages)
+                  (return (make-reply (get-output-stream-string final-text)
+                                      :tool-results all-tool-results))))
+            finally
+               ;; Hit the iteration cap
+               (setf (agent-message-history agent) messages)
+               (return (make-reply
+                         (concatenate 'string
+                                      (get-output-stream-string final-text)
+                                      (format nil "~%[hit *max-tool-use-iterations*=~D]"
+                                              *max-tool-use-iterations*))
+                         :tool-results all-tool-results))))))
 
 (defun handle-tool-frame (agent frame)
   "Run :on-tool-call, dispatch the named tool, return a result plist.
