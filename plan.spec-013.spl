@@ -1,0 +1,299 @@
+; =============================================================================
+; IMPL-IMAGO-SKILL-PORT — Implementation plan for SPEC-013
+; =============================================================================
+; Decomposes the drafting + implementation of SPEC-013 (skill definition port)
+; into research, drafting, decision, review, and (deferred) implementation
+; tasks. The drafting phase produces a USDD-format spec compatible with the
+; Anthropic-style skill format used by Claude Code, Codex, hermes-agent, etc.
+; The implementation phase is gated on Hugo's approval of the spec and on the
+; resolution of three open questions raised during drafting.
+
+(meta plan
+  (id "IMPL-IMAGO-SKILL-PORT")
+  (title "anuna-imago — skill definition port (SPEC-013)")
+  (version "0.1.0")
+  (status "active")
+  (created "2026-05-05")
+  (spec "specs/SPEC-013-skill-definition-port.md")
+  (description "Draft SPEC-013 for a harness-define-skill tool compatible with Claude Code / Codex / hermes-agent skill formats (YAML frontmatter + Markdown body, one-dir-per-skill). Spec covers requirements, contracts, ADRs, tests, and observability. Implementation is deferred to a follow-on task gated on Hugo's spec approval."))
+
+(given agent-me-available)
+(given agent-hugo-available)
+
+; --- Drafting tasks (me) ---
+(given task-research-formats)         ; survey claude-code / codex / hermes formats
+(given task-draft-requirements)       ; REQ-### for the port
+(given task-draft-nfrs)               ; NFR-### thresholds
+(given task-draft-contracts)          ; CON-### for harness-define-skill etc
+(given task-draft-adrs)               ; ADR-### for format / discovery / safety choices
+(given task-draft-tests)              ; TEST-### specifications
+(given task-draft-observability)      ; OBS-### signals
+(given task-assemble-spec)            ; stitch everything into specs/SPEC-013-…md
+
+; --- Review gates (hugo) ---
+(given task-review-spec)              ; hugo reads the assembled spec, approves or requests changes
+
+; --- Deferred implementation (out of scope for this plan, but listed for traceability) ---
+(given task-implement-deferred)       ; intentionally not claimed in this iteration
+
+(given no-deps-research-formats)
+
+; =============================================================================
+; TASK METADATA
+; =============================================================================
+
+(meta task-research-formats
+  (description "Survey the skill formats used by Claude Code (~/.claude/skills/<name>/SKILL.md), Codex, and hermes-agent (skills/<name>/SKILL.md or DESCRIPTION.md). Identify the common shape: YAML frontmatter (at minimum name + description) + Markdown body, one directory per skill. Identify the variation surface: optional fields (version, author, license, tags, related_skills, metadata.<vendor> blocks). Output: a short note in the SPEC's Background section.")
+  (acceptance "SPEC-013 Background section names at least 3 reference formats with file:line citations and identifies the minimal compatible subset of frontmatter fields."))
+
+(meta task-draft-requirements
+  (description "Draft the functional REQ-### entries for the skill port. Cover: skill format compatibility, agent-driven definition (harness-define-skill tool), discovery at boot, listing/inspection, removal, safe overwrite of existing skills, naming constraints, body validation, persistence semantics, integration with the existing tool registry, and the safety surface (what self-evolution means under the floor invariants). Use the REQ template from PROTO-001.")
+  (acceptance "At least 8 REQ-### entries, each atomic, verifiable, and traced to at least one TEST-### entry."))
+
+(meta task-draft-nfrs
+  (description "Draft NFR-### entries with measurable thresholds: skill-load latency at boot, harness-define-skill latency, file-system footprint per skill, max skills per directory, max body size, max name length. Each NFR has a verification mechanism.")
+  (acceptance "At least 4 NFR-### entries with numeric thresholds and verification."))
+
+(meta task-draft-contracts
+  (description "Draft CON-### entries specifying the API of the new tools: harness-define-skill, harness-list-skills, harness-describe-skill, harness-install-skill (load by name without restart), harness-uninstall-skill. Each contract includes the schema, pre-conditions, post-conditions, and error model. Use the CON template from PROTO-001 with pre/post-conditions structured per-clause for traceability.")
+  (acceptance "At least 5 CON-### entries, each with explicit pre/post per REQ-###."))
+
+(meta task-draft-adrs
+  (description "Draft ADR-### entries capturing the load-bearing design decisions: (a) on-disk format (Anthropic-compatible YAML+Markdown vs Lisp s-exp); (b) skill discovery directory and resolution order (project-local vs user-global); (c) safety treatment of skill bodies (do they pass through the same defeasible-logic floor as harness-eval, or are they bounded to data-only declarations?); (d) namespace collision handling with the existing tool registry.")
+  (acceptance "At least 4 ADR-### entries, each with options considered, decision, and consequences."))
+
+(meta task-draft-tests
+  (description "For each REQ-###, derive at least one TEST-### per applicable test type (positive / negative-input / negative-output) per PROTO-001. Special focus on the safety surface: tests that verify a skill cannot bypass the floor invariants by being loaded as a 'skill' rather than a 'harness-eval form'.")
+  (acceptance "Every REQ-### has at least one TEST-### with explicit Validates: REQ-### attribution; safety-surface tests include negative-output cases."))
+
+(meta task-draft-observability
+  (description "Draft OBS-### signals: skill-load count, define count, uninstall count, body-size distribution, validation-failure rate, time-to-first-call-after-define. Each OBS has a metric/log/trace specification.")
+  (acceptance "At least 4 OBS-### entries, each with concrete signal specification."))
+
+(meta task-assemble-spec
+  (description "Assemble all artefacts into specs/SPEC-013-skill-definition-port.md following the USDD information-table + sectioned format. Wikilinks for all cross-references (REQ→TEST, CON→REQ, ADR→REQ). Include open questions for hugo if any decisions remain ambiguous.")
+  (acceptance "specs/SPEC-013-skill-definition-port.md exists, validates against PROTO-001 structural expectations, and is reviewable end-to-end by Hugo."))
+
+(meta task-review-spec
+  (description "Hugo reads the assembled spec, validates the technical claims (especially safety-surface treatment), answers open questions, and either approves or requests revisions. Asserts (given approved-spec) when ready to gate downstream implementation.")
+  (acceptance "Hugo confirms or corrects; (given approved-spec) asserted; any revisions applied; status set to 'approved' in the spec frontmatter."))
+
+(meta task-implement-deferred
+  (description "Implementation of SPEC-013 in src/skills.lisp (or equivalent). Deferred to a follow-on plan; this entry exists for traceability so that the spec graph shows the implementation as known-pending.")
+  (acceptance "DEFERRED — not claimed in this plan.")
+  (gates "out-of-scope"))
+
+; =============================================================================
+; READINESS RULES
+; =============================================================================
+
+(normally r-ready-research (and task-research-formats no-deps-research-formats) ready-research-formats)
+
+(normally r-ready-requirements (and task-draft-requirements completed-research-formats) ready-draft-requirements)
+(normally r-ready-nfrs        (and task-draft-nfrs        completed-research-formats) ready-draft-nfrs)
+(normally r-ready-contracts   (and task-draft-contracts   completed-draft-requirements) ready-draft-contracts)
+(normally r-ready-adrs        (and task-draft-adrs        completed-draft-requirements) ready-draft-adrs)
+(normally r-ready-tests       (and task-draft-tests       completed-draft-requirements completed-draft-contracts) ready-draft-tests)
+(normally r-ready-obs         (and task-draft-observability completed-draft-requirements) ready-draft-observability)
+
+(normally r-ready-assemble
+  (and task-assemble-spec
+       completed-draft-requirements
+       completed-draft-nfrs
+       completed-draft-contracts
+       completed-draft-adrs
+       completed-draft-tests
+       completed-draft-observability)
+  ready-assemble-spec)
+
+(normally r-ready-review-spec (and task-review-spec completed-assemble-spec) ready-review-spec)
+
+; =============================================================================
+; ASSIGNMENT RULES
+; =============================================================================
+
+(normally r-assign-research      (and ready-research-formats     agent-me-available)   assign-to-research-formats-me)
+(normally r-assign-requirements  (and ready-draft-requirements   agent-me-available)   assign-to-draft-requirements-me)
+(normally r-assign-nfrs          (and ready-draft-nfrs           agent-me-available)   assign-to-draft-nfrs-me)
+(normally r-assign-contracts     (and ready-draft-contracts      agent-me-available)   assign-to-draft-contracts-me)
+(normally r-assign-adrs          (and ready-draft-adrs           agent-me-available)   assign-to-draft-adrs-me)
+(normally r-assign-tests         (and ready-draft-tests          agent-me-available)   assign-to-draft-tests-me)
+(normally r-assign-obs           (and ready-draft-observability  agent-me-available)   assign-to-draft-observability-me)
+(normally r-assign-assemble      (and ready-assemble-spec        agent-me-available)   assign-to-assemble-spec-me)
+(normally r-assign-review        (and ready-review-spec          agent-hugo-available) assign-to-review-spec-hugo)
+
+(claims agent:me
+  :at "2026-05-05T03:47:52Z"
+  (given claim-v1-research-formats)
+  (normally r-cl-state-v1-research-formats claim-v1-research-formats state-claimed-v1-research-formats)
+  (normally r-cl-chain-v1-research-formats state-claimed-v1-research-formats claimed-research-formats)
+)
+
+;; Propagation rules: failures in 'research-formats' block downstream tasks
+(normally r-propagate-draft-nfrs-from-research-formats-failed failed-research-formats upstream-blocked-draft-nfrs)
+(normally r-propagate-draft-nfrs-from-research-formats-permanently-failed permanently-failed-research-formats upstream-blocked-draft-nfrs)
+(normally r-propagate-draft-nfrs-from-research-formats-stale-v1 stale-v1-research-formats upstream-blocked-draft-nfrs)
+(normally r-propagate-draft-nfrs-from-research-formats-timeout-v1 timeout-v1-research-formats upstream-blocked-draft-nfrs)
+(normally r-propagate-draft-nfrs-from-research-formats-blocked upstream-blocked-research-formats upstream-blocked-draft-nfrs)
+(normally r-propagate-draft-requirements-from-research-formats-failed failed-research-formats upstream-blocked-draft-requirements)
+(normally r-propagate-draft-requirements-from-research-formats-permanently-failed permanently-failed-research-formats upstream-blocked-draft-requirements)
+(normally r-propagate-draft-requirements-from-research-formats-stale-v1 stale-v1-research-formats upstream-blocked-draft-requirements)
+(normally r-propagate-draft-requirements-from-research-formats-timeout-v1 timeout-v1-research-formats upstream-blocked-draft-requirements)
+(normally r-propagate-draft-requirements-from-research-formats-blocked upstream-blocked-research-formats upstream-blocked-draft-requirements)
+
+;; Transitive propagation: upstream-blocked cascades through dependency chain
+(normally r-propagate-assemble-spec-from-draft-nfrs-blocked upstream-blocked-draft-nfrs upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-requirements-blocked upstream-blocked-draft-requirements upstream-blocked-assemble-spec)
+(normally r-propagate-draft-adrs-from-draft-requirements-blocked upstream-blocked-draft-requirements upstream-blocked-draft-adrs)
+(normally r-propagate-draft-contracts-from-draft-requirements-blocked upstream-blocked-draft-requirements upstream-blocked-draft-contracts)
+(normally r-propagate-draft-observability-from-draft-requirements-blocked upstream-blocked-draft-requirements upstream-blocked-draft-observability)
+(normally r-propagate-draft-tests-from-draft-requirements-blocked upstream-blocked-draft-requirements upstream-blocked-draft-tests)
+(normally r-propagate-review-spec-from-assemble-spec-blocked upstream-blocked-assemble-spec upstream-blocked-review-spec)
+(normally r-propagate-assemble-spec-from-draft-adrs-blocked upstream-blocked-draft-adrs upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-contracts-blocked upstream-blocked-draft-contracts upstream-blocked-assemble-spec)
+(normally r-propagate-draft-tests-from-draft-contracts-blocked upstream-blocked-draft-contracts upstream-blocked-draft-tests)
+(normally r-propagate-assemble-spec-from-draft-observability-blocked upstream-blocked-draft-observability upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-tests-blocked upstream-blocked-draft-tests upstream-blocked-assemble-spec)
+
+(claims agent:me
+  :at "2026-05-05T03:48:37Z"
+  (given completed-research-formats))
+
+(claims agent:me
+  :at "2026-05-05T03:48:41Z"
+  (given claim-v1-draft-requirements)
+  (normally r-cl-state-v1-draft-requirements claim-v1-draft-requirements state-claimed-v1-draft-requirements)
+  (normally r-cl-chain-v1-draft-requirements state-claimed-v1-draft-requirements claimed-draft-requirements)
+)
+
+;; Propagation rules: failures in 'draft-requirements' block downstream tasks
+(normally r-propagate-assemble-spec-from-draft-requirements-failed failed-draft-requirements upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-requirements-permanently-failed permanently-failed-draft-requirements upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-requirements-stale-v1 stale-v1-draft-requirements upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-requirements-timeout-v1 timeout-v1-draft-requirements upstream-blocked-assemble-spec)
+(normally r-propagate-draft-adrs-from-draft-requirements-failed failed-draft-requirements upstream-blocked-draft-adrs)
+(normally r-propagate-draft-adrs-from-draft-requirements-permanently-failed permanently-failed-draft-requirements upstream-blocked-draft-adrs)
+(normally r-propagate-draft-adrs-from-draft-requirements-stale-v1 stale-v1-draft-requirements upstream-blocked-draft-adrs)
+(normally r-propagate-draft-adrs-from-draft-requirements-timeout-v1 timeout-v1-draft-requirements upstream-blocked-draft-adrs)
+(normally r-propagate-draft-contracts-from-draft-requirements-failed failed-draft-requirements upstream-blocked-draft-contracts)
+(normally r-propagate-draft-contracts-from-draft-requirements-permanently-failed permanently-failed-draft-requirements upstream-blocked-draft-contracts)
+(normally r-propagate-draft-contracts-from-draft-requirements-stale-v1 stale-v1-draft-requirements upstream-blocked-draft-contracts)
+(normally r-propagate-draft-contracts-from-draft-requirements-timeout-v1 timeout-v1-draft-requirements upstream-blocked-draft-contracts)
+(normally r-propagate-draft-observability-from-draft-requirements-failed failed-draft-requirements upstream-blocked-draft-observability)
+(normally r-propagate-draft-observability-from-draft-requirements-permanently-failed permanently-failed-draft-requirements upstream-blocked-draft-observability)
+(normally r-propagate-draft-observability-from-draft-requirements-stale-v1 stale-v1-draft-requirements upstream-blocked-draft-observability)
+(normally r-propagate-draft-observability-from-draft-requirements-timeout-v1 timeout-v1-draft-requirements upstream-blocked-draft-observability)
+(normally r-propagate-draft-tests-from-draft-requirements-failed failed-draft-requirements upstream-blocked-draft-tests)
+(normally r-propagate-draft-tests-from-draft-requirements-permanently-failed permanently-failed-draft-requirements upstream-blocked-draft-tests)
+(normally r-propagate-draft-tests-from-draft-requirements-stale-v1 stale-v1-draft-requirements upstream-blocked-draft-tests)
+(normally r-propagate-draft-tests-from-draft-requirements-timeout-v1 timeout-v1-draft-requirements upstream-blocked-draft-tests)
+
+(claims agent:me
+  :at "2026-05-05T03:48:41Z"
+  (given claim-v1-draft-nfrs)
+  (normally r-cl-state-v1-draft-nfrs claim-v1-draft-nfrs state-claimed-v1-draft-nfrs)
+  (normally r-cl-chain-v1-draft-nfrs state-claimed-v1-draft-nfrs claimed-draft-nfrs)
+)
+
+;; Propagation rules: failures in 'draft-nfrs' block downstream tasks
+(normally r-propagate-assemble-spec-from-draft-nfrs-failed failed-draft-nfrs upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-nfrs-permanently-failed permanently-failed-draft-nfrs upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-nfrs-stale-v1 stale-v1-draft-nfrs upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-nfrs-timeout-v1 timeout-v1-draft-nfrs upstream-blocked-assemble-spec)
+
+(claims agent:me
+  :at "2026-05-05T03:49:42Z"
+  (given completed-draft-requirements))
+
+(claims agent:me
+  :at "2026-05-05T03:49:42Z"
+  (given completed-draft-nfrs))
+
+(claims agent:me
+  :at "2026-05-05T03:49:46Z"
+  (given claim-v1-draft-contracts)
+  (normally r-cl-state-v1-draft-contracts claim-v1-draft-contracts state-claimed-v1-draft-contracts)
+  (normally r-cl-chain-v1-draft-contracts state-claimed-v1-draft-contracts claimed-draft-contracts)
+)
+
+;; Propagation rules: failures in 'draft-contracts' block downstream tasks
+(normally r-propagate-assemble-spec-from-draft-contracts-failed failed-draft-contracts upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-contracts-permanently-failed permanently-failed-draft-contracts upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-contracts-stale-v1 stale-v1-draft-contracts upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-contracts-timeout-v1 timeout-v1-draft-contracts upstream-blocked-assemble-spec)
+(normally r-propagate-draft-tests-from-draft-contracts-failed failed-draft-contracts upstream-blocked-draft-tests)
+(normally r-propagate-draft-tests-from-draft-contracts-permanently-failed permanently-failed-draft-contracts upstream-blocked-draft-tests)
+(normally r-propagate-draft-tests-from-draft-contracts-stale-v1 stale-v1-draft-contracts upstream-blocked-draft-tests)
+(normally r-propagate-draft-tests-from-draft-contracts-timeout-v1 timeout-v1-draft-contracts upstream-blocked-draft-tests)
+
+(claims agent:me
+  :at "2026-05-05T03:49:46Z"
+  (given claim-v1-draft-adrs)
+  (normally r-cl-state-v1-draft-adrs claim-v1-draft-adrs state-claimed-v1-draft-adrs)
+  (normally r-cl-chain-v1-draft-adrs state-claimed-v1-draft-adrs claimed-draft-adrs)
+)
+
+;; Propagation rules: failures in 'draft-adrs' block downstream tasks
+(normally r-propagate-assemble-spec-from-draft-adrs-failed failed-draft-adrs upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-adrs-permanently-failed permanently-failed-draft-adrs upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-adrs-stale-v1 stale-v1-draft-adrs upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-adrs-timeout-v1 timeout-v1-draft-adrs upstream-blocked-assemble-spec)
+
+(claims agent:me
+  :at "2026-05-05T03:49:46Z"
+  (given claim-v1-draft-observability)
+  (normally r-cl-state-v1-draft-observability claim-v1-draft-observability state-claimed-v1-draft-observability)
+  (normally r-cl-chain-v1-draft-observability state-claimed-v1-draft-observability claimed-draft-observability)
+)
+
+;; Propagation rules: failures in 'draft-observability' block downstream tasks
+(normally r-propagate-assemble-spec-from-draft-observability-failed failed-draft-observability upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-observability-permanently-failed permanently-failed-draft-observability upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-observability-stale-v1 stale-v1-draft-observability upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-observability-timeout-v1 timeout-v1-draft-observability upstream-blocked-assemble-spec)
+
+(claims agent:me
+  :at "2026-05-05T03:51:56Z"
+  (given completed-draft-contracts))
+
+(claims agent:me
+  :at "2026-05-05T03:51:56Z"
+  (given completed-draft-adrs))
+
+(claims agent:me
+  :at "2026-05-05T03:51:56Z"
+  (given completed-draft-observability))
+
+(claims agent:me
+  :at "2026-05-05T03:52:02Z"
+  (given claim-v1-draft-tests)
+  (normally r-cl-state-v1-draft-tests claim-v1-draft-tests state-claimed-v1-draft-tests)
+  (normally r-cl-chain-v1-draft-tests state-claimed-v1-draft-tests claimed-draft-tests)
+)
+
+;; Propagation rules: failures in 'draft-tests' block downstream tasks
+(normally r-propagate-assemble-spec-from-draft-tests-failed failed-draft-tests upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-tests-permanently-failed permanently-failed-draft-tests upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-tests-stale-v1 stale-v1-draft-tests upstream-blocked-assemble-spec)
+(normally r-propagate-assemble-spec-from-draft-tests-timeout-v1 timeout-v1-draft-tests upstream-blocked-assemble-spec)
+
+(claims agent:me
+  :at "2026-05-05T03:53:05Z"
+  (given completed-draft-tests))
+
+(claims agent:me
+  :at "2026-05-05T03:53:08Z"
+  (given claim-v1-assemble-spec)
+  (normally r-cl-state-v1-assemble-spec claim-v1-assemble-spec state-claimed-v1-assemble-spec)
+  (normally r-cl-chain-v1-assemble-spec state-claimed-v1-assemble-spec claimed-assemble-spec)
+)
+
+;; Propagation rules: failures in 'assemble-spec' block downstream tasks
+(normally r-propagate-review-spec-from-assemble-spec-failed failed-assemble-spec upstream-blocked-review-spec)
+(normally r-propagate-review-spec-from-assemble-spec-permanently-failed permanently-failed-assemble-spec upstream-blocked-review-spec)
+(normally r-propagate-review-spec-from-assemble-spec-stale-v1 stale-v1-assemble-spec upstream-blocked-review-spec)
+(normally r-propagate-review-spec-from-assemble-spec-timeout-v1 timeout-v1-assemble-spec upstream-blocked-review-spec)
+
+(claims agent:me
+  :at "2026-05-05T03:54:26Z"
+  (given completed-assemble-spec))
