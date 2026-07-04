@@ -518,6 +518,82 @@ Tests bind this to make the reasoner veto specific forms.")
         (handler-case (delete-file path) (error () nil))))))
 
 ;; =========================================================================
+;; REQ-011 / TEST-016 — persistence across save-image!
+;; =========================================================================
+;;
+;; SAVE-IMAGE! does not return, so (as in m9-tests) a sub-SBCL performs the
+;; save: it loads :imago, loads examples/self-modifying.lisp, installs the
+;; port with a stubbed reasoner, populates the origin index and rollback
+;; register, then saves an image whose toplevel prints the survival state
+;; of the four artefacts as a plist. The parent boots the binary and checks.
+
+(defvar *m12-image-path* "/tmp/imago-m12-persist-agent")
+
+(defun test-m12-persistence-across-save ()
+  (format t "~%-- m12-persistence-across-save (TEST-016) --~%")
+  (handler-case (delete-file *m12-image-path*) (error () nil))
+  (let ((root   (namestring (asdf:system-source-directory :imago)))
+        (ql     (namestring (merge-pathnames "quicklisp/setup.lisp"
+                                             (user-homedir-pathname))))
+        (script (format nil "/tmp/imago-m12-persist-save-~D.lisp" (random 100000))))
+    (with-open-file (s script :direction :output :if-exists :supersede)
+      (write-string "(in-package :anuna-imago)" s) (terpri s)
+      (format s "(load \"~Aexamples/self-modifying.lisp\")~%" root)
+      (write-string "(setf *reasoner-ipc-call*
+        (lambda (&rest args) (declare (ignore args))
+          (list :tag :-delta :derivation nil :time-ms 1)))
+      (setf *active-theory-handle* :m12-persist-stub)
+      (install-self-modification-tools!
+       :audit-log-path \"/tmp/imago-m12-persist-audit.log\")
+      (%record-definition! 'anuna-imago-user::persisted-fn
+                           \"(defun persisted-fn () 1)\" 'm12-test nil nil)
+      (%push-function-rollback! 'anuna-imago-user::persisted-fn
+                                (lambda () 1) t 'm12-test \"form-hash\")
+      (defun m12-persist-report ()
+        (prin1 (list :tool      (and (find-tool 'harness-eval) t)
+                     :theory    (and *active-theory-handle* t)
+                     :history   (hash-table-count *redefine-history*)
+                     :rollbacks (length *rollback-register*)))
+        (terpri)
+        (sb-ext:exit :code 0))" s) (terpri s)
+      (format s "(save-image! \"~A\" :toplevel 'm12-persist-report)~%"
+              *m12-image-path*))
+    (multiple-value-bind (out err code)
+        (uiop:run-program
+         (list "sbcl" "--non-interactive" "--no-userinit" "--no-sysinit"
+               "--load" ql
+               "--eval" (format nil "(push (truename \"~A\") asdf:*central-registry*)" root)
+               "--eval" "(asdf:load-system :imago)"
+               "--load" script)
+         :ignore-error-status t :output :string :error-output :string)
+      (declare (ignore out))
+      (check (zerop code)
+             (format nil "sub-SBCL save succeeds (stderr: ~A)"
+                     (subseq err 0 (min 120 (length err)))))
+      (check (probe-file *m12-image-path*) "saved binary exists"))
+    (multiple-value-bind (out err code)
+        (uiop:run-program (list *m12-image-path*)
+                          :ignore-error-status t
+                          :output :string :error-output :string)
+      (declare (ignore err))
+      (check (zerop code) "saved image boots and exits 0")
+      (let ((report (handler-case
+                        (read-from-string out nil nil
+                                          :start (or (position #\( out) 0))
+                      (error () nil))))
+        (check (consp report) "toplevel prints a readable report plist")
+        (check (eq t (getf report :tool))
+               "harness-eval tool survives in the registry")
+        (check (eq t (getf report :theory))
+               "active theory handle survives")
+        (check (plusp (getf report :history 0))
+               "*redefine-history* survives populated")
+        (check (plusp (getf report :rollbacks 0))
+               "*rollback-register* survives populated")))
+    (handler-case (delete-file *m12-image-path*) (error () nil))
+    (handler-case (delete-file script) (error () nil))))
+
+;; =========================================================================
 ;; Runner
 ;; =========================================================================
 
@@ -556,13 +632,15 @@ Tests bind this to make the reasoner veto specific forms.")
     (test-m12-handler-receipt-on-every-phase)
     ;; t09 / REQ-001
     (test-m12-install-fn-registers-tool)
+    ;; t10 / REQ-011
+    (test-m12-persistence-across-save)
     ;; introspection tools (post-spec affordances)
     (test-m12-tool-list-safety-layer)
     (test-m12-tool-redefine-history-summary)
     (test-m12-tool-list-rollbacks-and-rollback)
     (test-m12-tool-query-self-mod-receipts)
     (cond ((zerop *failures*)
-           (format t "~%~%PASS — m12 component tests (t01..t09)~%")
+           (format t "~%~%PASS — m12 component tests (t01..t10)~%")
            t)
           (t
            (format t "~%~%FAIL — ~D failures in m12 component tests~%" *failures*)

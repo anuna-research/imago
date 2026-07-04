@@ -964,7 +964,7 @@ docstrings live with the definitions in `src/`.
 - [x] did:key cryptographic identity (Ed25519, ADR-002)
 - [x] SPEC-012 self-modification port (`harness-eval`, opt-in via
       `examples/self-modifying.lisp`; ADR-012 / ADR-013)
-- [ ] SPEC-012 t10 — save-image! survival integration test
+- [x] SPEC-012 t10 — save-image! survival integration test (TEST-016)
 - [ ] SPEC-012 t11 — NFR perf benchmarks (TEST-018 latency,
       TEST-020 1000-form FP corpus, TEST-022 origin-index size)
 - [ ] R4 frame-level signing on every CBCL message (needs cbcl-rs FFI)

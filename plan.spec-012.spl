@@ -558,3 +558,24 @@
 (claims agent:impl
   :at "2026-04-28T01:49:40Z"
   (given completed-t09-install-fn))
+
+(claims agent:impl
+  :at "2026-07-04T10:24:54Z"
+  (given claim-v1-t10-persistence)
+  (normally r-cl-state-v1-t10-persistence claim-v1-t10-persistence state-claimed-v1-t10-persistence)
+  (normally r-cl-chain-v1-t10-persistence state-claimed-v1-t10-persistence claimed-t10-persistence)
+)
+
+;; Propagation rules: failures in 't10-persistence' block downstream tasks
+(normally r-propagate-t11-tests-from-t10-persistence-failed failed-t10-persistence upstream-blocked-t11-tests)
+(normally r-propagate-t11-tests-from-t10-persistence-permanently-failed permanently-failed-t10-persistence upstream-blocked-t11-tests)
+(normally r-propagate-t11-tests-from-t10-persistence-stale-v1 stale-v1-t10-persistence upstream-blocked-t11-tests)
+(normally r-propagate-t11-tests-from-t10-persistence-timeout-v1 timeout-v1-t10-persistence upstream-blocked-t11-tests)
+
+(claims agent:impl
+  :at "2026-07-04T10:29:40Z"
+  (given completed-t10-persistence))
+
+(claims agent:impl
+  :at "2026-07-04T10:29:40Z"
+  (given verified-test-016-persistence))
