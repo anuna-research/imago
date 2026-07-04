@@ -13,3 +13,6 @@
 .DS_Store
 .AppleDouble
 .LSOverride
+
+# zetl vault internal state (search indexes, jj repo, locks)
+.zetl/
