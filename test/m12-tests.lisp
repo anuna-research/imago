@@ -594,6 +594,229 @@ Tests bind this to make the reasoner veto specific forms.")
     (handler-case (delete-file script) (error () nil))))
 
 ;; =========================================================================
+;; REQ-009 / TEST-010 — :eval permission honoured by policy denial
+;; =========================================================================
+
+(defun test-m12-eval-permission-policy-denial ()
+  (format t "~%-- m12-eval-permission-policy-denial (TEST-010) --~%")
+  ;; A permission policy is an :on-tool-call hook that vetoes frames whose
+  ;; tool carries :eval permission. The vetoed call must never reach the
+  ;; pre-filter/handler — verified by an empty receipt log.
+  (let ((path (format nil "/tmp/imago-m12-policy-~D.log" (random 100000)))
+        (handle nil))
+    (let ((anuna-imago::*harness-eval-audit-log* (open-receipt-log path)))
+      (unwind-protect
+           (progn
+             (setf handle
+                   (register-hook
+                    :on-tool-call
+                    (lambda (agent frame)
+                      (declare (ignore agent))
+                      (let ((tool (find-tool (getf frame :name))))
+                        (if (and tool (eq :eval (tool-permission tool)))
+                            :veto
+                            frame)))))
+             ;; Register a stand-in harness-eval carrying :eval permission.
+             (let ((*valid-permissions* (cons :eval *valid-permissions*)))
+               (register-tool!
+                (make-tool :name 'anuna-imago::harness-eval
+                           :description "stand-in" :permission :eval
+                           :schema nil
+                           :handler (lambda (args)
+                                      (anuna-imago::%harness-eval-handler args))))
+               (let ((res (anuna-imago::handle-tool-frame
+                           nil (list :tool-call "id-1" 'anuna-imago::harness-eval
+                                     '(:form "(+ 1 2)")))))
+                 (check (eq :vetoed (getf res :status))
+                        "policy denies the :eval-permission tool call"))))
+        (unregister-tool! 'anuna-imago::harness-eval)
+        (when handle (remove-hook handle))
+        (close-receipt-log! anuna-imago::*harness-eval-audit-log*)))
+    (check (null (read-receipts path))
+           "vetoed call never reached the pre-filter (no receipt)")
+    (handler-case (delete-file path) (error () nil))))
+
+;; =========================================================================
+;; REQ-012 / TEST-017 — default tool-list is unchanged
+;; =========================================================================
+
+(defun test-m12-default-tool-list-unchanged ()
+  (format t "~%-- m12-default-tool-list-unchanged (TEST-017) --~%")
+  (flet ((tool-names ()
+           (sort (loop for k being the hash-keys of anuna-imago::*tool-registry*
+                       collect k)
+                 #'string< :key #'symbol-name)))
+    ;; No self-modification tool is present by default (REQ-012)…
+    (dolist (name anuna-imago::*self-modification-tool-names*)
+      (check (null (find-tool name))
+             (format nil "~A absent from default registry" name)))
+    ;; …and an install/uninstall cycle restores the registry exactly.
+    (let ((baseline (tool-names))
+          (anuna-imago::*active-theory-handle* :m12-t17-stub)
+          (anuna-imago::*reasoner-ipc-call* #'%m12-stub-reasoner)
+          (path (format nil "/tmp/imago-m12-t17-~D.log" (random 100000))))
+      (check (eq :ok (anuna-imago::install-self-modification-tools!
+                      :audit-log-path path)))
+      (check (eq :ok (anuna-imago::uninstall-self-modification-tools!)))
+      (check (equal baseline (tool-names))
+             "install/uninstall round-trips the registry key set"))))
+
+;; =========================================================================
+;; NFR perf benchmarks — TEST-018 / TEST-019 / TEST-020 / TEST-021 / TEST-022
+;; =========================================================================
+;;
+;; The reasoner is stubbed (*reasoner-ipc-call*), per the t11 plan task: the
+;; budgets verified here cover the harness-side path (pre-filter, lift,
+;; fact assert/retract, eval, receipt, origin index). Real Spindle IPC
+;; latency is observed in deployment via OBS-004/OBS-007.
+
+(defun %m12-p95 (times-ms)
+  (let ((sorted (sort (copy-list times-ms) #'<)))
+    (nth (floor (* 95/100 (length sorted))) sorted)))
+
+(defun %m12-50-form-defmethod ()
+  "A defmethod whose body has 50 forms, per NFR-001's workload. Wrapped in
+a muffle-warning handler-bind because the eval thread would otherwise print
+1000 CLOS same-method redefinition warnings to the global *error-output*."
+  (with-output-to-string (s)
+    (write-string "(handler-bind ((warning #'muffle-warning)) " s)
+    (write-string "(defmethod m12-perf-target ((x integer)) (list" s)
+    (dotimes (i 50) (format s " (+ x ~D)" i))
+    (write-string ")))" s)))
+
+(defun test-m12-latency-budget ()
+  (format t "~%-- m12-latency-budget (TEST-018 / NFR-001) --~%")
+  (unless (find-package :anuna-imago-user)
+    (make-package :anuna-imago-user :use '(:cl :anuna-imago)))
+  (with-m12-handler-fixture ()
+    (let ((form (%m12-50-form-defmethod))
+          (times nil)
+          (non-ok 0))
+      (clrhash *redefine-history*)
+      ;; warm-up: first call pays one-off compilation
+      (anuna-imago::%harness-eval-handler (list :form form))
+      (dotimes (i 1000)
+        (let ((start (get-internal-real-time)))
+          (let ((res (anuna-imago::%harness-eval-handler (list :form form))))
+            (unless (eq :ok (getf res :status)) (incf non-ok)))
+          (push (/ (* 1000.0 (- (get-internal-real-time) start))
+                   internal-time-units-per-second)
+                times)))
+      (check (zerop non-ok) (format nil "~D/1000 calls not :ok" non-ok))
+      (let ((p95 (%m12-p95 times)))
+        (format t "  1000 calls, p95: ~,2Fms~%" p95)
+        (check (<= p95 100) (format nil "p95 ~,2Fms <= 100ms (NFR-001)" p95)))
+      (clrhash *redefine-history*)
+      (setf (fill-pointer *rollback-register*) 0))))
+
+(defun test-m12-audit-completeness ()
+  (format t "~%-- m12-audit-completeness (TEST-019 / NFR-002) --~%")
+  ;; Short-window stand-in for the 30-day window: 300 invocations across
+  ;; the three receipt-producing outcomes, each with a unique form text.
+  ;; Completeness = every invocation has exactly one receipt (no gaps, no
+  ;; duplicates), verified by set-equality on the verbatim form strings.
+  (let ((path (format nil "/tmp/imago-m12-audit-~D.log" (random 100000)))
+        (forms nil))
+    (let ((anuna-imago::*reasoner-ipc-call* #'%m12-stub-reasoner)
+          (anuna-imago::*active-theory-handle* :m12-stub-handle)
+          (anuna-imago::*harness-eval-audit-log* (open-receipt-log path)))
+      (unwind-protect
+           (dotimes (i 300)
+             (let ((form (case (mod i 3)
+                           (0 (format nil "(+ ~D 0)" i))            ; :ok
+                           (1 (format nil "(unintern 'x~D)" i))     ; :rejected
+                           (2 (format nil "(error \"e~D\")" i)))))  ; :error
+               (push form forms)
+               (anuna-imago::%harness-eval-handler (list :form form))))
+        (close-receipt-log! anuna-imago::*harness-eval-audit-log*)))
+    (let* ((entries (read-receipts path))
+           (logged  (mapcar (lambda (e) (getf e :form)) entries)))
+      (check (= 300 (length entries)) "one receipt per invocation — no gaps")
+      (check (= 300 (length (remove-duplicates logged :test #'string=)))
+             "no duplicate receipts")
+      (check (null (set-difference forms logged :test #'string=))
+             "every submitted form appears in the log"))
+    (handler-case (delete-file path) (error () nil))))
+
+(defun test-m12-prefilter-false-positive-rate ()
+  (format t "~%-- m12-prefilter-false-positive-rate (TEST-020 / NFR-003) --~%")
+  (let* ((corpus-path (merge-pathnames "test/fixtures/spec-012-corpus.lisp"
+                                       (asdf:system-source-directory :imago)))
+         (forms (with-open-file (s corpus-path)
+                  (let ((*package* (find-package :anuna-imago.test)))
+                    (loop for form = (read s nil :eof)
+                          until (eq form :eof)
+                          collect form))))
+         (rejections nil))
+    (check (= 1000 (length forms)) "corpus contains exactly 1000 forms")
+    (dolist (form forms)
+      (let ((r (%harness-eval-prefilter form)))
+        (unless (eq :pass r)
+          (push (list form (getf r :rule)) rejections))))
+    ;; With the stub reasoner allowing all corpus forms, every pre-filter
+    ;; rejection is a false positive against the NFR-003 budget.
+    (format t "  false positives: ~D/1000~%" (length rejections))
+    (when rejections
+      (format t "  first rejection: ~S~%" (first rejections)))
+    (check (<= (length rejections) 10)
+           (format nil "~D false positives <= 10 (1% of corpus, NFR-003)"
+                   (length rejections)))))
+
+(defun test-m12-reasoner-adjudication-latency ()
+  (format t "~%-- m12-reasoner-adjudication-latency (TEST-021 / NFR-004) --~%")
+  ;; NFR-004 window: lift-goal emission → reasoner tag. That is the
+  ;; assert-facts / query-forbidden / retract-facts segment of the pipeline.
+  (let ((anuna-imago::*reasoner-ipc-call* #'%m12-stub-reasoner)
+        (handle :m12-stub-handle)
+        (lift (%lift-form '(defmethod m12-adjudicated ((x integer)) (* x 2))))
+        (times nil))
+    (dotimes (i 1000)
+      (let ((form-id (anuna-imago::%next-form-id))
+            (start (get-internal-real-time)))
+        (anuna-imago::%assert-lift-facts! handle form-id lift)
+        (anuna-imago::%query-forbidden handle form-id)
+        (anuna-imago::%retract-lift-facts! handle form-id lift)
+        (push (/ (* 1000.0 (- (get-internal-real-time) start))
+                 internal-time-units-per-second)
+              times)))
+    (let ((p95 (%m12-p95 times)))
+      (format t "  1000 adjudications, p95: ~,3Fms~%" p95)
+      (check (<= p95 50) (format nil "p95 ~,3Fms <= 50ms (NFR-004)" p95)))))
+
+(defun test-m12-origin-index-storage-and-query ()
+  (format t "~%-- m12-origin-index-storage-and-query (TEST-022 / NFR-005) --~%")
+  (clrhash *redefine-history*)
+  ;; Storage: an event for a <= 500-byte form stays under 2 KB printed size
+  ;; and stores the verbatim text; > 500 bytes stores the md5 hash instead.
+  (let* ((small (format nil "(defun small-target () ~S)"
+                        (make-string 200 :initial-element #\a)))
+         (event (anuna-imago::%record-definition!
+                 'anuna-imago.test::small-target small 'm12 nil nil)))
+    (check (string= small (getf event :defining-form)) "verbatim below 500 bytes")
+    (check (<= (length (prin1-to-string event)) 2048)
+           "event printed size <= 2KB (NFR-005 growth bound)"))
+  ;; Query latency: 10^4 events across 100 symbols, query p95 <= 10ms.
+  (clrhash *redefine-history*)
+  (let ((syms (loop for i below 100
+                    collect (intern (format nil "M12-IDX-~D" i)
+                                    :anuna-imago.test))))
+    (dotimes (i 10000)
+      (anuna-imago::%record-definition!
+       (nth (mod i 100) syms)
+       (format nil "(defun f-~D () ~D)" i i) 'm12 nil nil))
+    (let ((times nil))
+      (dotimes (i 1000)
+        (let ((start (get-internal-real-time)))
+          (redefine-history (nth (mod i 100) syms))
+          (push (/ (* 1000.0 (- (get-internal-real-time) start))
+                   internal-time-units-per-second)
+                times)))
+      (let ((p95 (%m12-p95 times)))
+        (format t "  10^4 entries, 1000 queries, p95: ~,3Fms~%" p95)
+        (check (<= p95 10) (format nil "query p95 ~,3Fms <= 10ms (NFR-005)" p95)))))
+  (clrhash *redefine-history*))
+
+;; =========================================================================
 ;; Runner
 ;; =========================================================================
 
@@ -634,13 +857,21 @@ Tests bind this to make the reasoner veto specific forms.")
     (test-m12-install-fn-registers-tool)
     ;; t10 / REQ-011
     (test-m12-persistence-across-save)
+    ;; t11 — TEST-010 / TEST-017 + NFR benchmarks TEST-018..TEST-022
+    (test-m12-eval-permission-policy-denial)
+    (test-m12-default-tool-list-unchanged)
+    (test-m12-latency-budget)
+    (test-m12-audit-completeness)
+    (test-m12-prefilter-false-positive-rate)
+    (test-m12-reasoner-adjudication-latency)
+    (test-m12-origin-index-storage-and-query)
     ;; introspection tools (post-spec affordances)
     (test-m12-tool-list-safety-layer)
     (test-m12-tool-redefine-history-summary)
     (test-m12-tool-list-rollbacks-and-rollback)
     (test-m12-tool-query-self-mod-receipts)
     (cond ((zerop *failures*)
-           (format t "~%~%PASS — m12 component tests (t01..t10)~%")
+           (format t "~%~%PASS — m12 component tests (t01..t11)~%")
            t)
           (t
            (format t "~%~%FAIL — ~D failures in m12 component tests~%" *failures*)

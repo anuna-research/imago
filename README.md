@@ -965,17 +965,18 @@ docstrings live with the definitions in `src/`.
 - [x] SPEC-012 self-modification port (`harness-eval`, opt-in via
       `examples/self-modifying.lisp`; ADR-012 / ADR-013)
 - [x] SPEC-012 t10 — save-image! survival integration test (TEST-016)
-- [ ] SPEC-012 t11 — NFR perf benchmarks (TEST-018 latency,
-      TEST-020 1000-form FP corpus, TEST-022 origin-index size)
+- [x] SPEC-012 t11 — full SPEC-012 test corpus (TEST-010/017 +
+      NFR benchmarks TEST-018..TEST-022, 1000-form FP corpus under
+      `test/fixtures/`)
 - [ ] R4 frame-level signing on every CBCL message (needs cbcl-rs FFI)
 - [ ] Streaming SSE for the Anthropic provider
 - [ ] CI matrix M6 step (cbcl-rs cdylib build)
 - [ ] Bedrock provider driver
 - [ ] Vertex provider driver
 
-By the numbers: **~4100 LOC** harness, **~3340 LOC** tests, **~63 MB** image
+By the numbers: **~4100 LOC** harness, **~3760 LOC** tests, **~63 MB** image
 (full-agent profile incl. provider + WSS + identity), **165 ms** p90 cold
-start, **18 test suites** × **390+ checks**, all green.
+start, **17 test suites** × **430+ checks**, all green.
 
 See the [open issues](https://codeberg.org/anuna/imago/issues) for
 proposed features and known issues.

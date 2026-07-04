@@ -42,6 +42,7 @@
    #:agent-theory
    #:agent-state
    #:agent-identity-slot
+   #:agent-did
    #:agent-message-history
    #:clear-agent-message-history!
    #:*current-agent*

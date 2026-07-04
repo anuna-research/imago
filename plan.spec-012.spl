@@ -579,3 +579,28 @@
 (claims agent:impl
   :at "2026-07-04T10:29:40Z"
   (given verified-test-016-persistence))
+
+(claims agent:impl
+  :at "2026-07-04T10:30:21Z"
+  (given claim-v1-t11-tests)
+  (normally r-cl-state-v1-t11-tests claim-v1-t11-tests state-claimed-v1-t11-tests)
+  (normally r-cl-chain-v1-t11-tests state-claimed-v1-t11-tests claimed-t11-tests)
+)
+
+;; Propagation rules: failures in 't11-tests' block downstream tasks
+(normally r-propagate-t12-review-from-t11-tests-failed failed-t11-tests upstream-blocked-t12-review)
+(normally r-propagate-t12-review-from-t11-tests-permanently-failed permanently-failed-t11-tests upstream-blocked-t12-review)
+(normally r-propagate-t12-review-from-t11-tests-stale-v1 stale-v1-t11-tests upstream-blocked-t12-review)
+(normally r-propagate-t12-review-from-t11-tests-timeout-v1 timeout-v1-t11-tests upstream-blocked-t12-review)
+
+(claims agent:impl
+  :at "2026-07-04T10:34:30Z"
+  (given discovered-prefilter-rejects-eql-narrow-tool-call-defmethod))
+
+(claims agent:impl
+  :at "2026-07-04T10:41:59Z"
+  (given completed-t11-tests))
+
+(claims agent:impl
+  :at "2026-07-04T10:41:59Z"
+  (given verified-m12-suite-green-34-tests))
