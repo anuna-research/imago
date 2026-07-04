@@ -40,8 +40,13 @@
 ;;                                                         safety-layer-symbol(S).)
 ;;
 ;; The set is a defparameter (not a defconstant) so tests can extend it
-;; without recompilation, but it is itself in the set so an agent's
-;; `harness-eval` cannot mutate it from inside an evaluated form.
+;; without recompilation. The set is itself in the set, AND the pre-filter
+;; rejects assignment (setf/setq/set/makunbound) to any safety-layer
+;; variable (SELF-MOD-REVIEW BLOCKER-1) — so an agent's `harness-eval`
+;; cannot mutate it, the audit log, the reasoner indirection, or the theory
+;; handle from inside an evaluated form. Before that fix, bare-symbol
+;; assignment slipped past %prefilter-setf (which only inspected cons
+;; places) and past the lift (which only saw head-of-cons symbols).
 
 (defparameter *safety-layer-symbols*
   '(;; SPEC-012 CON-003 originals
@@ -78,6 +83,8 @@
     close-receipt-log!
     *active-theory-handle*
     *invariant-filter-handle*
+    *reasoner-ipc-call*          ; SELF-MOD-REVIEW BLOCKER-1 — the live
+                                 ; reasoner indirection every query funcalls
     *redefine-history*
     *rollback-register*
     *safety-layer-symbols*
@@ -92,6 +99,11 @@
     ;; reader-macro primitives
     set-macro-character set-dispatch-macro-character set-syntax-from-char
     *readtable* copy-readtable make-dispatch-macro-character
+    ;; SELF-MOD-REVIEW BLOCKER-1 — special-variable mutators. No legitimate
+    ;; harness-eval use; here so the reasoner mentions/2 path vetoes them
+    ;; even when the target symbol is computed at runtime (which the
+    ;; structural pre-filter cannot resolve).
+    set makunbound
     ;; thread primitives that bypass eval-thread isolation
     sb-thread:interrupt-thread sb-thread:terminate-thread
     sb-thread:make-thread sb-thread:join-thread
@@ -257,8 +269,18 @@ via *safety-layer-symbols*. CON-002 + ADR-012 §A1.")
          ;; (setf (symbol-function …) …) / (setf (fdefinition …) …)
          ;; ADR-012 §A3: also (setf (tool-handler / tool-permission / … _) _)
          ;; ADR-012 §A1: also (setf (gethash _ <safety-layer-var>) _)
-         ((eq op 'setf)
+         ;; SELF-MOD-REVIEW BLOCKER-1: also bare-symbol places in the set.
+         ((member op '(setf psetf))
           (%prefilter-setf form))
+
+         ;; SELF-MOD-REVIEW BLOCKER-1 — (setq/psetq VAR VAL …) and the
+         ;; runtime mutators (set / makunbound '<safety-var>). These bypass
+         ;; the reasoner's structural lift exactly like the cons-place setf
+         ;; forms did; the pre-filter is the hard floor that must catch them.
+         ((member op '(setq psetq))
+          (%prefilter-setq form))
+         ((member op '(set makunbound))
+          (%prefilter-symbol-mutator form))
 
          ;; defmethod against safety-layer target — CON-002
          ((and (eq op 'defmethod)
@@ -296,10 +318,24 @@ via *safety-layer-symbols*. CON-002 + ADR-012 §A1.")
          (t :pass))))))
 
 (defun %prefilter-setf (form)
-  "Examine `(setf place value)` for a place that mutates a safety-layer
-binding without going through register-tool! / add-method / etc."
-  (let ((place (and (consp (cdr form)) (second form))))
-    (cond
+  "Examine `(setf place value …)` for a place that mutates a safety-layer
+binding without going through register-tool! / add-method / etc. Handles
+multiple place/value pairs; any offending pair rejects the whole form."
+  ;; setf/psetf take alternating place/value pairs — scan every place.
+  (loop for (place value) on (cdr form) by #'cddr
+        for r = (%prefilter-setf-place place)
+        unless (eq r :pass) do (return-from %prefilter-setf r))
+  :pass)
+
+(defun %prefilter-setf-place (place)
+  "Classify a single setf place. Returns :pass or a rejection plist."
+  (cond
+      ;; SELF-MOD-REVIEW BLOCKER-1: a bare-symbol place that names a
+      ;; safety-layer variable (e.g. (setf *safety-layer-symbols* nil)).
+      ((and (symbolp place) (safety-layer-symbol-p place))
+       (list :status :rejected :rule :setf-safety-layer-variable
+             :reason (format nil "(setf ~S …) assigns the safety-layer variable ~S"
+                             place place)))
       ((not (consp place)) :pass)
       ((member (car place) '(symbol-function fdefinition))
        (list :status :rejected :rule :setf-symbol-function
@@ -324,7 +360,36 @@ binding without going through register-tool! / add-method / etc."
       ((and (symbolp (car place)) (safety-layer-symbol-p (car place)))
        (list :status :rejected :rule :setf-safety-layer-place
              :reason (format nil "(setf (~S …) …) targets a safety-layer accessor" (car place))))
-      (t :pass))))
+      (t :pass)))
+
+(defun %prefilter-setq (form)
+  "SELF-MOD-REVIEW BLOCKER-1 — `(setq/psetq VAR VALUE …)`. Reject if any
+assigned VAR is a safety-layer variable."
+  (loop for (var value) on (cdr form) by #'cddr
+        when (and (symbolp var) (safety-layer-symbol-p var))
+          do (return-from %prefilter-setq
+               (list :status :rejected :rule :setq-safety-layer-variable
+                     :reason (format nil "(setq ~S …) assigns the safety-layer variable ~S"
+                                     var var))))
+  :pass)
+
+(defun %prefilter-symbol-mutator (form)
+  "SELF-MOD-REVIEW BLOCKER-1 — `(set 'VAR …)` / `(makunbound 'VAR)`. Reject
+when the (quoted) symbol argument is a safety-layer variable. A non-quoted
+argument (computed at runtime) cannot be resolved structurally, so the head
+symbol itself being in the safety set is the backstop — set/makunbound are
+added to *safety-layer-symbols* so the reasoner mentions/2 path also fires."
+  (let* ((arg (and (consp (cdr form)) (second form)))
+         (sym (cond
+                ((and (consp arg) (eq (car arg) 'quote)
+                      (consp (cdr arg)) (symbolp (cadr arg)))
+                 (cadr arg))
+                ((symbolp arg) arg))))
+    (if (and sym (safety-layer-symbol-p sym))
+        (list :status :rejected :rule :symbol-mutator-safety-layer
+              :reason (format nil "(~S '~S …) mutates the safety-layer variable ~S"
+                              (car form) sym sym))
+        :pass)))
 
 ;; =========================================================================
 ;; CON-003 — lift function (reasoner facts)
@@ -419,6 +484,25 @@ return the specialiser identifier (class symbol or eql object)."
                       ((defun defmacro)
                        (let ((tgt (and (consp (cdr x)) (second x))))
                          (when (symbolp tgt) (setf (gethash tgt defn-tgts) t))))
+                      ;; SELF-MOD-REVIEW BLOCKER-1 — assignment targets. A
+                      ;; special var assigned in value position is never
+                      ;; head-of-cons, so it would otherwise be invisible to
+                      ;; mentions/2. Collect it so the reasoner floor can veto.
+                      ((setf psetf)
+                       (loop for (place val) on (cdr x) by #'cddr
+                             when (symbolp place)
+                               do (setf (gethash place free) t)))
+                      ((setq psetq)
+                       (loop for (var val) on (cdr x) by #'cddr
+                             when (symbolp var)
+                               do (setf (gethash var free) t)))
+                      ((set makunbound)
+                       (let ((a (and (consp (cdr x)) (second x))))
+                         (cond
+                           ((and (consp a) (eq (car a) 'quote)
+                                 (consp (cdr a)) (symbolp (cadr a)))
+                            (setf (gethash (cadr a) free) t))
+                           ((symbolp a) (setf (gethash a free) t)))))
                       ((funcall apply)
                        ;; first arg is the function-designator
                        (let ((fn-arg (and (consp (cdr x)) (second x))))

@@ -100,6 +100,50 @@
             '(defgeneric anuna-imago::invariant-filter-hook (a b c)))))
     (check (and (consp r) (eq :rejected (getf r :status)) (eq :safety-layer-redefgeneric (getf r :rule))))))
 
+(defun test-m12-prefilter-denies-safety-var-assignment ()
+  (format t "~%-- m12-prefilter-denies-safety-var-assignment (SELF-MOD-REVIEW BLOCKER-1) --~%")
+  ;; Bare-symbol assignment to a safety-layer special variable must be
+  ;; rejected. Prior to the fix, %prefilter-setf passed non-cons places.
+  (let ((forms
+          '("(setf anuna-imago::*safety-layer-symbols* nil)"
+            "(setf anuna-imago::*harness-eval-audit-log* nil)"
+            "(setf anuna-imago::*reasoner-ipc-call* #'identity)"
+            "(setf anuna-imago::*prefilter-denylist* nil)"
+            "(setf anuna-imago::*active-theory-handle* :bogus)"
+            "(setq anuna-imago::*safety-layer-symbols* nil)"
+            "(psetf anuna-imago::*tool-registry* nil)"
+            "(psetq anuna-imago::*active-theory-handle* nil)"
+            "(set 'anuna-imago::*safety-layer-symbols* nil)"
+            "(makunbound 'anuna-imago::*reasoner-ipc-call*)")))
+    (dolist (src forms)
+      (let ((r (%harness-eval-prefilter (read-from-string src))))
+        (check (and (consp r) (eq :rejected (getf r :status)))
+               (format nil "~A rejected (rule ~S)" src (and (consp r) (getf r :rule)))))))
+  ;; Assigning a NON-safety variable stays allowed (no false positive).
+  (check (eq :pass (%harness-eval-prefilter
+                    (read-from-string "(setf anuna-imago.test::*user-x* 3)")))
+         "assignment to a non-safety variable still passes")
+  ;; The narrow HP-003 defmethod path is untouched by the assignment fix.
+  (check (eq :pass (%harness-eval-prefilter
+                    '(defparameter anuna-imago.test::*ok* 1)))
+         "defparameter of a user var still passes"))
+
+(defun test-m12-reasoner-ipc-in-safety-set ()
+  (format t "~%-- m12-reasoner-ipc-in-safety-set (SELF-MOD-REVIEW BLOCKER-1) --~%")
+  (check (anuna-imago::safety-layer-symbol-p 'anuna-imago::*reasoner-ipc-call*)
+         "*reasoner-ipc-call* is in the safety-layer set"))
+
+(defun test-m12-lift-captures-assignment-target ()
+  (format t "~%-- m12-lift-captures-assignment-target (SELF-MOD-REVIEW BLOCKER-1) --~%")
+  ;; The reasoner layer must also see the assigned safety variable, so the
+  ;; mentions/2 floor invariant can fire independently of the pre-filter.
+  (let ((p (%lift-form '(setf anuna-imago::*safety-layer-symbols* nil))))
+    (check (member 'anuna-imago::*safety-layer-symbols* (getf p :free-symbols))
+           "setf target var appears in :free-symbols → mentions fact"))
+  (let ((p (%lift-form '(setq anuna-imago::*active-theory-handle* nil))))
+    (check (member 'anuna-imago::*active-theory-handle* (getf p :free-symbols))
+           "setq target var appears in :free-symbols")))
+
 (defun test-m12-prefilter-passes-benign ()
   (format t "~%-- m12-prefilter-passes-benign --~%")
   (dolist (form '((+ 1 2)
@@ -833,6 +877,9 @@ a muffle-warning handler-bind because the eval thread would otherwise print
     (test-m12-prefilter-denies-setf-bypasses)
     (test-m12-prefilter-denies-defmethod-against-safety-layer)
     (test-m12-prefilter-denies-defgeneric-against-safety-layer)
+    (test-m12-prefilter-denies-safety-var-assignment)
+    (test-m12-reasoner-ipc-in-safety-set)
+    (test-m12-lift-captures-assignment-target)
     (test-m12-prefilter-passes-benign)
     ;; t03 / CON-003
     (test-m12-lift-defmethod-shape)

@@ -604,3 +604,47 @@
 (claims agent:impl
   :at "2026-07-04T10:41:59Z"
   (given verified-m12-suite-green-34-tests))
+
+(claims agent:reviewer
+  :at "2026-07-04T10:42:39Z"
+  (given claim-v1-t12-review)
+  (normally r-cl-state-v1-t12-review claim-v1-t12-review state-claimed-v1-t12-review)
+  (normally r-cl-chain-v1-t12-review state-claimed-v1-t12-review claimed-t12-review)
+)
+
+(claims agent:reviewer
+  :at "2026-07-04T10:51:17Z"
+  (given block-v1-t12-review)
+  (normally r-bl-state-v1-t12-review block-v1-t12-review state-blocked-v1-t12-review)
+  (normally r-bl-chain-v1-t12-review state-blocked-v1-t12-review blocked-t12-review)
+)
+
+(claims agent:reviewer
+  :at "2026-07-04T10:51:17Z"
+  (given blocked-by-setf-bare-symbol-safety-var-bypass))
+
+(claims agent:reviewer
+  :at "2026-07-04T10:51:17Z"
+  (given discovered-reasoner-ipc-call-not-in-safety-set))
+
+(claims agent:reviewer
+  :at "2026-07-04T10:59:53Z"
+  (given unblock-v2-t12-review)
+  (normally r-ubl-state-v2-t12-review unblock-v2-t12-review state-unblocked-v2-t12-review)
+  (normally r-ubl-cancel-v1-t12-review unblock-v2-t12-review (not state-blocked-v1-t12-review))
+  (prefer r-ubl-cancel-v1-t12-review r-bl-state-v1-t12-review)
+  (normally r-ubl-unblocked-v2-t12-review unblock-v2-t12-review (not blocked-t12-review))
+  (prefer r-ubl-unblocked-v2-t12-review r-bl-chain-v1-t12-review)
+)
+
+(claims agent:reviewer
+  :at "2026-07-04T10:59:53Z"
+  (given verified-blocker-1-fixed-adr-014))
+
+(claims agent:reviewer
+  :at "2026-07-04T10:59:53Z"
+  (given decided-d00-adversarial-review))
+
+(claims agent:reviewer
+  :at "2026-07-04T10:59:53Z"
+  (given completed-t12-review))

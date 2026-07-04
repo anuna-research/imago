@@ -1,7 +1,7 @@
 ---
 id: SPEC-012
 title: Agent Self-Modification Port — Reasoner-Adjudicated Eval Tool
-status: draft
+status: implemented
 version: 0.1
 date: 2026-04-28
 audience:

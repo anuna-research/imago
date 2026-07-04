@@ -962,12 +962,14 @@ docstrings live with the definitions in `src/`.
 - [x] Producer-gateway (cross-process agent composition)
 - [x] Opt-in fileops tools (`install-fileops-tools!`)
 - [x] did:key cryptographic identity (Ed25519, ADR-002)
-- [x] SPEC-012 self-modification port (`harness-eval`, opt-in via
-      `examples/self-modifying.lisp`; ADR-012 / ADR-013)
+- [x] SPEC-012 self-modification port — **implemented** (`harness-eval`,
+      opt-in via `examples/self-modifying.lisp`; ADR-012 / ADR-013)
 - [x] SPEC-012 t10 — save-image! survival integration test (TEST-016)
 - [x] SPEC-012 t11 — full SPEC-012 test corpus (TEST-010/017 +
       NFR benchmarks TEST-018..TEST-022, 1000-form FP corpus under
       `test/fixtures/`)
+- [x] SPEC-012 t12 — final adversarial review (SELF-MOD-REVIEW.md);
+      fixed BLOCKER-1 setf/setq safety-variable bypass (ADR-014)
 - [ ] R4 frame-level signing on every CBCL message (needs cbcl-rs FFI)
 - [ ] Streaming SSE for the Anthropic provider
 - [ ] CI matrix M6 step (cbcl-rs cdylib build)
