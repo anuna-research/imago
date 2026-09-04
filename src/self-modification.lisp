@@ -327,7 +327,7 @@ into *SAFETY-LAYER-SYMBOLS*, so burying an operator cannot bypass this gate.")
                (push (cdr node) pending)))))
 
 (defparameter *authorization-tcb-symbols*
-  '(;; The recognizer, fact seam, proof gate, evaluator, and audit/rollback
+  `(;; The recognizer, fact seam, proof gate, evaluator, and audit/rollback
     ;; pipeline.  Every named link is protected across sequential calls.
     *authorization-tcb-symbols*
     *safety-layer-symbols*
@@ -485,7 +485,8 @@ into *SAFETY-LAYER-SYMBOLS*, so burying an operator cannot bypass this gate.")
     sb-sys:*interrupts-enabled*
     sb-sys:*allow-with-interrupts*
     sb-sys:*interrupt-pending*
-    sb-thread:*interrupt-handler*
+    ,@(let ((symbol (find-symbol "*INTERRUPT-HANDLER*" "SB-THREAD")))
+        (when symbol (list symbol)))
     sb-unix::*unblock-deferrables-on-enabling-interrupts-p*
     ;; Parser behavior must not inherit ambient debugger/reader state left by
     ;; an earlier worker.

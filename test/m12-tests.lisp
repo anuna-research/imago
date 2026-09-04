@@ -1657,7 +1657,7 @@ Tests bind this to make the reasoner veto specific forms.")
                           "nested installer cannot widen the ceiling"))))))
 
            (let* ((required
-                    '(anuna-imago::*authorization-tcb-symbols*
+                    `(anuna-imago::*authorization-tcb-symbols*
                       anuna-imago::*safety-layer-symbols*
                       anuna-imago::*safety-layer-categories*
                       anuna-imago::safety-layer-symbol-p
@@ -1715,7 +1715,9 @@ Tests bind this to make the reasoner veto specific forms.")
                       sb-sys:*interrupts-enabled*
                       sb-sys:*allow-with-interrupts*
                       sb-sys:*interrupt-pending*
-                      sb-thread:*interrupt-handler*
+                      ,@(let ((symbol
+                                (find-symbol "*INTERRUPT-HANDLER*" "SB-THREAD")))
+                          (when symbol (list symbol)))
                       sb-unix::*unblock-deferrables-on-enabling-interrupts-p*
                       *break-on-signals*
                       *read-suppress*
