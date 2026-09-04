@@ -228,6 +228,7 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     (sb-posix:fork                   . :process-launch)
     (uiop:run-program                . :process-launch)
     (uiop:launch-program             . :process-launch)
+    (asdf:run-shell-command          . :process-launch)
     (sb-ext:run-program              . :process-launch)
     ;; ADR-012 §A1 — eval/load/read primitives at top level
     (eval                            . :eval-bypass)
@@ -549,6 +550,7 @@ into *SAFETY-LAYER-SYMBOLS*, so burying an operator cannot bypass this gate.")
     sb-posix:fork
     uiop:run-program
     uiop:launch-program
+    asdf:run-shell-command
     sb-ext:run-program
     *clean-checklist*
     pre-save-clean!
