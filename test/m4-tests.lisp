@@ -114,6 +114,7 @@ result would have been incorporated."
          (agent (make-instance 'agent
                                :id 'tool-agent
                                :capability "math:add"
+                               :tools '(add)
                                :provider (make-tool-stub-provider))))
     (spawn-agent! sup agent)
     (sleep 0.05)
@@ -143,6 +144,7 @@ result would have been incorporated."
          (agent (make-instance 'agent
                                :id 'veto-agent
                                :capability "x"
+                               :tools '(dangerous)
                                :provider
                                (make-stub-provider
                                 :responder
@@ -157,6 +159,87 @@ result would have been incorporated."
     (send! (agent-mailbox agent) :shutdown)
     (sleep 0.05)
     (drain-supervisor! sup)))
+
+;; ---------------------------- SPEC-014 tool authorization Red Gate ---
+
+(defun test-tool-call-denies-unadvertised-registered-tool ()
+  "TEST-003: process-global registration is not per-agent authority."
+  (format t "~%-- tool-call-denies-unadvertised-registered-tool (SPEC-014 TEST-003) --~%")
+  (clear-all-hooks) (clear-all-tools)
+  (let ((allowed-calls 0)
+        (hidden-calls 0))
+    (define-tool allowlisted
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf allowed-calls)
+                 :allowed))
+    (define-tool registered-but-hidden
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf hidden-calls)
+                 :hidden))
+    (let* ((agent
+             (make-instance
+              'agent
+              :id 'allowlist-denial-agent
+              :capability "authorization:test"
+              :tools '(allowlisted)
+              :provider
+              (make-stub-provider
+               :responder
+               (lambda (message)
+                 (declare (ignore message))
+                 (list (list :tool-use "hidden-1"
+                             'registered-but-hidden nil))))))
+           (reply (drive-stream agent (make-ask "try hidden")))
+           (results (getf reply :tool-results))
+           (result (first results)))
+      (check (= 1 (length results)) "one authorization result returned")
+      (check (eq :unauthorized (getf result :status))
+             "unadvertised registered tool is unauthorized")
+      (check (zerop hidden-calls) "unauthorized handler remains untouched")
+      (check (zerop allowed-calls) "unrequested allowlisted handler remains untouched"))))
+
+(defun test-tool-call-allows-exactly-advertised-tool ()
+  "TEST-024: the positive allowlist path invokes only the advertised handler."
+  (format t "~%-- tool-call-allows-exactly-advertised-tool (SPEC-014 TEST-024) --~%")
+  (clear-all-hooks) (clear-all-tools)
+  (let ((allowed-calls 0)
+        (bystander-calls 0))
+    (define-tool advertised
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf allowed-calls)
+                 :advertised-result))
+    (define-tool registered-bystander
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf bystander-calls)
+                 :bystander-result))
+    (let* ((agent
+             (make-instance
+              'agent
+              :id 'allowlist-positive-agent
+              :capability "authorization:test"
+              :tools '(advertised)
+              :provider
+              (make-stub-provider
+               :responder
+               (lambda (message)
+                 (declare (ignore message))
+                 (list (list :tool-use "allowed-1" 'advertised nil))))))
+           (reply (drive-stream agent (make-ask "use advertised")))
+           (results (getf reply :tool-results))
+           (result (first results)))
+      (check (= 1 (length results)) "one advertised result returned")
+      (check (eq :ok (getf result :status)) "advertised tool is dispatched")
+      (check (eq :advertised-result (getf result :value)))
+      (check (= 1 allowed-calls) "advertised handler runs exactly once")
+      (check (zerop bystander-calls) "other registered handlers do not run"))))
 
 ;; ----------------------------------------------- live redefinition ---
 
@@ -209,6 +292,8 @@ result would have been incorporated."
   (test-on-turn-complete-fires)
   (test-tool-call-dispatch)
   (test-tool-veto)
+  (test-tool-call-denies-unadvertised-registered-tool)
+  (test-tool-call-allows-exactly-advertised-tool)
   (test-process-turn-redefinable)
   (test-run-echo-demo)
   (format t "~%=== ~D failure(s) ===~%" *failures*)

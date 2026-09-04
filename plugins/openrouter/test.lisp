@@ -101,6 +101,24 @@
 
 ;; ------------------------------------------------- response parsing ---
 
+(defun %drain-openrouter-stream (stream-fn)
+  "Collect frames through the first :DONE marker."
+  (loop for frame = (funcall stream-fn)
+        collect frame
+        until (or (eq frame :done) (null frame))))
+
+(defun %frame-of-kind (kind frames)
+  (find kind frames :key (lambda (frame)
+                           (and (consp frame) (first frame)))))
+
+(defmacro with-openrouter-red-gate ((description) &body body)
+  "Turn an unexpected provider signal into a normal test failure."
+  `(handler-case
+       (progn ,@body)
+     (error (condition)
+       (check nil (format nil "~A signalled unexpectedly: ~A"
+                          ,description condition)))))
+
 (defun test-openrouter-response-text-only ()
   (format t "~%-- openrouter-response-text-only --~%")
   (let* ((p (make-openrouter-provider :api-key "k" :model "z-ai/glm-4.6"))
@@ -117,13 +135,16 @@
              (declare (ignore url headers content))
              canned))
          (stream-fn (provider-stream! p a (make-ask "hi"))))
-    (let ((f1 (funcall stream-fn))
-          (f2 (funcall stream-fn))
-          (f3 (funcall stream-fn)))
-      (check (and (consp f1) (eq :text (first f1))
-                  (string= "hello back" (second f1))))
-      (check (eq :done f2))
-      (check (null f3) "stream drained"))))
+    (let ((frames (%drain-openrouter-stream stream-fn)))
+      (let ((text-frame (%frame-of-kind :text frames))
+            (content-frame (%frame-of-kind :assistant-content frames))
+            (stop-frame (%frame-of-kind :stop-reason frames)))
+        (check (and text-frame (string= "hello back" (second text-frame))))
+        (check content-frame "canonical assistant content is emitted")
+        (check (and stop-frame (eq :end-turn (second stop-frame)))
+               "OpenAI stop maps to canonical :end-turn")
+        (check (eq :done (car (last frames))))
+        (check (null (funcall stream-fn)) "stream drained")))))
 
 (defun test-openrouter-response-tool-call ()
   (format t "~%-- openrouter-response-tool-call --~%")
@@ -147,14 +168,226 @@
              (declare (ignore url headers content))
              canned))
          (stream-fn (provider-stream! p a (make-ask "version please"))))
-    (let ((f1 (funcall stream-fn))
-          (f2 (funcall stream-fn)))
-      (check (and (consp f1) (eq :tool-use (first f1))))
-      (check (string= "call_1" (second f1)))
-      (check (eq :harness-version (third f1)))
-      (check (eq t (getf (fourth f1) :verbose))
+    (let* ((frames (%drain-openrouter-stream stream-fn))
+           (tool-frame (%frame-of-kind :tool-use frames))
+           (content-frame (%frame-of-kind :assistant-content frames))
+           (stop-frame (%frame-of-kind :stop-reason frames)))
+      (check tool-frame)
+      (check (string= "call_1" (second tool-frame)))
+      (check (eq :harness-version (third tool-frame)))
+      (check (eq t (getf (fourth tool-frame) :verbose))
              "JSON-string arguments parsed back to a plist")
-      (check (eq :done f2)))))
+      (check content-frame "tool-call assistant message is preserved")
+      (check (and stop-frame (eq :tool-use (second stop-frame)))
+             "tool_calls maps to canonical :tool-use")
+      (check (eq :done (car (last frames)))))))
+
+;; -------------------------------- SPEC-014 main-path integration ---
+
+(defun test-openrouter-two-step-tool-drive-stream ()
+  "TEST-002: exercise the real OpenRouter provider through DRIVE-STREAM."
+  (format t "~%-- openrouter-two-step-tool-drive-stream (SPEC-014 TEST-002) --~%")
+  (clear-all-hooks)
+  (unregister-tool! 'anuna-imago::openrouter-loop-add)
+  (let ((handler-calls 0)
+        (requests nil)
+        (responses
+          (list
+           (com.inuoe.jzon:stringify
+            (anuna-imago::%ht
+             "id" "gen-tool"
+             "choices"
+             (vector
+              (anuna-imago::%ht
+               "message"
+               (anuna-imago::%ht
+                "role" "assistant"
+                "content" nil
+                "tool_calls"
+                (vector
+                 (anuna-imago::%ht
+                  "id" "call_add"
+                  "type" "function"
+                  "function"
+                  (anuna-imago::%ht
+                   "name" "openrouter-loop-add"
+                   "arguments" "{\"a\":2,\"b\":3}"))))
+               "finish_reason" "tool_calls"))))
+           (com.inuoe.jzon:stringify
+            (anuna-imago::%ht
+             "id" "gen-final"
+             "choices"
+             (vector
+              (anuna-imago::%ht
+               "message"
+               (anuna-imago::%ht "role" "assistant"
+                                  "content" "sum is 5")
+               "finish_reason" "stop")))))))
+    (define-tool anuna-imago::openrouter-loop-add
+      :description "Add two integers."
+      :schema ((:a :type :integer :required-p t)
+               (:b :type :integer :required-p t))
+      :handler (lambda (args)
+                 (incf handler-calls)
+                 (+ (getf args :a) (getf args :b))))
+    (with-openrouter-red-gate ("two-step OpenRouter loop")
+      (unwind-protect
+           (let* ((*openrouter-http-post*
+                  (lambda (url &key headers content)
+                    (declare (ignore url headers))
+                    (push (com.inuoe.jzon:parse content) requests)
+                    (or (pop responses)
+                        (error "unexpected third OpenRouter request"))))
+                (provider (make-openrouter-provider
+                           :api-key "test-key" :model "test/model"))
+                (agent (make-instance
+                        'agent
+                        :id 'openrouter-loop-agent
+                        :capability "openrouter:tool-loop"
+                        :provider provider
+                        :tools '(anuna-imago::openrouter-loop-add)))
+                (reply (drive-stream agent (make-ask "add two and three"))))
+           (setf requests (nreverse requests))
+           (check (= 2 (length requests)) "two provider requests complete the loop")
+           (check (= 1 handler-calls) "tool handler runs exactly once")
+           (check (string= "sum is 5" (getf reply :text)) "final assistant text returned")
+           (let* ((results (getf reply :tool-results))
+                  (result (first results)))
+             (check (= 1 (length results)) "one tool result is retained")
+             (check (eq :ok (getf result :status)))
+             (check (= 5 (getf result :value))))
+           (when (= 2 (length requests))
+             (let* ((first-messages (gethash "messages" (first requests)))
+                    (second-messages (gethash "messages" (second requests))))
+               (check (= 1 (length first-messages)) "first request has one user message")
+               (check (string= "add two and three"
+                               (gethash "content" (elt first-messages 0)))
+                      "canonical user content is not printed as a Lisp list")
+               (check (= 3 (length second-messages))
+                      "second request carries user, assistant, and tool history")
+               (when (= 3 (length second-messages))
+                 (let ((user-message (elt second-messages 0))
+                       (assistant-message (elt second-messages 1))
+                       (tool-message (elt second-messages 2)))
+                   (check (string= "user" (gethash "role" user-message)))
+                   (check (string= "assistant" (gethash "role" assistant-message)))
+                   (check (= 1 (length (gethash "tool_calls" assistant-message)))
+                          "assistant tool call survives round trip")
+                   (check (string= "tool" (gethash "role" tool-message)))
+                   (check (string= "call_add" (gethash "tool_call_id" tool-message)))
+                   (check (string= "5" (gethash "content" tool-message)))))))
+           (let ((history (agent-message-history agent)))
+             (check (>= (length history) 4)
+                    "persisted history retains both assistant turns and tool feedback")
+             (check (string= "add two and three" (getf (first history) :content)))))
+        (unregister-tool! 'anuna-imago::openrouter-loop-add)))))
+
+(defun test-openrouter-malformed-tool-arguments ()
+  "TEST-023a: malformed JSON arguments yield an error result without dispatch."
+  (format t "~%-- openrouter-malformed-tool-arguments (SPEC-014 TEST-023) --~%")
+  (unregister-tool! 'anuna-imago::openrouter-malformed-target)
+  (let ((handler-calls 0)
+        (request-count 0)
+        (responses
+          (list
+           (com.inuoe.jzon:stringify
+            (anuna-imago::%ht
+             "choices"
+             (vector
+              (anuna-imago::%ht
+               "message"
+               (anuna-imago::%ht
+                "role" "assistant" "content" nil
+                "tool_calls"
+                (vector
+                 (anuna-imago::%ht
+                  "id" "bad-call" "type" "function"
+                  "function"
+                  (anuna-imago::%ht
+                   "name" "openrouter-malformed-target"
+                   "arguments" "{not-json"))))
+               "finish_reason" "tool_calls"))))
+           (com.inuoe.jzon:stringify
+            (anuna-imago::%ht
+             "choices"
+             (vector
+              (anuna-imago::%ht
+               "message" (anuna-imago::%ht
+                            "role" "assistant" "content" "recovered")
+               "finish_reason" "stop")))))))
+    (define-tool anuna-imago::openrouter-malformed-target
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf handler-calls)
+                 :must-not-run))
+    (with-openrouter-red-gate ("malformed OpenRouter arguments")
+      (unwind-protect
+           (let* ((*openrouter-http-post*
+                  (lambda (url &key headers content)
+                    (declare (ignore url headers content))
+                    (incf request-count)
+                    (or (pop responses) (error "unexpected request"))))
+                (provider (make-openrouter-provider
+                           :api-key "test-key" :model "test/model"))
+                (seed-history
+                  (list (list :role "user" :content "earlier")
+                        (list :role "assistant" :content "earlier reply")))
+                (agent (make-instance
+                        'agent
+                        :id 'openrouter-malformed-agent
+                        :capability "openrouter:malformed"
+                        :provider provider
+                        :tools '(anuna-imago::openrouter-malformed-target))))
+           (setf (agent-message-history agent) (copy-tree seed-history))
+           (let* ((reply (drive-stream agent (make-ask "malformed request")))
+                  (results (getf reply :tool-results))
+                  (result (first results)))
+             (check (= 2 request-count) "error tool result is returned to the provider")
+             (check (= 1 (length results)) "one malformed-argument result")
+             (check (eq :error (getf result :status)))
+             (check (zerop handler-calls) "malformed arguments never reach handler")
+             (check (string= "recovered" (getf reply :text)))
+             (check (equal seed-history
+                           (subseq (agent-message-history agent) 0 2))
+                    "valid history prefix survives malformed arguments")))
+        (unregister-tool! 'anuna-imago::openrouter-malformed-target)))))
+
+(defun test-openrouter-unknown-finish-reason ()
+  "TEST-023b: unknown finish reasons become canonical errors without history loss."
+  (format t "~%-- openrouter-unknown-finish-reason (SPEC-014 TEST-023) --~%")
+  (let* ((canned
+           (com.inuoe.jzon:stringify
+            (anuna-imago::%ht
+             "choices"
+             (vector
+              (anuna-imago::%ht
+               "message" (anuna-imago::%ht
+                            "role" "assistant" "content" "valid partial text")
+               "finish_reason" "future_reason")))))
+         (*openrouter-http-post*
+           (lambda (url &key headers content)
+             (declare (ignore url headers content))
+             canned))
+         (provider (make-openrouter-provider :api-key "test-key"
+                                              :model "test/model"))
+         (seed-history (list (list :role "user" :content "earlier")))
+         (agent (make-instance 'agent
+                               :id 'openrouter-unknown-finish-agent
+                               :capability "openrouter:malformed"
+                               :provider provider
+                               :tools nil)))
+    (with-openrouter-red-gate ("unknown OpenRouter finish reason")
+      (setf (agent-message-history agent) (copy-tree seed-history))
+      (let* ((reply (drive-stream agent (make-ask "new request")))
+             (results (getf reply :tool-results)))
+        (check (= 1 (length results)) "unknown finish produces one error result")
+        (check (getf (first results) :error) "unknown finish is reported as an error")
+        (check (string= "valid partial text" (getf reply :text))
+               "valid assistant text is preserved")
+        (check (equal seed-history
+                      (subseq (agent-message-history agent) 0 1))
+               "valid history prefix survives unknown finish reason")))))
 
 (defun test-openrouter-response-error-envelope ()
   (format t "~%-- openrouter-response-error-envelope --~%")
@@ -216,6 +449,9 @@
     (test-openrouter-auth-missing-key)
     (test-openrouter-response-text-only)
     (test-openrouter-response-tool-call)
+    (test-openrouter-two-step-tool-drive-stream)
+    (test-openrouter-malformed-tool-arguments)
+    (test-openrouter-unknown-finish-reason)
     (test-openrouter-response-error-envelope)
     (test-openrouter-http-error-becomes-frame)
     (test-openrouter-credential-eraser)

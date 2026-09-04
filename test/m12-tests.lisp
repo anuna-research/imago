@@ -392,6 +392,52 @@ Tests bind this to make the reasoner veto specific forms.")
         (check (eq :reasoner (getf res :phase)))
         (check (consp (getf res :derivation)))))))
 
+(defvar *m12-reasoner-protected-calls* 0
+  "Count executions behind the SPEC-014 fail-closed reasoner gate.")
+
+(defun m12-reasoner-protected-probe ()
+  (incf *m12-reasoner-protected-calls*)
+  :protected-action-ran)
+
+(defun %exercise-m12-reasoner-failure (query-result-thunk test-id)
+  "Run harness-eval with a failing or malformed reasoner response."
+  (setf *m12-reasoner-protected-calls* 0)
+  (let ((anuna-imago::*reasoner-ipc-call*
+          (lambda (op &rest args)
+            (declare (ignore args))
+            (case op
+              (:query (funcall query-result-thunk))
+              ((:assert-fact :retract-fact) :ok)
+              (otherwise :spec-014-red-gate))))
+        (anuna-imago::*active-theory-handle* :spec-014-red-gate)
+        (anuna-imago::*harness-eval-audit-log* nil))
+    (let ((res
+            (anuna-imago::%harness-eval-handler
+             '(:form "(anuna-imago.test::m12-reasoner-protected-probe)"))))
+      (check (eq :vetoed (getf res :status))
+             (format nil "~A vetoes harness-eval" test-id))
+      (check (eq :reasoner (getf res :phase))
+             (format nil "~A is attributed to the reasoner phase" test-id))
+      (check (zerop *m12-reasoner-protected-calls*)
+             (format nil "~A never evaluates the protected form" test-id)))))
+
+(defun test-m12-handler-fails-closed-on-reasoner-error ()
+  "SPEC-014 TEST-004: reasoner transport failure cannot reach EVAL."
+  (format t "~%-- m12-handler-fails-closed-on-reasoner-error (SPEC-014 TEST-004) --~%")
+  (%exercise-m12-reasoner-failure
+   (lambda () (error "simulated reasoner outage"))
+   "query error"))
+
+(defun test-m12-handler-fails-closed-on-malformed-reasoner-evidence ()
+  "SPEC-014 TEST-025: missing and unknown proof tags cannot reach EVAL."
+  (format t "~%-- m12-handler-fails-closed-on-malformed-reasoner-evidence (SPEC-014 TEST-025) --~%")
+  (%exercise-m12-reasoner-failure
+   (lambda () (list :derivation nil :time-ms 1))
+   "missing proof tag")
+  (%exercise-m12-reasoner-failure
+   (lambda () (list :tag :unknown-proof :derivation nil :time-ms 1))
+   "unknown proof tag"))
+
 (defun test-m12-handler-error-during-eval ()
   (format t "~%-- m12-handler-error-during-eval (TEST-003c) --~%")
   (with-m12-handler-fixture ()
@@ -898,6 +944,8 @@ a muffle-warning handler-bind because the eval thread would otherwise print
     (test-m12-handler-evaluates-benign-form)
     (test-m12-handler-rejects-prefilter-bypass)
     (test-m12-handler-vetoes-via-reasoner)
+    (test-m12-handler-fails-closed-on-reasoner-error)
+    (test-m12-handler-fails-closed-on-malformed-reasoner-evidence)
     (test-m12-handler-error-during-eval)
     (test-m12-handler-receipt-on-every-phase)
     ;; t09 / REQ-001

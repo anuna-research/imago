@@ -79,6 +79,7 @@ agent runs in a child thread that doesn't see thread-local bindings."
              (install-invariant-filter! :theory-handle handle)
              (unwind-protect
                   (let ((agent (make-instance 'agent :id 'inv-a :capability "x"
+                                                      :tools '(delete-user)
                                                       :provider
                                                       (make-stub-provider
                                                        :responder
@@ -116,6 +117,7 @@ agent runs in a child thread that doesn't see thread-local bindings."
              (install-invariant-filter! :theory-handle handle)
              (unwind-protect
                   (let ((agent (make-instance 'agent :id 'inv-a-2 :capability "x"
+                                                      :tools '(greet)
                                                       :provider
                                                       (make-stub-provider
                                                        :responder
@@ -133,6 +135,70 @@ agent runs in a child thread that doesn't see thread-local bindings."
                     (drain-supervisor! sup))
                (uninstall-invariant-filter!))))
       (setf *reasoner-ipc-call* original))))
+
+(defun %exercise-invariant-filter-failure (query-result-thunk test-id)
+  "Run one guarded tool call while QUERY-RESULT-THUNK fails or returns evidence."
+  (clear-all-hooks) (clear-all-tools)
+  (let ((protected-calls 0)
+        (original *reasoner-ipc-call*))
+    (define-tool reasoner-guarded-tool
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf protected-calls)
+                 :protected-action-ran))
+    (unwind-protect
+         (progn
+           (setf *reasoner-ipc-call*
+                 (lambda (op &rest args)
+                   (declare (ignore args))
+                   (case op
+                     (:load-theory :spec-014-red-gate)
+                     (:query (funcall query-result-thunk))
+                     (otherwise :ok))))
+           (let ((handle (load-theory "spec-014-red-gate")))
+             (install-invariant-filter! :theory-handle handle)
+             (unwind-protect
+                  (let* ((agent
+                           (make-instance
+                            'agent
+                            :id (intern (format nil "REASONER-~A" test-id)
+                                        :anuna-imago.test)
+                            :capability "reasoner:guarded"
+                            :tools '(reasoner-guarded-tool)
+                            :provider
+                            (make-stub-provider
+                             :responder
+                             (lambda (message)
+                               (declare (ignore message))
+                               (list (list :tool-use "guarded-1"
+                                           'reasoner-guarded-tool nil))))))
+                         (reply (drive-stream agent (make-ask "guarded action")))
+                         (result (first (getf reply :tool-results))))
+                    (check (eq :vetoed (getf result :status))
+                           (format nil "~A denies the guarded dispatch" test-id))
+                    (check (zerop protected-calls)
+                           (format nil "~A leaves protected handler untouched" test-id)))
+               (uninstall-invariant-filter!))))
+      (uninstall-invariant-filter!)
+      (setf *reasoner-ipc-call* original))))
+
+(defun test-invariant-filter-fails-closed-on-query-error ()
+  "SPEC-014 TEST-004: an installed filter denies on reasoner outage."
+  (format t "~%-- invariant-filter-fails-closed-on-query-error (SPEC-014 TEST-004) --~%")
+  (%exercise-invariant-filter-failure
+   (lambda () (error "simulated reasoner outage"))
+   "query error"))
+
+(defun test-invariant-filter-fails-closed-on-malformed-evidence ()
+  "SPEC-014 TEST-025: missing and unknown proof tags both deny."
+  (format t "~%-- invariant-filter-fails-closed-on-malformed-evidence (SPEC-014 TEST-025) --~%")
+  (%exercise-invariant-filter-failure
+   (lambda () (list :derivation nil :time-ms 1))
+   "missing proof tag")
+  (%exercise-invariant-filter-failure
+   (lambda () (list :tag :unknown-proof :derivation nil :time-ms 1))
+   "unknown proof tag"))
 
 ;; ----------------------------------------------------- :clean integration ---
 
@@ -158,6 +224,8 @@ pre-save-clean! runs, so the handle doesn't leak into shipped images."
   (test-reasoner-query)
   (test-invariant-filter-vetoes-forbidden)
   (test-invariant-filter-allows-permitted)
+  (test-invariant-filter-fails-closed-on-query-error)
+  (test-invariant-filter-fails-closed-on-malformed-evidence)
   (test-invariant-filter-clean-drops-handle)
   (format t "~%=== ~D failure(s) ===~%" *failures*)
   (when (plusp *failures*) (sb-ext:exit :code 1))
