@@ -152,7 +152,7 @@ symbol only; without, return one entry per redefined symbol with
         :symbol       (symbol-name (getf rec :symbol))
         :installed-at (getf rec :installed-at)
         :installed-by (let ((id (getf rec :installed-by)))
-                        (and id (princ-to-string id)))
+                        (and id (%bounded-princ id)))
         :rolled-back  (getf rec :rolled-back)))
 
 (defun %tool-list-rollbacks (args)
@@ -182,13 +182,17 @@ symbol only; without, return one entry per redefined symbol with
 harness-query-receipts (which reads the SPEC-011 ASK/reply log)."
   (let ((limit (or (getf args :limit) 10)))
     (cond
+      ((or (not (integerp limit)) (minusp limit) (> limit 100))
+       (list :error :invalid-limit
+             :note ":limit must be an integer from 0 through 100"))
       ((null *harness-eval-audit-log*)
        (list :error :no-audit-log
              :note "Self-modification tools not installed"))
       (t
        (let* ((path (receipt-log-path *harness-eval-audit-log*))
-              (all (handler-case (read-receipts path) (error () nil))))
-         (subseq all (max 0 (- (length all) limit))))))))
+              (all (handler-case (read-receipts path :limit limit)
+                     (error () nil))))
+         all)))))
 
 ;; ---------------------------------------------- registration ---
 
@@ -259,9 +263,10 @@ Returns:
      ;; resource, or tool.  A reasoner failure aborts installation unchanged.
      (%assert-safety-layer-facts! *active-theory-handle*)
 
-     ;; Jzon is unlocked by its distribution. Seal its transitive parser
-     ;; helpers before evaluated code becomes reachable.
+     ;; Seal unlocked third-party parser/transport implementations before
+     ;; evaluated code becomes reachable.
      (%ensure-jzon-package-locked!)
+     (%ensure-dexador-package-locked!)
 
      ;; 1. Permission keyword
      (pushnew :eval *valid-permissions*)

@@ -637,6 +637,11 @@ produces 8,193 without crossing another resource ceiling."
               "{\"error\":{\"message\":\"x\",\"unknown\":0}}"
               "{\"choices\":false}"
               "{\"choices\":[],\"id\":7}"
+              (let ((root (com.inuoe.jzon:parse
+                           (%openrouter-test-stop-body) :key-fn nil)))
+                (setf (gethash "id" root)
+                      (make-string 257 :initial-element #\i))
+                (com.inuoe.jzon:stringify root))
               "{\"choices\":[],\"object\":7}"
               "{\"choices\":[],\"model\":7}"
               "{\"choices\":[],\"system_fingerprint\":7}"
@@ -688,6 +693,14 @@ produces 8,193 without crossing another resource ceiling."
               "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"x\",\"type\":\"function\",\"function\":{\"name\":\"openrouter-boundary-target\",\"name\":\"openrouter-boundary-target\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}"
               "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"x\",\"type\":\"function\",\"function\":{\"name\":\"openrouter-boundary-target\",\"arguments\":\"{\\\"value\\\":1,\\\"value\\\":2}\"}}]},\"finish_reason\":\"tool_calls\"}]}"))
           (run-agent body))
+        (let* ((root (com.inuoe.jzon:parse (%openrouter-test-stop-body)
+                                           :key-fn nil)))
+          (setf (gethash "id" root)
+                (make-string 256 :initial-element #\i))
+          (check (null (%frame-of-kind
+                        :error
+                        (fetch (com.inuoe.jzon:stringify root))))
+                 "exactly 256 root-identifier characters are accepted"))
         (let ((valid-array-frames
                 (fetch
                  (%openrouter-test-tool-body

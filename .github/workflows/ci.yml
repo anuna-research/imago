@@ -96,7 +96,7 @@ jobs:
             | tail -1 | awk '{print $1}')
           echo "Harness LOC: $total"
           # Match the M11 core-harness budget (identity remains a separate tier).
-          if [[ "$total" -ge 3300 ]]; then
-            echo "::error::Harness LOC ($total) exceeds 3300 cap — trim before merge"
+          if [[ "$total" -ge 3700 ]]; then
+            echo "::error::Harness LOC ($total) exceeds 3700 cap — trim before merge"
             exit 1
           fi

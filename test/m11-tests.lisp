@@ -120,9 +120,9 @@ We close stdin so LISTEN doesn't block; the deadline path triggers exit."
     (if s (loop for line = (read-line s nil nil) while line count 1) 0)))
 
 (defun test-loc-budget ()
-  "Acceptance: harness LOC tracked over time. Cap raised to 2700 after
-the built-in tier expanded from 5 to 10 tools (~85 LOC of new handlers
-+ exports + agent.lisp's *current-agent* binding)."
+  "Acceptance: harness LOC tracked separately from capability/security gates.
+The reviewed 3700 ceiling includes the closed, bounded receipt grammar added
+after SPEC-014's adversarial audit; evolution code itself remains opt-in."
   (format t "~%-- loc-budget --~%")
   (let* ((root (%imago-root-path))
          (harness-files
@@ -138,8 +138,8 @@ the built-in tier expanded from 5 to 10 tools (~85 LOC of new handlers
          (total (reduce #'+ (mapcar (lambda (f) (%count-loc (concatenate 'string root f)))
                                     harness-files))))
     (format t "  harness LOC: ~D~%" total)
-    (check (< total 3300)
-           (format nil "harness LOC ~D under 3300" total))))
+    (check (< total 3700)
+           (format nil "harness LOC ~D under 3700" total))))
 
 ;; ---------------------------------------------------------------- runner ---
 

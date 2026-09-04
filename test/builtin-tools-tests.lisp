@@ -184,7 +184,16 @@ trips up the dispatch machinery."
                (check (= 3 (length subset)) ":limit 3 returns 3 entries")
                ;; Should be the LAST 3 (r-4, r-5, r-6).
                (check (string= "r-4" (getf (first subset) :receipt-id)))
-               (check (string= "r-6" (getf (third subset) :receipt-id)))))
+               (check (string= "r-6" (getf (third subset) :receipt-id))))
+             (check (null (dispatch-tool! 'harness-query-receipts '(:limit 0)))
+                    ":limit 0 returns no entries")
+             (dolist (limit '(-1 101 "all"))
+               (check (eq :invalid-limit
+                          (getf (dispatch-tool!
+                                 'harness-query-receipts
+                                 (list :limit limit))
+                                :error))
+                      (format nil "invalid receipt limit is total: ~S" limit))))
         (close-receipt-log! log)
         (setf anuna-imago::*open-receipt-logs* saved-logs)
         (handler-case (delete-file path) (error () nil))))))

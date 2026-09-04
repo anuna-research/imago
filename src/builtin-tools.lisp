@@ -75,14 +75,17 @@ A receipt log becomes 'registered' via REGISTER-RECEIPT-LOG-FOR-CLEAN!;
 agents without one get an :error :no-log result."
   (let ((limit (or (getf args :limit) 10)))
     (cond
+      ((or (not (integerp limit)) (minusp limit) (> limit 100))
+       (list :error :invalid-limit
+             :note ":limit must be an integer from 0 through 100"))
       ((null *open-receipt-logs*)
        (list :error :no-log
              :note "No receipt log registered (call register-receipt-log-for-clean! first)"))
       (t
        (let* ((log (first *open-receipt-logs*))
               (path (receipt-log-path log))
-              (all (read-receipts path)))
-         (subseq all (max 0 (- (length all) limit))))))))
+              (all (read-receipts path :limit limit)))
+         all)))))
 
 (defun %tool-uuid (args)
   "Return a fresh UUID v4 as a 36-char lowercase string."

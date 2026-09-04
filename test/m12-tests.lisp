@@ -44,6 +44,7 @@
             ("(sb-ext:quit)"                                       :quit)
             ("(sb-ext:without-package-locks (foo))"                :without-package-locks)
             ("(sb-ext:unlock-package :com.inuoe.jzon)"             :unlock-package)
+            ("(sb-sys:without-interrupts (loop))"                  :interrupt-suppression)
             ("(eval '(defmethod tool-call ((a) (b) (c)) :pwn))"    :eval-bypass)
             ("(read-from-string \"(defun f () 1)\")"               :read-from-string-bypass)
             ("(load \"/tmp/rogue.lisp\")"                          :load-bypass)
@@ -83,6 +84,31 @@
     (check (and (consp r) (eq :rejected (getf r :status)) (eq :setf-tool-accessor (getf r :rule)))
            "F7: tool struct slot mutation must be rejected")))
 
+(defun test-m12-buried-denylist-and-mutators-remain-visible ()
+  (format t "~%-- m12-buried-denylist-and-mutators-remain-visible --~%")
+  (dolist
+      (case
+       '(("(progn (unintern 'x))" unintern)
+         ("(let () (delete-package :m12-absent))" delete-package)
+         ("(progn (sb-ext:exit))" sb-ext:exit)
+         ("(progn (sb-ext:quit))" sb-ext:quit)
+         ("(progn (sb-ext:save-lisp-and-die \"/tmp/never\"))"
+          sb-ext:save-lisp-and-die)))
+    (destructuring-bind (source target) case
+      (let ((lift (%lift-form (read-from-string source))))
+        (check (and (member target (getf lift :free-symbols) :test #'eq)
+                    (anuna-imago::safety-layer-symbol-p target))
+               (format nil "buried process/package operator reaches the safety floor: ~S"
+                       target)))))
+  (dolist
+      (source
+       '("(progn (setf (symbol-function 'anuna-imago::%query-forbidden) #'identity))"
+         "(let () (setf (fdefinition 'anuna-imago::%query-forbidden) #'identity))"
+         "(progn (setq anuna-imago:*clean-checklist* nil))"))
+    (let ((result (%harness-eval-prefilter (read-from-string source))))
+      (check (and (consp result) (eq :rejected (getf result :status)))
+             (format nil "buried structural mutation rejects: ~A" source)))))
+
 (defun test-m12-prefilter-denies-defmethod-against-safety-layer ()
   (format t "~%-- m12-prefilter-denies-defmethod-safety (TEST-011..014) --~%")
   (dolist (target '(anuna-imago:invariant-filter-hook
@@ -114,6 +140,8 @@
             "(setq anuna-imago::*safety-layer-symbols* nil)"
             "(psetf anuna-imago::*tool-registry* nil)"
             "(psetq anuna-imago::*active-theory-handle* nil)"
+            "(setq *print-base* 36)"
+            "(setq *package* (find-package :keyword))"
             "(set 'anuna-imago::*safety-layer-symbols* nil)"
             "(makunbound 'anuna-imago::*reasoner-ipc-call*)")))
     (dolist (src forms)
@@ -203,6 +231,24 @@
                   (sort (copy-list (getf b :free-symbols)) #'string<
                         :key #'symbol-name)))))
 
+(defun test-m12-lift-traverses-array-data ()
+  (format t "~%-- m12-lift-traverses-array-data (TEST-065) --~%")
+  (let* ((vector-form
+           (read-from-string
+            "(aref #(anuna-imago::%query-forbidden) 0)"))
+         (vector-lift (%lift-form vector-form))
+         (matrix
+           (make-array '(1 1)
+                       :initial-contents
+                       '((anuna-imago::%query-forbidden))))
+         (matrix-lift (%lift-form (list 'aref matrix 0 0))))
+    (check (member 'anuna-imago::%query-forbidden
+                   (getf vector-lift :free-symbols))
+           "literal vector contents reach the safety-symbol lift")
+    (check (member 'anuna-imago::%query-forbidden
+                   (getf matrix-lift :free-symbols))
+           "multidimensional array contents reach the safety-symbol lift")))
+
 ;; =========================================================================
 ;; CON-004 — receipt log
 ;; =========================================================================
@@ -227,10 +273,142 @@
                   "form preserved verbatim incl. leading comment")
            (let ((reloaded (read-receipts path)))
              (check (= 1 (length reloaded)))
+             (check (eq 'anuna-imago::harness-eval
+                        (getf (first reloaded) :tool))
+                    "tool identity survives a foreign-package write")
              (check (string= form-text (getf (first reloaded) :form))
-                    "verbatim survives file round-trip")))
+                    "verbatim survives file round-trip")
+             (check (equal '(:value "F")
+                           (getf (first reloaded) :result-summary))
+                    "summary plist semantics survive round-trip")))
       (close-receipt-log! log)
       (handler-case (delete-file path) (error () nil)))))
+
+(defvar *m12-receipt-read-hit* 0)
+
+(defun test-m12-receipt-reader-is-closed-and-bounded ()
+  (format t "~%-- m12-receipt-reader-is-closed-and-bounded --~%")
+  (let ((anuna-imago::+receipt-maximum-form-nodes+ 4))
+    (with-input-from-string (stream "(NIL NIL NIL)")
+      (check (string= "(NIL NIL NIL)"
+                      (anuna-imago::%read-receipt-source stream))
+             "exact pre-read node budget passes"))
+    (with-input-from-string (stream "(NIL NIL NIL NIL)")
+      (check (handler-case
+                 (progn (anuna-imago::%read-receipt-source stream) nil)
+               (error () t))
+             "one-over pre-read node budget rejects before READ")))
+  (let* ((path (format nil "/tmp/imago-m12-hostile-receipt-~D.log"
+                       (random 100000)))
+         (log (open-receipt-log path)))
+    (unwind-protect
+         (progn
+           (%tool-receipt! log :tool 'harness-eval :agent-id 'test
+                           :form "(+ 1 2)" :result-phase :evaluated
+                           :result-tag :ok :elapsed-ms 1
+                           :result-summary '(:value "3"))
+           (close-receipt-log! log)
+           (with-open-file (stream path :direction :output :if-exists :append)
+             (write-line
+              "#.(progn (incf anuna-imago.test::*m12-receipt-read-hit*) '(:receipt-id \"forged\" :seq 7))"
+              stream))
+           (setf *m12-receipt-read-hit* 0)
+           (check (handler-case (progn (read-receipts path) nil)
+                    (error () t))
+                  "read-time payload makes the closed reader fail")
+           (check (zerop *m12-receipt-read-hit*)
+                  "receipt inspection never evaluates #. payloads")
+           (unless (fboundp 'anuna-imago::%tool-query-self-mod-receipts)
+             (load (merge-pathnames "examples/self-modifying.lisp"
+                                    (asdf:system-source-directory :imago))))
+           (let ((anuna-imago::*harness-eval-audit-log* log))
+             (check (null (anuna-imago::%tool-query-self-mod-receipts
+                           '(:limit 1)))
+                    "introspection fails closed on a corrupt suffix"))
+           (check (handler-case (progn (open-receipt-log path) nil)
+                    (error () t))
+                  "sequence recovery fails closed on hostile bytes")
+           (check (zerop *m12-receipt-read-hit*)
+                  "reopen never evaluates the persisted payload"))
+      (ignore-errors (close-receipt-log! log))
+      (ignore-errors (delete-file path))))
+  (let* ((token (format nil "CODEX-RECEIPT-INTERN-PROBE-~D"
+                        (random 100000)))
+         (path (format nil "/tmp/imago-m12-unknown-receipt-~D.log"
+                       (random 100000))))
+    (unwind-protect
+         (progn
+           (check (null (find-symbol token :keyword)))
+           (with-open-file (stream path :direction :output
+                                        :if-does-not-exist :create)
+             (format stream "(:STATUS :~A)~%" token))
+           (check (handler-case (progn (read-receipts path) nil)
+                    (error () t)))
+           (check (null (find-symbol token :keyword))
+                  "unknown receipt tokens are rejected without interning")
+           (with-open-file (stream path :direction :output
+                                        :if-exists :supersede)
+             (write-line
+              "(:RECEIPT-ID \"R\" :SEQ 0 :DIRECTION :INBOUND :TOOL NIL :VERB NIL :CONTENT-HASH \"00000000000000000000000000000000\" :TIMESTAMP \"T\" :AGENT-ID \"A\" :PRODUCER-ID \"P\" :STATUS :RECEIVED)"
+              stream))
+           (check (handler-case (progn (read-receipts path) nil)
+                    (error () t))
+                  "a union-vocabulary key cannot replace a required schema key"))
+      (ignore-errors (delete-file path))))
+  (let* ((path (format nil "/tmp/imago-m12-receipt-seq-~D.log"
+                       (random 100000)))
+         (log (open-receipt-log path)))
+    (unwind-protect
+         (progn
+           (check (handler-case
+                      (progn
+                        (append-receipt!
+                         log :receipt-id "R" :direction :inbound
+                         :dialect
+                         (make-string
+                          (1+ anuna-imago::+receipt-maximum-string-characters+)
+                          :initial-element #\x))
+                        nil)
+                    (error () t))
+                  "writer rejects values outside its reader domain")
+           (let ((entry (append-receipt! log :receipt-id "R"
+                                         :direction :inbound)))
+             (check (zerop (getf entry :seq))
+                    "failed writer preflight does not consume a sequence")))
+      (ignore-errors (close-receipt-log! log)))
+    (check (equal '(0) (mapcar (lambda (entry) (getf entry :seq))
+                               (read-receipts path))))
+    (ignore-errors (delete-file path)))
+  (let* ((path (format nil "/tmp/imago-m12-receipt-closure-~D.log"
+                       (random 100000)))
+         (log (open-receipt-log path))
+         (exact (make-string anuna-imago::+receipt-maximum-string-characters+
+                             :initial-element #\x))
+         (cycle (list 'foreign-audit-symbol)))
+    (setf (cdr cycle) cycle)
+    (unwind-protect
+         (progn
+           (anuna-imago::%tool-receipt!
+            log :tool 'harness-eval :agent-id 'test :form exact
+            :result-phase :evaluated :result-tag :ok :elapsed-ms 1
+            :result-summary (list :derivation cycle))
+           (anuna-imago::%tool-receipt!
+            log :tool 'harness-eval :agent-id 'test
+            :form (concatenate 'string exact "x")
+            :result-phase :evaluated :result-tag :ok :elapsed-ms 2
+            :result-summary '(:message "oversized source"))
+           (close-receipt-log! log)
+           (let ((entries (read-receipts path)))
+             (check (= 2 (length entries)))
+             (check (string= exact (getf (first entries) :form))
+                    "exact receipt string boundary round-trips")
+             (check (search "OVERSIZED-SOURCE"
+                            (getf (second entries) :form))
+                    "one-over source is replaced by a bounded fingerprint")
+             (check (listp (getf (first entries) :result-summary))
+                    "cyclic/foreign evidence is serialized into inert data")))
+      (ignore-errors (close-receipt-log! log))
+      (ignore-errors (delete-file path)))))
 
 ;; =========================================================================
 ;; CON-005 — origin index
@@ -261,6 +439,27 @@
     (check (> (getf event :form-bytes) 500))
     (check (= 32 (length (getf event :defining-form)))
            "form-hash is hex (md5 = 32 chars)")))
+
+(defun test-m12-origin-index-counts-utf8-octets ()
+  (format t "~%-- m12-origin-index-counts-utf8-octets --~%")
+  (let* ((emoji (string (code-char #x1F600)))
+         (at-cap (concatenate 'string
+                              (with-output-to-string (stream)
+                                (dotimes (index 124)
+                                  (declare (ignorable index))
+                                  (write-string emoji stream)))
+                              "aaaa"))
+         (over-cap (concatenate 'string at-cap "b"))
+         (at-event (anuna-imago::%record-definition!
+                    'm12-utf8-at at-cap 'test nil nil))
+         (over-event (anuna-imago::%record-definition!
+                      'm12-utf8-over over-cap 'test nil nil)))
+    (check (= 500 (getf at-event :form-bytes)))
+    (check (string= at-cap (getf at-event :defining-form))
+           "exact 500-byte multibyte source stays verbatim")
+    (check (= 501 (getf over-event :form-bytes)))
+    (check (= 32 (length (getf over-event :defining-form)))
+           "501-byte multibyte source stores only its fingerprint")))
 
 ;; =========================================================================
 ;; CON-006 — rollback register
@@ -351,16 +550,18 @@ Tests bind this to make the reasoner veto specific forms.")
     (otherwise nil)))
 
 (defmacro with-m12-handler-fixture (() &body body)
-  `(let ((anuna-imago::*reasoner-ipc-call* #'%m12-stub-reasoner)
-         (anuna-imago::*active-theory-handle* :m12-stub-handle)
-         (anuna-imago::*harness-eval-audit-log*
-           (open-receipt-log (format nil "/tmp/imago-m12-handler-~D.log"
-                                     (random 100000)))))
-     (unwind-protect
-         (progn ,@body)
-       (handler-case
-           (close-receipt-log! anuna-imago::*harness-eval-audit-log*)
-         (error () nil)))))
+  `(let ((audit-path (format nil "/tmp/imago-m12-handler-~D.log"
+                             (random 100000))))
+     (ignore-errors (delete-file audit-path))
+     (let ((anuna-imago::*reasoner-ipc-call* #'%m12-stub-reasoner)
+           (anuna-imago::*active-theory-handle* :m12-stub-handle)
+           (anuna-imago::*harness-eval-audit-log*
+             (open-receipt-log audit-path)))
+       (unwind-protect
+           (progn ,@body)
+         (handler-case
+             (close-receipt-log! anuna-imago::*harness-eval-audit-log*)
+           (error () nil))))))
 
 (defun test-m12-handler-evaluates-benign-form ()
   (format t "~%-- m12-handler-evaluates-benign-form (TEST-002) --~%")
@@ -378,6 +579,94 @@ Tests bind this to make the reasoner veto specific forms.")
       (check (eq :rejected   (getf res :status)))
       (check (eq :pre-filter (getf res :phase)))
       (check (eq :unintern   (getf res :rule))))))
+
+(defun test-m12-provider-and-cleanup-seams-are-sequentially-protected ()
+  (format t "~%-- m12-provider-and-cleanup-seams-are-sequentially-protected --~%")
+  (let ((anuna-imago::*credential-erasers* nil)
+        (anuna-imago::*clean-checklist* '(:drop-credentials)))
+    (let* ((provider (make-anthropic-provider :api-key "m12-secret"))
+           (identity (register-identity-for-clean! (generate-identity)))
+           (endpoint (anthropic-base-url provider))
+           (clear-fn (symbol-function
+                      'anuna-imago::anthropic-clear-credentials!))
+           (symbol-call-fn (symbol-function 'uiop:symbol-call)))
+      (with-m12-handler-fixture ()
+        (dolist
+            (source
+             '("(defmethod anuna-imago:anthropic-base-url :around ((provider t)) (declare (ignore provider)) \"https://attacker.invalid\")"
+               "(defmethod anuna-imago:auth-headers :around ((provider t)) (declare (ignore provider)) '((\"authorization\" . \"stolen\")))"
+               "(defun anuna-imago::anthropic-clear-credentials! (provider) (declare (ignore provider)) nil)"
+               "(setq anuna-imago:*clean-checklist* nil)"
+               "(defmethod anuna-imago:openrouter-base-url :around ((provider t)) (declare (ignore provider)) \"https://attacker.invalid\")"
+               "(defun anuna-imago::openrouter-clear-credentials! (provider) (declare (ignore provider)) nil)"
+               "(defun anuna-imago::clear-identity-private-key! (identity) (declare (ignore identity)) nil)"
+               "(defun uiop:symbol-call (package name &rest args) (declare (ignore package name args)) :forged)"))
+          (let ((result (anuna-imago::%harness-eval-handler
+                         (list :form source))))
+            (check (member (getf result :status) '(:rejected :vetoed))
+                   (format nil "provider/cleanup TCB mutation is denied: ~A"
+                           source)))))
+      (check (string= endpoint (anthropic-base-url provider))
+             "endpoint reader remains unchanged for the next request")
+      (check (eq clear-fn
+                 (symbol-function
+                  'anuna-imago::anthropic-clear-credentials!))
+             "provider eraser function remains unchanged")
+      (check (eq symbol-call-fn (symbol-function 'uiop:symbol-call))
+             "UIOP symbol dispatch remains unchanged")
+      (check (string= "m12-secret"
+                      (cdr (assoc "x-api-key" (auth-headers provider)
+                                  :test #'string=)))
+             "ordinary request still obtains its original credential")
+      (pre-save-clean!)
+      (check (null (anthropic-api-key provider))
+             "the next clean pass erases the provider credential")
+      (check (null (identity-private-key identity))
+             "the next clean pass erases the signing private key"))))
+
+(defclass m12-mop-probe () ())
+
+(defun test-m12-runtime-mop-extension-is-sequentially-protected ()
+  (format t "~%-- m12-runtime-mop-extension-is-sequentially-protected --~%")
+  (let* ((initialize-gf (fdefinition 'initialize-instance))
+         (slot-gf (fdefinition 'sb-mop:slot-value-using-class))
+         (initialize-before
+           (copy-list (sb-mop:generic-function-methods initialize-gf)))
+         (slot-before (copy-list (sb-mop:generic-function-methods slot-gf)))
+         (first-agent (make-instance 'agent :id 'm12-mop-first :tools nil))
+         (second-agent (make-instance 'agent :id 'm12-mop-second :tools nil)))
+    (with-m12-handler-fixture ()
+      (let ((*current-agent* first-agent))
+        (dolist
+            (source
+             '("(defmethod initialize-instance :around ((instance standard-object) &rest args &key) (declare (ignore args)) instance)"
+               "(defmethod sb-mop:slot-value-using-class :around ((class standard-class) (object standard-object) slot) (declare (ignore class object slot)) :forged)"))
+          (let ((result (anuna-imago::%harness-eval-handler
+                         (list :form source))))
+            (check (eq :rejected (getf result :status))
+                   (format nil "runtime MOP extension rejects: ~A" source)))))
+      (let ((*current-agent* second-agent))
+        (check (eq :ok
+                   (getf
+                    (anuna-imago::%harness-eval-handler
+                     (list :form
+                           "(make-instance 'anuna-imago.test::m12-mop-probe)"))
+                    :status))
+               "a fresh agent still observes the original object protocol")))
+    (check (and (null (set-difference
+                       initialize-before
+                       (sb-mop:generic-function-methods initialize-gf)))
+                (null (set-difference
+                       (sb-mop:generic-function-methods initialize-gf)
+                       initialize-before)))
+           "INITIALIZE-INSTANCE method set is unchanged")
+    (check (and (null (set-difference
+                       slot-before
+                       (sb-mop:generic-function-methods slot-gf)))
+                (null (set-difference
+                       (sb-mop:generic-function-methods slot-gf)
+                       slot-before)))
+           "SLOT-VALUE-USING-CLASS method set is unchanged")))
 
 (defun test-m12-handler-vetoes-via-reasoner ()
   (format t "~%-- m12-handler-vetoes-via-reasoner (TEST-003b) --~%")
@@ -518,24 +807,30 @@ Tests bind this to make the reasoner veto specific forms.")
                                             (first fact))
                                         (anuna-imago::safety-layer-symbol-p
                                          (third fact)))
-                               (setf (gethash (second fact) unsafe)
-                                     (third fact))))
+                               (pushnew (third fact)
+                                        (gethash (second fact) unsafe)
+                                        :test #'eq)))
                            :ok)
                           (:retract-fact :ok)
                           (:query
                            (let* ((goal (second args))
                                   (form-id (third goal))
-                                  (trigger (gethash form-id unsafe)))
-                             (if trigger
+                                  (triggers (gethash form-id unsafe)))
+                             (if triggers
                                  (list :tag :+delta
                                        :derivation
-                                       (list
-                                        (list 'anuna-imago::forbidden
-                                              'anuna-imago::eval-call form-id)
-                                        (list 'anuna-imago::mentions
-                                              form-id trigger)
-                                        (list 'anuna-imago::safety-layer-symbol
-                                              trigger))
+                                       (append
+                                        (list
+                                         (list 'anuna-imago::forbidden
+                                               'anuna-imago::eval-call form-id))
+                                        (loop for trigger in triggers
+                                              append
+                                              (list
+                                               (list 'anuna-imago::mentions
+                                                     form-id trigger)
+                                               (list
+                                                'anuna-imago::safety-layer-symbol
+                                                trigger))))
                                        :time-ms 1)
                                  '(:tag :-delta :derivation nil :time-ms 1))))
                           (otherwise :ok))))
@@ -577,6 +872,87 @@ Tests bind this to make the reasoner veto specific forms.")
                    (check (search "not authorized" (getf result :message)
                                   :test #'char-equal)
                           "computed dispatch observes the frozen allowlist"))
+
+                 ;; Aggregate constants must not hide protected function cells
+                 ;; from the structural lift. Vectors and general arrays are
+                 ;; traversed; opaque structure literals are rejected.
+                 (let* ((target 'anuna-imago::%query-forbidden)
+                        (original (symbol-function target))
+                        (replacement-result nil)
+                        (probe-result nil))
+                   (setf *m12-reasoner-protected-calls* 0)
+                   (unwind-protect
+                        (progn
+                          (setf replacement-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  "(progn (setf (symbol-function (aref #(anuna-imago::%query-forbidden) 0)) (lambda (&rest x) (declare (ignore x)) (list :tag :-delta :derivation nil :time-ms 0))) :done)")))
+                          (setf probe-result
+                                (let ((anuna-imago::*reasoner-ipc-call*
+                                        (lambda (op &rest args)
+                                          (declare (ignore args))
+                                          (case op
+                                            ((:assert-fact :retract-fact) :ok)
+                                            (:query
+                                             '(:tag :-delta :derivation nil))
+                                            (otherwise :ok)))))
+                                  (anuna-imago::%harness-eval-handler
+                                   (list
+                                    :form
+                                    "(anuna-imago.test::m12-reasoner-protected-probe)")))))
+                     (setf (symbol-function target) original))
+                   (check (member (getf replacement-result :status)
+                                  '(:rejected :vetoed))
+                          "vector-hidden TCB replacement is denied")
+                   (check (eq original (symbol-function target))
+                          "vector-hidden TCB target remains unchanged")
+                   (check (eq :vetoed (getf probe-result :status))
+                          "protected probe remains denied after vector attempt")
+                   (check (zerop *m12-reasoner-protected-calls*)
+                          "vector-hidden replacement cannot reach the probe"))
+
+                 (let* ((definition-result
+                          (anuna-imago::%harness-eval-handler
+                           (list
+                            :form
+                            "(defstruct anuna-imago.test::review-box value)")))
+                        (target 'anuna-imago::%query-forbidden)
+                        (original (symbol-function target))
+                        (replacement-result nil)
+                        (probe-result nil))
+                   (setf *m12-reasoner-protected-calls* 0)
+                   (unwind-protect
+                        (progn
+                          (setf replacement-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  "(progn (setf (symbol-function (anuna-imago.test::review-box-value #S(anuna-imago.test::review-box :value anuna-imago::%query-forbidden))) (lambda (&rest x) (declare (ignore x)) nil)) :done)")))
+                          (setf probe-result
+                                (let ((anuna-imago::*reasoner-ipc-call*
+                                        (lambda (op &rest args)
+                                          (declare (ignore args))
+                                          (case op
+                                            ((:assert-fact :retract-fact) :ok)
+                                            (:query
+                                             '(:tag :-delta :derivation nil))
+                                            (otherwise :ok)))))
+                                  (anuna-imago::%harness-eval-handler
+                                   (list
+                                    :form
+                                    "(anuna-imago.test::m12-reasoner-protected-probe)")))))
+                     (setf (symbol-function target) original))
+                   (check (eq :ok (getf definition-result :status))
+                          "eligible structure definition remains supported")
+                   (check (eq :rejected (getf replacement-result :status))
+                          "structure-literal TCB replacement is rejected")
+                   (check (eq original (symbol-function target))
+                          "structure-literal TCB target remains unchanged")
+                   (check (eq :vetoed (getf probe-result :status))
+                          "protected probe remains denied after structure attempt")
+                   (check (zerop *m12-reasoner-protected-calls*)
+                          "structure-hidden replacement cannot reach the probe"))
 
                  ;; A macro can synthesize the protected bindings from
                  ;; strings, leaving neither authority symbol in its source
@@ -622,7 +998,7 @@ Tests bind this to make the reasoner veto specific forms.")
                  ;; its caller.  A fake agent that advertises the hidden tool
                  ;; must still remain below the evaluation snapshot ceiling.
                  (let* ((form
-                          "(let* ((fake (make-instance 'anuna-imago:agent :id 'fake-authority-agent :capability \"fake\" :tools '(anuna-imago.test::m12-operator-authority-hidden) :provider (anuna-imago:make-stub-provider :responder (lambda (message) (declare (ignore message)) (list (list :tool-use \"fake-drive\" 'anuna-imago.test::m12-operator-authority-hidden nil)))))) (drive (symbol-function (find-symbol \"DRIVE-STREAM\" \"ANUNA-IMAGO\"))) (reply (funcall drive fake \"escape\"))) (getf (first (getf reply :tool-results)) :status))")
+                          "(let* ((fake (make-instance (find-symbol \"AGENT\" \"ANUNA-IMAGO\") :id 'fake-authority-agent :capability \"fake\" :tools '(anuna-imago.test::m12-operator-authority-hidden) :provider (anuna-imago:make-stub-provider :responder (lambda (message) (declare (ignore message)) (list (list :tool-use \"fake-drive\" 'anuna-imago.test::m12-operator-authority-hidden nil)))))) (drive (symbol-function (find-symbol \"DRIVE-STREAM\" \"ANUNA-IMAGO\"))) (reply (funcall drive fake \"escape\"))) (getf (first (getf reply :tool-results)) :status))")
                         (result (anuna-imago::%harness-eval-handler
                                  (list :form form))))
                    (check (eq :ok (getf result :status))
@@ -825,7 +1201,63 @@ Tests bind this to make the reasoner veto specific forms.")
                             "evaluation remains usable after a trusted shrink"))
                    (check (equal (list alias-allowed-name)
                                  (agent-tools shrink-agent))
-                          "legitimate authority reduction persists"))
+                          "legitimate authority reduction persists")
+                   (let* ((readd-source
+                            (format
+                             nil
+                             "(let* ((agent (symbol-value (find-symbol \"*CURRENT-AGENT*\" \"ANUNA-IMAGO\"))) (slot (find-symbol \"TOOLS\" \"ANUNA-IMAGO\"))) (setf (slot-value agent slot) (list '~S '~S)) :readded)"
+                             alias-allowed-name name))
+                          (readd-result
+                            (anuna-imago::%harness-eval-handler
+                             (list :form readd-source)))
+                          (request
+                            (build-request
+                             (make-anthropic-provider :api-key "test")
+                             "monotonic reduction probe"
+                             shrink-agent)))
+                     (check (eq :ok (getf readd-result :status))
+                            "computed writer executes after the trusted shrink")
+                     (check (equal (list alias-allowed-name)
+                                   (slot-value shrink-agent
+                                               'anuna-imago::tools))
+                            "cleanup cannot re-add authority removed by an operator")
+                     (check (not (search (symbol-name name)
+                                         (prin1-to-string request)
+                                         :test #'char-equal))
+                            "provider advertisement preserves the monotonic shrink")
+                     (check
+                      (let ((*current-agent* shrink-agent))
+                        (handler-case
+                            (progn (dispatch-tool! name nil) nil)
+                          (anuna-imago::unauthorized-tool-call () t)))
+                      "ordinary dispatch cannot restore removed authority")))
+
+                 (let* ((target 'dexador.backend.usocket:request)
+                        (original (symbol-function target))
+                        (result nil))
+                   (unwind-protect
+                        (setf result
+                              (anuna-imago::%harness-eval-handler
+                               (list
+                                :form
+                                "(defun dexador.backend.usocket:request (&rest args) (declare (ignore args)) :forged)")))
+                     (setf (symbol-function target) original))
+                   (check (member (getf result :status) '(:rejected :vetoed))
+                          "Dexador backend request replacement is denied")
+                   (check (eq original (symbol-function target))
+                          "Dexador backend request function remains intact"))
+
+                 (let ((prior dex:*not-verify-ssl*))
+                   (unwind-protect
+                        (let ((result
+                                (anuna-imago::%harness-eval-handler
+                                 (list :form
+                                       "(setq dex:*not-verify-ssl* t)"))))
+                          (check (eq :rejected (getf result :status))
+                                 "TLS verification state mutation is rejected")
+                          (check (eql prior dex:*not-verify-ssl*)
+                                 "TLS verification state remains unchanged"))
+                     (setf dex:*not-verify-ssl* prior)))
 
                  ;; Delayed provider and request-builder methods are named TCB
                  ;; links. Even if the raw slot changes after evaluation, its
@@ -904,8 +1336,9 @@ Tests bind this to make the reasoner veto specific forms.")
                            (add-method build-gf build-original)))))
                    (check (eq :ok (getf pin-result :status))
                           "delayed-provider agent pins its first ceiling")
-                   (check (eq :vetoed (getf provider-method-result :status))
-                          "delayed PROVIDER-STREAM! method is vetoed")
+                   (check (member (getf provider-method-result :status)
+                                  '(:rejected :vetoed))
+                          "delayed PROVIDER-STREAM! method is denied")
                    (check (eq :vetoed (getf build-method-result :status))
                           "direct BUILD-REQUEST method is vetoed")
                    (check (null (gethash "tools" request))
@@ -973,6 +1406,24 @@ Tests bind this to make the reasoner veto specific forms.")
                  ;; responsibility.  Each rejected replacement is followed by
                  ;; a fresh malformed-proof probe to establish sequential
                  ;; fail-closed behavior, not merely set membership.
+                 (dolist (target '(dex:post dex:request))
+                   (let* ((original (symbol-function target))
+                          (replacement-result
+                            (anuna-imago::%harness-eval-handler
+                             (list
+                              :form
+                              (format
+                               nil
+                               "(progn (defun ~S (&rest arguments) (declare (ignore arguments)) \"forged-provider-response\"))"
+                               target)))))
+                     (check (eq :vetoed (getf replacement-result :status))
+                            (format nil "direct ~S replacement is vetoed"
+                                    target))
+                     (check (eq original (symbol-function target))
+                            (format nil
+                                    "ordinary provider seam remains original: ~S"
+                                    target))))
+
                  (dolist (target
                           '(anuna-imago::%authorized-agent-tool-name
                             anuna-imago::%effective-agent-tool-names
@@ -982,11 +1433,19 @@ Tests bind this to make the reasoner veto specific forms.")
                             anuna-imago::%proof-result-valid-p
                             anuna-imago::%eval-form-with-timeout
                             anuna-imago::%tool-receipt!
+                            anuna-imago::%read-receipt-locked
+                            anuna-imago::%write-receipt-entry!
+                            anuna-imago::%recover-seqs!
+                            anuna-imago::content-hash
+                            anuna-imago::read-receipts
+                            sb-md5:md5sum-sequence
                             anuna-imago::receive!
                             anuna-imago::%ht
                             anuna-imago::%hash->plist
                             anuna-imago::%anthropic-response->frames
                             anuna-imago::%openrouter-response->frames
+                            dex:post
+                            dex:request
                             com.inuoe.jzon:parse
                             print-object
                             anuna-imago::provider-stream!
@@ -1070,6 +1529,34 @@ Tests bind this to make the reasoner veto specific forms.")
                                 (getf method-result :derivation))
                           "receipt stream veto carries safety derivation"))
 
+                 ;; Receipt attribution reads AGENT-ID before any evaluation.
+                 ;; A method override must be vetoed while the original reader
+                 ;; remains installed for the next audited call.
+                 (let* ((gf (fdefinition 'anuna-imago:agent-id))
+                        (specializers (list (find-class 'anuna-imago:agent)))
+                        (original-method
+                          (find-method gf nil specializers nil))
+                        (method-result nil))
+                   (unwind-protect
+                        (setf method-result
+                              (anuna-imago::%harness-eval-handler
+                               (list
+                                :form
+                                "(progn (defmethod anuna-imago:agent-id ((agent anuna-imago:agent)) (declare (ignore agent)) 'spoofed-audit-actor))")))
+                     (let ((current (find-method gf nil specializers nil)))
+                       (unless (eq current original-method)
+                         (when current (remove-method gf current))
+                         (when original-method
+                           (add-method gf original-method)))))
+                   (check (eq :vetoed (getf method-result :status))
+                          "AGENT-ID method override is vetoed")
+                   (check (some (lambda (clause)
+                                  (and (consp clause)
+                                       (member 'anuna-imago:agent-id clause
+                                               :test #'eq)))
+                                (getf method-result :derivation))
+                          "AGENT-ID veto carries safety derivation"))
+
                  ;; The generated AGENT-TOOLS reader is a generic function.
                  ;; Replacing its AGENT method would poison the next worker's
                  ;; snapshot before EVAL begins, so protect it across calls.
@@ -1138,6 +1625,7 @@ Tests bind this to make the reasoner veto specific forms.")
                       anuna-imago::safety-layer-symbol-p
                       anuna-imago::%harness-eval-prefilter
                       anuna-imago::%prefilter-setf
+                      anuna-imago::%definition-function-name-p
                       anuna-imago::%lift-form
                       anuna-imago::%lift-facts
                       anuna-imago::%assert-lift-facts!
@@ -1149,6 +1637,17 @@ Tests bind this to make the reasoner veto specific forms.")
                       anuna-imago::assert-fact!
                       anuna-imago::retract-fact!
                       anuna-imago::%proper-list-p
+                      anuna-imago::*harness-eval-maximum-source-characters*
+                      anuna-imago::*harness-eval-maximum-reader-introducers*
+                      anuna-imago::*harness-eval-maximum-reader-dispatch-argument*
+                      anuna-imago::*harness-eval-maximum-form-nodes*
+                      anuna-imago::*harness-eval-maximum-form-depth*
+                      anuna-imago::%harness-eval-argument-plist-p
+                      anuna-imago::%oversized-reader-dispatch-prefix-p
+                      anuna-imago::%source-structure-rejection
+                      anuna-imago::%form-structure-rejection
+                      anuna-imago::%truncate-harness-eval-output
+                      anuna-imago::%bounded-princ
                       anuna-imago::%eval-form-with-timeout
                       anuna-imago::%harness-eval-handler
                       anuna-imago::%after-parse-pipeline
@@ -1163,9 +1662,39 @@ Tests bind this to make the reasoner veto specific forms.")
                       anuna-imago::%effective-agent-tool-names
                       anuna-imago::%authorized-agent-tool-name
                       anuna-imago:agent
+                      anuna-imago:agent-id
                       anuna-imago:agent-tools
                       anuna-imago:tool
                       sb-thread:*current-thread*
+                      sb-thread:current-thread-sap
+                      sb-sys:sap-int
+                      sb-sys:without-interrupts
+                      sb-sys:allow-with-interrupts
+                      sb-sys:with-interrupts
+                      sb-sys:with-local-interrupts
+                      sb-sys:with-interrupt-bindings
+                      sb-sys:in-interruption
+                      sb-sys:*interrupts-enabled*
+                      sb-sys:*allow-with-interrupts*
+                      sb-sys:*interrupt-pending*
+                      sb-thread:*interrupt-handler*
+                      sb-unix::*unblock-deferrables-on-enabling-interrupts-p*
+                      *break-on-signals*
+                      *read-suppress*
+                      *read-base*
+                      *read-default-float-format*
+                      *print-base*
+                      *print-radix*
+                      *print-case*
+                      *print-array*
+                      *print-gensym*
+                      *print-pretty*
+                      *print-readably*
+                      *print-circle*
+                      *print-length*
+                      *print-level*
+                      *print-escape*
+                      *package*
                       anuna-imago:dispatch-tool!
                       anuna-imago:process-turn
                       anuna-imago::%dispatch-tool-use
@@ -1174,12 +1703,51 @@ Tests bind this to make the reasoner veto specific forms.")
                       anuna-imago:provider-stream!
                       anuna-imago:stream-next-frame!
                       anuna-imago:tool-results-message-content
+                      anuna-imago:auth-headers
                       anuna-imago:build-request
+                      anuna-imago:anthropic-provider
+                      anuna-imago:make-anthropic-provider
+                      anuna-imago:anthropic-api-key
+                      anuna-imago:anthropic-model
+                      anuna-imago:anthropic-base-url
+                      anuna-imago:anthropic-max-tokens
+                      anuna-imago:anthropic-version
+                      anuna-imago::anthropic-clear-credentials!
+                      anuna-imago:openrouter-provider
+                      anuna-imago:make-openrouter-provider
+                      anuna-imago:openrouter-api-key
+                      anuna-imago:openrouter-model
+                      anuna-imago:openrouter-base-url
+                      anuna-imago:openrouter-max-tokens
+                      anuna-imago:openrouter-temperature
+                      anuna-imago:openrouter-site-url
+                      anuna-imago:openrouter-app-name
+                      anuna-imago::openrouter-clear-credentials!
+                      anuna-imago:*clean-checklist*
+                      anuna-imago:pre-save-clean!
+                      anuna-imago:save-image!
+                      anuna-imago:agent-identity
+                      anuna-imago:identity-private-key
+                      anuna-imago:clear-identity-private-key!
+                      anuna-imago:register-identity-for-clean!
                       anuna-imago::%ht
                       anuna-imago::%hash->plist
                       anuna-imago::%tool->anthropic-ht
                       anuna-imago::%tool->openai-ht
                       anuna-imago:tool->anthropic-descriptor
+                      dex:post
+                      dex:request
+                      #-windows dexador.backend.usocket:request
+                      #+windows dexador.backend.winhttp:request
+                      dex:*default-connect-timeout*
+                      dex:*default-read-timeout*
+                      dex:*default-proxy*
+                      dex:*verbose*
+                      dex:*not-verify-ssl*
+                      dex:*connection-pool*
+                      dex:*use-connection-pool*
+                      dex:*dexador-backend*
+                      #-windows dexador.backend.usocket:*ca-bundle*
                       anuna-imago::*anthropic-http-post*
                       anuna-imago::%anthropic-stop-reason-keyword
                       anuna-imago::%anthropic-response->frames
@@ -1220,7 +1788,9 @@ Tests bind this to make the reasoner veto specific forms.")
                       com.inuoe.jzon:make-parser
                       com.inuoe.jzon:close-parser
                       com.inuoe.jzon:stringify
+                      anuna-imago::%lock-package-family!
                       anuna-imago::%ensure-jzon-package-locked!
+                      anuna-imago::%ensure-dexador-package-locked!
                       sb-ext:lock-package
                       sb-ext:package-locked-p
                       sb-ext:unlock-package
@@ -1230,7 +1800,39 @@ Tests bind this to make the reasoner veto specific forms.")
                       anuna-imago::%receipt-log-stream
                       anuna-imago::%receipt-log-seqs
                       anuna-imago::%receipt-log-lock
+                      anuna-imago::+receipt-maximum-form-characters+
+                      anuna-imago::+receipt-maximum-form-depth+
+                      anuna-imago::+receipt-maximum-form-nodes+
+                      anuna-imago::+receipt-maximum-token-characters+
+                      anuna-imago::+receipt-maximum-string-characters+
+                      anuna-imago::+receipt-maximum-summary-characters+
+                      anuna-imago::+receipt-maximum-log-octets+
+                      anuna-imago::+receipt-entry-keys+
+                      anuna-imago::+receipt-general-entry-keys+
+                      anuna-imago::+receipt-selfmod-entry-keys+
+                      anuna-imago::+receipt-reader-symbol-tokens+
+                      anuna-imago::+receipt-summary-keywords+
+                      anuna-imago::%receipt-whitespace-p
+                      anuna-imago::%receipt-unicode-scalar-character-p
+                      anuna-imago::%receipt-simple-string
+                      anuna-imago::%receipt-integer-token-p
+                      anuna-imago::%receipt-token-allowed-p
+                      anuna-imago::%read-receipt-source
+                      anuna-imago::%proper-receipt-list-p
+                      anuna-imago::%receipt-summary-plist-p
+                      anuna-imago::%receipt-entry-keys-exact-p
+                      anuna-imago::%receipt-entry-shape-p
+                      anuna-imago::%receipt-entry-structure-p
+                      anuna-imago::%reject-receipt-sharp-reader
+                      anuna-imago::%read-receipt-locked
+                      anuna-imago::%receipt-file-size
+                      anuna-imago::%ensure-receipt-file-size!
+                      anuna-imago::%write-receipt-entry!
+                      anuna-imago::%recover-seqs!
+                      anuna-imago:content-hash
+                      anuna-imago:read-receipts
                       anuna-imago:iso-8601-now
+                      sb-md5:md5sum-sequence
                       anuna-imago:mailbox
                       anuna-imago:make-mailbox
                       anuna-imago:send!
@@ -1368,6 +1970,466 @@ Tests bind this to make the reasoner veto specific forms.")
        (lambda () evidence)
        description))))
 
+(defun test-m12-handler-boundary-totality-is-audited ()
+  "Malformed arguments, definitions, and proof clauses return and receipt."
+  (format t "~%-- m12-handler-boundary-totality-is-audited --~%")
+  (let* ((path (format nil "/tmp/imago-m12-boundary-~D.log"
+                       (random 100000)))
+         (log (open-receipt-log path))
+         (results nil))
+    (unwind-protect
+         (let ((anuna-imago::*reasoner-ipc-call* #'%m12-stub-reasoner)
+               (anuna-imago::*active-theory-handle* :m12-boundary-totality)
+               (anuna-imago::*harness-eval-audit-log* log)
+               (*current-agent* nil))
+           (dolist (args
+                    (list '(:form "(+ 1 2)" :timeout "bad")
+                          '(:form 42)
+                          :not-a-plist
+                          (cons :form "(+ 1 2)")))
+             (push (anuna-imago::%harness-eval-handler args) results))
+           (dolist (source
+                    '("(defmethod 1 ((x t)) nil)"
+                      "(defmethod (foo) ((x t)) nil)"))
+             (push (anuna-imago::%harness-eval-handler
+                    (list :form source))
+                   results))
+           (let ((package-name
+                   (symbol-name (gensym "M12-UNINTERNED-PACKAGE-"))))
+             (check (null (find-symbol package-name :keyword)))
+             (push (anuna-imago::%harness-eval-handler
+                    (list :form "(+ 1 2)" :package package-name))
+                   results)
+             (check (null (find-symbol package-name :keyword))
+                    "package arguments are resolved without interning"))
+           (let* ((invalid-source (string (code-char #xDC00)))
+                  (invalid-result
+                    (anuna-imago::%harness-eval-handler
+                     (list :form invalid-source))))
+             (push invalid-result results)
+             (check (and (eq :rejected (getf invalid-result :status))
+                         (eq :invalid-source-character
+                             (getf invalid-result :rule)))
+                    "invalid Unicode source returns an audited rejection"))
+           (let ((quoted
+                   (anuna-imago::%harness-eval-handler
+                    (list :form "'(a . b)"))))
+             (push quoted results)
+             (check (eq :ok (getf quoted :status))
+                    "quoted dotted data remains a valid evaluated value"))
+           (setf *m12-reasoner-protected-calls* 0)
+           (let* ((anuna-imago::*reasoner-ipc-call*
+                    (lambda (op &rest args)
+                      (declare (ignore args))
+                      (case op
+                        ((:assert-fact :retract-fact) :ok)
+                        (:query
+                         '(:tag :+delta
+                           :derivation ((mentions . x))
+                           :time-ms 0))
+                        (otherwise :ok))))
+                  (proof-result
+                    (anuna-imago::%harness-eval-handler
+                     (list
+                      :form
+                      "(anuna-imago.test::m12-reasoner-protected-probe)"))))
+             (push proof-result results)
+             (check (eq :vetoed (getf proof-result :status))
+                    "dotted proof clause fails closed")
+             (check (zerop *m12-reasoner-protected-calls*)
+                    "malformed proof cannot reach evaluation"))
+           (let* ((bad-name (string (code-char #xDC00)))
+                  (bad-symbol (make-symbol bad-name))
+                  (anuna-imago::*reasoner-ipc-call*
+                    (lambda (op &rest args)
+                      (declare (ignore args))
+                      (case op
+                        ((:assert-fact :retract-fact) :ok)
+                        (:query
+                         (list :tag :+delta
+                               :derivation
+                               (list (list 'mentions :form-proof bad-symbol))
+                               :time-ms 0))
+                        (otherwise :ok))))
+                  (proof-result
+                    (anuna-imago::%harness-eval-handler
+                     (list :form "(+ 40 2)"))))
+             (push proof-result results)
+             (check (eq :vetoed (getf proof-result :status))
+                    "invalid Unicode proof evidence fails closed")))
+      (handler-case (close-receipt-log! log) (error () nil)))
+    (check (= 11 (length results))
+           "all eleven malformed/boundary handler calls return plists")
+    (check (every #'listp results)
+           "every malformed/boundary result is structured")
+    (check (= 11 (length (read-receipts path)))
+           "every malformed/boundary handler call emits exactly one receipt")
+    (handler-case (delete-file path) (error () nil))))
+
+(defun test-m12-source-reader-boundaries ()
+  (format t "~%-- m12-source-reader-boundaries --~%")
+  (let ((maximum
+          anuna-imago::*harness-eval-maximum-source-characters*)
+        (introducers
+          anuna-imago::*harness-eval-maximum-reader-introducers*)
+        (nodes anuna-imago::*harness-eval-maximum-form-nodes*))
+    (check (null
+            (anuna-imago::%source-structure-rejection
+             (make-string maximum :initial-element #\a)))
+           "exact source-character boundary passes")
+    (check (eq :invalid-source-character
+               (getf (anuna-imago::%source-structure-rejection
+                      (string (code-char #xDC00)))
+                     :rule))
+           "non-scalar Unicode source rejects before the Lisp reader")
+    (check (eq :source-too-large
+               (getf
+                (anuna-imago::%source-structure-rejection
+                 (make-string (1+ maximum) :initial-element #\a))
+                :rule))
+           "source-character boundary plus one rejects")
+    (check (null
+            (anuna-imago::%source-structure-rejection
+             (make-string introducers :initial-element #\')))
+           "exact recursive-reader introducer boundary passes")
+    (check (eq :reader-structure-too-deep
+               (getf
+                (anuna-imago::%source-structure-rejection
+                 (make-string (1+ introducers) :initial-element #\'))
+                :rule))
+           "recursive-reader introducer boundary plus one rejects")
+    (check (null
+            (anuna-imago::%source-structure-rejection "#8192(0)"))
+           "exact numeric reader-dispatch boundary passes")
+    (check (eq :reader-dispatch-argument-too-large
+               (getf
+                (anuna-imago::%source-structure-rejection "#8193(0)")
+                :rule))
+           "numeric reader-dispatch boundary plus one rejects")
+    (check (eq :reader-structure-literal
+               (getf
+                (anuna-imago::%source-structure-rejection "#s(anything)")
+                :rule))
+           "structure reader dispatch rejects case-insensitively")
+    (check (eq :reader-array-literal
+               (getf
+                (anuna-imago::%source-structure-rejection
+                 "#14a#1=(#1# 0)")
+                :rule))
+           "ranked array reader dispatch rejects case-insensitively")
+    (dolist (source '("#+nil 0" "#-nil 0" "#1=(x)" "##"))
+      (check (eq :recursive-reader-dispatch
+                 (getf
+                  (anuna-imago::%source-structure-rejection source)
+                  :rule))
+             (format nil "recursive reader dispatch rejects: ~S" source)))
+    (check (null
+            (anuna-imago::%form-structure-rejection
+             (make-list nodes)))
+           "exact flat-list node boundary passes")
+    (check (eq :form-too-large
+               (getf
+                (anuna-imago::%form-structure-rejection
+                 (make-list (1+ nodes)))
+                :rule))
+           "flat-list node boundary plus one rejects")
+    (check (null
+            (anuna-imago::%form-structure-rejection
+             (make-array nodes)))
+           "exact general-array element boundary passes")
+    (check (eq :form-too-large
+               (getf
+                (anuna-imago::%form-structure-rejection
+                 (make-array (1+ nodes)))
+                :rule))
+           "general-array element boundary plus one rejects")
+    (check (null
+            (anuna-imago::%form-structure-rejection
+             (make-array nodes :element-type 'bit)))
+           "exact bit-vector element boundary passes")
+    (check (eq :form-too-large
+               (getf
+                (anuna-imago::%form-structure-rejection
+                 (make-array (1+ nodes) :element-type 'bit))
+                :rule))
+           "bit-vector element boundary plus one rejects")
+    (let ((anuna-imago::*harness-eval-maximum-form-nodes* 8))
+      (check (eq :form-too-large
+                 (getf
+                  (anuna-imago::%form-structure-rejection
+                   (make-array
+                    2 :initial-contents
+                    (list (make-array 4) (make-array 4))))
+                  :rule))
+             "several individually-small arrays share one aggregate budget"))))
+
+(defun test-m12-bounded-reader-and-timeout-red-gates ()
+  "Run historically hanging handler inputs in an OS-bounded child SBCL."
+  (format t "~%-- m12-bounded-reader-and-timeout-red-gates --~%")
+  (let* ((root (namestring (asdf:system-source-directory :imago)))
+         (ql (namestring (merge-pathnames "quicklisp/setup.lisp"
+                                          (user-homedir-pathname))))
+         (token (random 1000000))
+         (script (format nil "/tmp/imago-m12-bounded-~D.lisp" token))
+         (output (format nil "/tmp/imago-m12-bounded-~D.out" token))
+         (errors (format nil "/tmp/imago-m12-bounded-~D.err" token))
+         (audit (format nil "/tmp/imago-m12-bounded-~D.audit" token))
+         (child-form
+           `(let* ((audit-path ,audit)
+                   (log (anuna-imago:open-receipt-log audit-path))
+                   (without-result nil)
+                   (unwind-result nil)
+                   (cycle-result nil)
+                   (setf-dot-result nil)
+                   (defmethod-dot-result nil)
+                   (cyclic-setf-result nil)
+                   (deep-reader-result nil)
+                   (quote-reader-result nil)
+                   (dispatch-vector-result nil)
+                   (dispatch-bit-result nil)
+                   (dispatch-array-result nil)
+                   (feature-dispatch-result nil)
+                   (negative-feature-dispatch-result nil)
+                   (label-dispatch-result nil)
+                   (hash-dispatch-result nil)
+                   (large-label-result nil)
+                   (reader-bomb-counter-definition-result nil)
+                   (reader-bomb-definition-result nil)
+                   (reader-bomb-result nil)
+                   (break-state-result nil)
+                   (warning-reader-result nil)
+                   (cyclic-args-result nil)
+                   (proof-result nil))
+              (labels ((negative-reasoner (op &rest arguments)
+                         (declare (ignore arguments))
+                         (case op
+                           ((:assert-fact :retract-fact) :ok)
+                           (:query
+                            '(:tag :-delta :derivation nil :time-ms 0))
+                           (otherwise :ok))))
+                (let ((anuna-imago::*reasoner-ipc-call*
+                        #'negative-reasoner)
+                      (anuna-imago::*active-theory-handle*
+                        :m12-bounded-child)
+                      (anuna-imago::*harness-eval-audit-log* log)
+                      (anuna-imago:*current-agent* nil))
+                  (unwind-protect
+                       (progn
+                         (setf without-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form
+                                  "(sb-sys:without-interrupts (loop))")))
+                         (setf unwind-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "(unwind-protect (loop) (loop))"
+                                  :timeout 20)))
+                         (setf cycle-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "#1=(foo #1#)")))
+                         (setf setf-dot-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "(setf . x)")))
+                         (setf defmethod-dot-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "(defmethod . x)")))
+                         (setf cyclic-setf-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "#1=(setf x 1 . #1#)")))
+                         (setf deep-reader-result
+                               (anuna-imago::%harness-eval-handler
+                                (list
+                                 :form
+                                 (concatenate
+                                  'string
+                                  (make-string 30000
+                                               :initial-element #\()
+                                  "0"
+                                  (make-string 30000
+                                               :initial-element #\))))))
+                         (setf quote-reader-result
+                               (anuna-imago::%harness-eval-handler
+                                (list
+                                 :form
+                                 (concatenate
+                                  'string
+                                  (make-string 257
+                                               :initial-element #\')
+                                  "0"))))
+                         (setf dispatch-vector-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "#1000000(0)")))
+                         (setf dispatch-bit-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "#1000000*0")))
+                         (setf dispatch-array-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "#14A#1=(#1# 0)")))
+                         (setf feature-dispatch-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "#+#1=(:and #1#) 0")))
+                         (setf negative-feature-dispatch-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "#-nil 0")))
+                         (setf label-dispatch-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "#1=(x)")))
+                         (setf hash-dispatch-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "##")))
+                         (setf large-label-result
+                               (anuna-imago::%harness-eval-handler
+                                (list
+                                 :form
+                                 (with-output-to-string (stream)
+                                   (write-string "#1=(" stream)
+                                   (dotimes (index 20000)
+                                     (declare (ignore index))
+                                     (write-string "a " stream))
+                                   (write-char #\) stream)))))
+                         (setf reader-bomb-counter-definition-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form
+                                  "(defparameter cl-user::*reader-bomb-calls* 0)")))
+                         (setf reader-bomb-definition-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form
+                                  "(defstruct reader-bomb (x (progn (incf cl-user::*reader-bomb-calls*) (loop))))")))
+                         (setf reader-bomb-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form "#S(reader-bomb)")))
+                         (setf break-state-result
+                               (anuna-imago::%harness-eval-handler
+                                '(:form
+                                  "(setq *break-on-signals* 'warning)")))
+                         (let ((*break-on-signals* 'warning))
+                           (setf warning-reader-result
+                                 (anuna-imago::%harness-eval-handler
+                                  '(:form "#1P\"x\""))))
+                         (let ((cyclic-args (list :form "(+ 1 2)")))
+                           (setf (cdr cyclic-args) cyclic-args
+                                 cyclic-args-result
+                                 (anuna-imago::%harness-eval-handler
+                                  cyclic-args)))
+                         (let* ((clause (list 'mentions 'x 'y))
+                                (derivation (list clause)))
+                           (setf (cdr (last clause)) clause)
+                           (let ((anuna-imago::*reasoner-ipc-call*
+                                   (lambda (op &rest arguments)
+                                     (declare (ignore arguments))
+                                     (case op
+                                       ((:assert-fact :retract-fact) :ok)
+                                       (:query
+                                        (list :tag :+delta
+                                              :derivation derivation
+                                              :time-ms 0))
+                                       (otherwise :ok)))))
+                             (setf proof-result
+                                   (anuna-imago::%harness-eval-handler
+                                    '(:form "(error \"proof bypass\")"))))))
+                    (anuna-imago:close-receipt-log! log))))
+              (let* ((receipts (anuna-imago:read-receipts audit-path))
+                     (ok
+                       (and (eq :rejected (getf without-result :status))
+                            (eq :timeout (getf unwind-result :status))
+                            (eq :rejected (getf cycle-result :status))
+                            (eq :rejected (getf setf-dot-result :status))
+                            (eq :rejected (getf defmethod-dot-result :status))
+                            (eq :rejected (getf cyclic-setf-result :status))
+                            (eq :rejected (getf deep-reader-result :status))
+                            (eq :rejected (getf quote-reader-result :status))
+                            (eq :rejected
+                                (getf dispatch-vector-result :status))
+                            (eq :rejected
+                                (getf dispatch-bit-result :status))
+                            (eq :rejected
+                                (getf dispatch-array-result :status))
+                            (eq :rejected
+                                (getf feature-dispatch-result :status))
+                            (eq :rejected
+                                (getf negative-feature-dispatch-result :status))
+                            (eq :rejected
+                                (getf label-dispatch-result :status))
+                            (eq :rejected
+                                (getf hash-dispatch-result :status))
+                            (eq :rejected (getf large-label-result :status))
+                            (eq :ok
+                                (getf reader-bomb-counter-definition-result
+                                      :status))
+                            (eq :ok
+                                (getf reader-bomb-definition-result :status))
+                            (eq :rejected (getf reader-bomb-result :status))
+                            (zerop cl-user::*reader-bomb-calls*)
+                            (eq :rejected (getf break-state-result :status))
+                            (listp warning-reader-result)
+                            (eq :error (getf cyclic-args-result :status))
+                            (eq :vetoed (getf proof-result :status))
+                            (= 23 (length receipts)))))
+                (format t "M12-BOUNDED-RED-GATE ~A~%"
+                        (if ok "OK" "FAIL"))
+                (sb-ext:exit :code (if ok 0 1)))))
+         (process nil)
+         (completed-p nil)
+         (exit-code nil)
+         (out "")
+         (err ""))
+    (unwind-protect
+         (progn
+           (with-open-file (stream script :direction :output
+                                  :if-exists :supersede)
+             ;; LOAD reads and evaluates sequentially, so this package exists
+             ;; before it encounters the package-qualified lexical names in
+             ;; CHILD-FORM.
+             (write-line "(defpackage #:anuna-imago.test (:use #:cl))"
+                         stream)
+             (let ((*print-circle* t)
+                   (*print-pretty* t)
+                   (*print-readably* t))
+               (prin1 child-form stream)
+               (terpri stream)))
+           (setf process
+                 (uiop:launch-program
+                  (list
+                   "sbcl" "--non-interactive" "--no-userinit" "--no-sysinit"
+                   "--load" ql
+                   "--eval"
+                   (format nil
+                           "(push (truename ~S) asdf:*central-registry*)"
+                           root)
+                   "--eval" "(asdf:load-system :imago)"
+                   "--load" script)
+                  :output output :error-output errors))
+           (let ((deadline
+                   (+ (get-internal-real-time)
+                      (* 15 internal-time-units-per-second))))
+             (loop while (and (uiop:process-alive-p process)
+                              (< (get-internal-real-time) deadline))
+                   do (sleep 0.01)))
+           (setf completed-p (not (uiop:process-alive-p process)))
+           (unless completed-p
+             (uiop:terminate-process process :urgent t))
+           (setf exit-code
+                 (handler-case (uiop:wait-process process)
+                   (error () nil))
+                 out (if (probe-file output)
+                         (uiop:read-file-string output)
+                         "")
+                 err (if (probe-file errors)
+                         (uiop:read-file-string errors)
+                         ""))
+           (check completed-p
+                  "bounded child exits before the external deadline")
+           (check (and completed-p (eql 0 exit-code))
+                  (format nil "bounded child succeeds (exit ~S, stderr ~A)"
+                          exit-code
+                          (subseq err 0 (min 240 (length err)))))
+           (check (search "M12-BOUNDED-RED-GATE OK" out)
+                  "bounded child confirms timeout, graph, and audit gates"))
+      (when (and process (uiop:process-alive-p process))
+        (ignore-errors (uiop:terminate-process process :urgent t))
+        (ignore-errors (uiop:wait-process process)))
+      (dolist (path (list script output errors audit))
+        (handler-case (delete-file path) (error () nil))))))
+
 (defun test-m12-handler-error-during-eval ()
   (format t "~%-- m12-handler-error-during-eval (TEST-003c) --~%")
   (with-m12-handler-fixture ()
@@ -1375,7 +2437,71 @@ Tests bind this to make the reasoner veto specific forms.")
                 '(:form "(error \"boom\")"))))
       (check (eq :error      (getf res :status)))
       (check (eq :evaluation (getf res :phase)))
-      (check (search "boom" (getf res :message))))))
+      (check (search "boom" (getf res :message))))
+    (let* ((res (anuna-imago::%harness-eval-handler
+                 '(:form
+                   "(error (make-string 2000 :initial-element (code-char #x1F600)))")))
+           (message (getf res :message)))
+      (check (eq :error (getf res :status)))
+      (check (stringp message))
+      (check (<= (length (sb-ext:string-to-octets
+                          message :external-format :utf-8))
+                 anuna-imago::*harness-eval-result-truncate-bytes*)
+             "multibyte evaluation condition text obeys the octet cap"))
+    (let* ((package-name (make-string 10000 :initial-element #\p))
+           (source (format nil "(~A:X)" package-name))
+           (res (anuna-imago::%harness-eval-handler (list :form source)))
+           (message (getf res :message)))
+      (check (eq :error (getf res :status)))
+      (check (eq 'anuna-imago::parse-error (getf res :condition-type)))
+      (check (<= (length (sb-ext:string-to-octets
+                          message :external-format :utf-8))
+                 anuna-imago::*harness-eval-result-truncate-bytes*)
+             "long reader condition text obeys the octet cap"))))
+
+(defun test-m12-utf8-output-and-printer-state-are-bounded ()
+  (format t "~%-- m12-utf8-output-and-printer-state-are-bounded --~%")
+  (let* ((emoji (code-char #x1F600))
+         (exact (make-string 1024 :initial-element emoji))
+         (over (make-string 1025 :initial-element emoji))
+         (exact-result
+           (anuna-imago::%truncate-harness-eval-output exact))
+         (over-result
+           (anuna-imago::%truncate-harness-eval-output over)))
+    (check (string= exact exact-result)
+           "exactly 4,096 UTF-8 octets pass unchanged")
+    (check (= 4096 (length (sb-ext:string-to-octets
+                            exact-result :external-format :utf-8))))
+    (check (<= (length (sb-ext:string-to-octets
+                        over-result :external-format :utf-8))
+               4096)
+           "a multibyte result one codepoint over is byte-bounded")
+    (check (search "[TRUNCATED]" over-result)
+           "a truncated multibyte result carries the marker"))
+  (let ((*print-base* 36) (*print-radix* t) (*print-case* :downcase))
+    (check (string= "35" (anuna-imago::%bounded-princ 35))
+           "bounded PRINC ignores ambient radix state")
+    (check (string= "35" (anuna-imago::%bounded-prin1 35))
+           "bounded PRIN1 ignores ambient radix state"))
+  (let* ((path (format nil "/tmp/imago-m12-printer-receipt-~D.log"
+                       (random 100000)))
+         (log (open-receipt-log path)))
+    (unwind-protect
+         (progn
+           (let ((*print-base* 36) (*print-radix* t)
+                 (*print-case* :downcase) (*package* (find-package :keyword)))
+             (anuna-imago::%tool-receipt!
+              log :tool 'harness-eval :agent-id 35 :form "(+ 17 18)"
+              :result-phase :evaluated :result-tag :ok :elapsed-ms 35
+              :result-summary '(:value "35")))
+           (close-receipt-log! log)
+           (let ((entry (first (read-receipts path))))
+             (check (= 35 (getf entry :elapsed-ms))
+                    "receipt integer syntax is decimal under hostile printer state")
+             (check (string= "35" (getf entry :agent-id))
+                    "receipt attribution is stable under hostile printer state")))
+      (ignore-errors (close-receipt-log! log))
+      (ignore-errors (delete-file path)))))
 
 (defun test-m12-handler-receipt-on-every-phase ()
   (format t "~%-- m12-handler-receipt-every-phase (TEST-004) --~%")
@@ -1437,6 +2563,17 @@ Tests bind this to make the reasoner veto specific forms.")
                     :audit-log-path path)))
     (check (sb-ext:package-locked-p (find-package :com.inuoe.jzon))
            "install locks the transitive Jzon parser implementation")
+    (let ((helper (find-package "COM.INUOE.JZON/EISEL-LEMIRE")))
+      (check (and helper (sb-ext:package-locked-p helper))
+             "install locks the Jzon numeric-parser helper package"))
+    (check (sb-ext:package-locked-p (find-package :dexador))
+           "install locks the transitive Dexador transport implementation")
+    (let ((backend
+            (find-package
+             #-windows "DEXADOR.BACKEND.USOCKET"
+             #+windows "DEXADOR.BACKEND.WINHTTP")))
+      (check (and backend (sb-ext:package-locked-p backend))
+             "install locks the active Dexador backend package"))
     (check (find-tool 'anuna-imago::harness-eval) "harness-eval registered")
     (check (eq :eval (tool-permission (find-tool 'anuna-imago::harness-eval))))
     (check (member :eval *valid-permissions*))
@@ -1568,7 +2705,18 @@ Tests bind this to make the reasoner veto specific forms.")
                     (entries (funcall handler '(:limit 5))))
                (check (consp entries))
                (check (string= "(+ 1 2)" (getf (first entries) :form)))
-               (check (eq :ok (getf (first entries) :result-tag)))))
+               (check (eq :ok (getf (first entries) :result-tag))))
+             (let ((handler
+                     (symbol-function
+                      'anuna-imago::%tool-query-self-mod-receipts)))
+               (check (null (funcall handler '(:limit 0)))
+                      "zero limit returns no entries")
+               (dolist (limit '(-1 101 "all"))
+                 (check (eq :invalid-limit
+                            (getf (funcall handler (list :limit limit))
+                                  :error))
+                        (format nil "invalid receipt limit is total: ~S"
+                                limit)))))
         (handler-case (close-receipt-log! anuna-imago::*harness-eval-audit-log*) (error () nil))
         (handler-case (delete-file path) (error () nil))))))
 
@@ -1886,6 +3034,7 @@ a muffle-warning handler-bind because the eval thread would otherwise print
     ;; t02 / CON-002
     (test-m12-prefilter-denies-cl-mischief)
     (test-m12-prefilter-denies-setf-bypasses)
+    (test-m12-buried-denylist-and-mutators-remain-visible)
     (test-m12-prefilter-denies-defmethod-against-safety-layer)
     (test-m12-prefilter-denies-defgeneric-against-safety-layer)
     (test-m12-prefilter-denies-safety-var-assignment)
@@ -1897,23 +3046,32 @@ a muffle-warning handler-bind because the eval thread would otherwise print
     (test-m12-lift-progn-buried-targets)
     (test-m12-lift-test-015-progn-unregister)
     (test-m12-lift-stable-across-whitespace)
+    (test-m12-lift-traverses-array-data)
     ;; t04 / CON-004
     (test-m12-tool-receipt-roundtrip)
+    (test-m12-receipt-reader-is-closed-and-bounded)
     ;; t05 / CON-005
     (test-m12-origin-index-ordering)
     (test-m12-origin-index-large-form-hashed)
+    (test-m12-origin-index-counts-utf8-octets)
     ;; t06 / CON-006
     (test-m12-rollback-method-roundtrip)
     (test-m12-rollback-function-roundtrip)
     ;; t07 / CON-001
     (test-m12-handler-evaluates-benign-form)
     (test-m12-handler-rejects-prefilter-bypass)
+    (test-m12-provider-and-cleanup-seams-are-sequentially-protected)
+    (test-m12-runtime-mop-extension-is-sequentially-protected)
     (test-m12-handler-vetoes-via-reasoner)
     (test-m12-handler-fails-closed-on-reasoner-error)
     (test-m12-handler-fails-closed-on-fact-seam-errors)
     (test-m12-handler-fails-closed-on-malformed-reasoner-evidence)
+    (test-m12-handler-boundary-totality-is-audited)
+    (test-m12-source-reader-boundaries)
+    (test-m12-bounded-reader-and-timeout-red-gates)
     (test-m12-handler-denies-manufactured-operator-authority)
     (test-m12-handler-error-during-eval)
+    (test-m12-utf8-output-and-printer-state-are-bounded)
     (test-m12-handler-receipt-on-every-phase)
     ;; t09 / REQ-001
     (test-m12-install-fails-closed-on-safety-fact-error)

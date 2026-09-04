@@ -288,7 +288,28 @@ Six seams to know about:
 
 Ten tools auto-register when `imago` loads. They cover harness introspection
 and a few utilities. A bound agent can dispatch only names in its `:tools`.
-Direct operator dispatch remains available when `*current-agent*` is unbound.
+An unbound `*current-agent*` does not grant operator authority by itself.
+Wrap direct operator calls in `with-operator-tool-dispatch`. `drive-stream`
+binds its supplied agent, while a child thread without either scope denies
+dispatch.
+`harness-eval` workers retain their calling agent context. Evaluated code
+cannot widen operator scope or dispatch-authority state while the enforcement
+TCB remains intact. A closure-owned, canonical worker snapshot also prevents nested `drive-stream`
+calls, mutable string aliases, computed symbols, or a rebound Lisp thread
+variable from widening the originating tool allowlist on that VM thread. The
+first evaluation also records a per-agent ceiling; later slot changes may
+reduce that authority but cannot widen it. Use a new agent when an operator
+intentionally needs broader evaluation or ordinary-dispatch authority.
+Allowlists are canonicalized with finite proper-list and cycle bounds. Values
+and conditions are rendered inside the guarded worker, and nonce-bound result
+transport publishes only after cleanup replaces the visible tool list with the
+canonical intersection. Evaluated additions therefore cannot leak into later
+provider advertisement, response-frame handling, or ordinary dispatch.
+
+```lisp
+(with-operator-tool-dispatch
+  (dispatch-tool! 'harness-version nil))
+```
 
 | Name | Returns |
 |---|---|
@@ -333,7 +354,7 @@ better served by MCP servers or per-project tool modules.
 
 #### Plugins (opt-in ASDF subsystems)
 
-Capabilities that don't belong in the core 2k LOC harness ship as
+Capabilities that do not belong in the small core harness ship as
 plugins under [`plugins/`](./plugins). Load with
 `(ql:quickload :imago/<plugin>)`; main `:imago` system stays unaware.
 
@@ -372,6 +393,30 @@ Both provider plugins reuse the existing `provider-stream!` contract. The same
 agent definition, supervision, hook chain, and self-modification port
 work unchanged with any served model.
 
+OpenRouter treats every HTTP response as untrusted input. It recognizes one
+closed success or error envelope before it emits actionable frames. A reported
+non-2xx status always terminates without tool dispatch.
+
+Tool calls require unique string IDs, `type: "function"`, a registered tool
+name, and arguments matching that tool's finite schema. Unknown fields,
+duplicate keys or IDs, missing fields, and wrong types fail closed. Invalid
+arguments become an inert marker that returns a correlated tool error before
+hooks or handlers run. Provider-controlled names never enter Lisp packages.
+
+Jzon maps JSON true to `t`, false to `nil`, and null to `null`. Nullable fields
+accept only strings or `null`. JSON arrays become vectors, including array
+arguments.
+
+| OpenRouter recognition resource | Limit |
+|---|---:|
+| Response body | 1 MiB of UTF-8 bytes |
+| One tool's arguments text | 64 KiB of UTF-8 bytes |
+| JSON depth / nodes | 32 / 8,192 |
+| Object keys / array elements | 256 / 256 |
+| String characters | 65,536 |
+| Tool calls | 16 |
+| Envelope/tool-call ID / tool-name characters | 256 / 256 / 128 |
+
 ##### Harness evolution control plane
 
 [HarnessDev](https://arxiv.org/abs/2609.01437) motivates a strict distinction
@@ -408,11 +453,16 @@ The operator workflow has five stages:
    the compared candidates. It requires exact paired cells, complete matching
    replicate templates, a single evaluation plan, and transfer across every
    executor-and-configuration cohort. It reports every satisfied or failed
-   gate.
+   gate. Ledger replay re-derives its context-dependent fields from the signed
+   evidence prefix. The two image-digest gates remain signed point-in-time
+   attestations. Each replayed manifest must still match its candidate's prior
+   creator-signed freeze event; another valid signed manifest cannot replace it.
 4. `promote-candidate!` atomically changes `:canary` or `:active` after a
-   trusted external authorizer signs an eligible, current decision.
+   trusted external authorizer signs an eligible, current decision. Promotion
+   still verifies both images against their current bytes.
 5. `rollback-pointer!` restores the recorded prior candidate and appends a
-   signed rollback event.
+   signed rollback event. It verifies the prior candidate even when the current
+   image bytes are corrupt. Corrupt or missing manifests remain fatal.
 
 A comparison cell binds the benchmark, task, replicate, executor, evaluator,
 evaluation plan, executor configuration, and scorer configuration. Baseline
@@ -458,14 +508,32 @@ efficiency limits are rejected.
 
 The store uses an append-only hash chain and a separately signed terminal
 head. Creators sign freezes, executors and evaluators sign runs, and
-authorizers sign decisions and pointer changes. Candidate verification
+authorizers sign decisions and pointer changes. Every pointer signature binds
+the exact prior evidence head. `read-ledger-head` verifies ledger
+correspondence before returning. Candidate verification
 recomputes image and lineage digests, and freeze never overwrites an existing
 candidate.
+
+A deleted pointer fails closed when signed pointer evidence exists. A ledger
+append computes its projected UTF-8 size before changing ledger or head bytes.
+Authority signing and self-verification also finish before any persistent
+mutation.
 
 Persisted readers accept only the closed canonical grammar. They enforce size
 and depth bounds before semantic effects and never intern input symbols.
 Managed roots reject symlink replacement, while managed files require regular
 filesystem entries.
+
+Each persisted form and complete ledger line is at most 1 MiB of UTF-8 bytes.
+The complete ledger is at most 64 MiB. Canonical values allow at most 64 levels,
+16,384 nodes, 4,096 list values, and 65,536 string characters. Strings reject
+Unicode C0 and C1 controls. Source metrics stop at `10^20 - 1`; derived
+aggregates use at most 32 decimal digits. One candidate contributes at most
+256 held-out events to one campaign.
+
+The canonical writer recursively emits bare `nil` and `t`. Before persistence,
+the recognizer proves `parse(serialize(value)) = value`. Property and fuzz
+gates also check round trips, canonical closure, and registry invariants.
 
 The external evaluator process and its operator-owned filesystem permissions
 form the control-plane trust boundary. The subsystem detects malformed data,
@@ -474,7 +542,7 @@ boundary. It does not resist an operator who restores a complete earlier
 ledger and signed head. Operators retain responsibility for private-key
 custody, signer isolation, evaluation plan quality and secrecy, and benchmark
 execution. A signed `:run-complete-p` value is a runner attestation; the
-control plane does not inspect the run. Version 0.2 assumes one writer per
+control plane does not inspect the run. Version 0.3 assumes one writer per
 store, with multi-process coordination and crash recovery supplied externally.
 
 This subsystem is not an optimizer and does not generate mutations. It is not
@@ -575,6 +643,21 @@ after loading a defeasible-logic theory. Three layers gate every
 3. **Handler** — evaluates in a worker thread under a timeout (default
    1 s, max 30 s), captures method-set diffs for rollback, writes a
    verbatim audit-log entry, updates a queryable origin index.
+
+`harness-eval` is a policy gate for trusted authoring code, not an OS sandbox.
+Recognized thread primitives are vetoed, but deliberately concealed thread
+creation and detached descendants require process isolation. The evolution
+workflow requires that isolation at its external frozen-candidate runner.
+The same boundary excludes reflectively constructed TCB writers and direct
+tool-registry or handler access. Named TCB definitions are rejected, and the
+computed authority-state cases tested by SPEC-014 are defense in depth. The
+named TCB covers the reasoner and dispatch chain as well as worker mailbox
+transport, receipt recording, provider request advertisement, argument
+conversion, endpoint/auth/config accessors, credential erasure, clean-image
+entry points, and frame production. CLOS lifecycle/MOP extension points are
+definition-protected across evaluations. OpenRouter additionally uses the bounded,
+closed response recognizer described above; this version does not retrofit
+that language-theoretic boundary onto the Anthropic provider.
 
 The full surface is specified in
 [`specs/SPEC-012-self-modification-port.md`](./specs/SPEC-012-self-modification-port.md);
@@ -858,6 +941,7 @@ docstrings live with the definitions in `src/`.
 (find-tool name)                                 → tool | nil
 (list-tools)                                     → (name …)
 (clear-all-tools)
+(with-operator-tool-dispatch body …)             ; explicit unbound operator scope
 (dispatch-tool! name args-plist)                 → handler-return
 
 ;; Schema → provider format
@@ -888,6 +972,7 @@ docstrings live with the definitions in `src/`.
 (provider-stream! provider agent message)        → stream-handle
 (stream-next-frame! stream)
    → (:text STRING) | (:tool-use ID NAME ARGS) | (:error PLIST) | :done
+(drive-stream agent message)                     → reply-plist
 
 ;; Stub (canned responses for tests)
 (make-stub-provider &key responder)              → provider
@@ -997,12 +1082,21 @@ docstrings live with the definitions in `src/`.
 (open-receipt-log path)                          → log
 (append-receipt! log &key receipt-id direction dialect verb body
                        agent-id producer-id status)        → entry-plist
-(read-receipts path)                             → (entry-plist …)
+(read-receipts path &key limit)                  → (entry-plist …)
 (close-receipt-log! log)
 (content-hash body)                              → hex-string  ; sb-md5
 (iso-8601-now)                                   → "YYYY-MM-DDTHH:MM:SSZ"
 (register-receipt-log-for-clean! log)            ; for :clean t flush
 ```
+
+Receipt inspection accepts exactly the ASK/reply and `harness-eval` record
+schemas through a finite-token data grammar. It disables reader evaluation,
+rejects sharp/quote/escaped-symbol syntax before `read`, never interns unknown
+tokens, and fails closed on a malformed suffix. Entries are limited to
+4 Mi characters, 320 levels, 20,000 pre-read/validated nodes, and 65,536
+characters per string; a log is limited to 64 MiB. `read-receipts` retains at
+most the requested final 0–1,000 records, while public query tools narrow that
+limit to 0–100.
 
 ### Self-modification (SPEC-012, opt-in)
 
@@ -1158,7 +1252,7 @@ Load `imago/evolution` before resolving these symbols. They live in the
       `test/fixtures/`)
 - [x] SPEC-012 t12 — final adversarial review (SELF-MOD-REVIEW.md);
       fixed BLOCKER-1 setf/setq safety-variable bypass (ADR-014)
-- [x] SPEC-014 optional harness evolution implementation and focused tests
+- [ ] SPEC-014 hardening is implemented; independent final review remains pending
 - [ ] R4 frame-level signing on every CBCL message (needs cbcl-rs FFI)
 - [ ] Streaming SSE for the Anthropic provider
 - [ ] CI matrix M6 step (cbcl-rs cdylib build)
@@ -1190,9 +1284,12 @@ flow works fine — no formal RFC process.
 4. Commit your changes (`git commit -m 'feat: …'`)
 5. Push to the branch and open a pull request
 
-The core LOC budget gate at 3300 lines is in `.github/workflows/ci.yml`.
+The core LOC budget gate requires fewer than 3,700 lines in `.github/workflows/ci.yml`.
 It excludes identities, self-modification, examples, tests, and opt-in
-plugins. Crossing the soft gate requires a review of the added complexity.
+plugins. The September 2026 review raised the ceiling once to admit the closed,
+bounded receipt grammar found necessary by the SPEC-014 adversarial audit.
+Capability/security and compactness remain separate measured gates; crossing
+the revised soft gate requires another explicit complexity review.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

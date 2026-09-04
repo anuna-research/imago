@@ -78,18 +78,20 @@ ceiling wins over every nested request on the actual VM thread."
         (if present-p
             (funcall thunk)
             (let* ((current (%canonical-evaluation-tool-names tool-names))
-                   (initial
+                   (ceiling
                      (sb-thread:with-mutex (evaluation-authority-lock)
                        (multiple-value-bind (saved saved-p)
                            (gethash agent initial-authority-by-agent)
-                         (if saved-p
-                             saved
-                             (setf (gethash agent initial-authority-by-agent)
-                                   (copy-list current))))))
-                   (effective
-                     (remove-if-not
-                      (lambda (name) (member name initial :test #'eq))
-                      current))
+                         (let ((narrowed
+                                 (if saved-p
+                                     (remove-if-not
+                                      (lambda (name)
+                                        (member name saved :test #'eq))
+                                      current)
+                                     current)))
+                           (setf (gethash agent initial-authority-by-agent)
+                                 (copy-list narrowed))))))
+                   (effective (copy-list ceiling))
                    (record (list effective agent)))
               (sb-thread:with-mutex (evaluation-authority-lock)
                 (setf (gethash thread-key evaluation-authority-by-thread)
@@ -108,7 +110,7 @@ ceiling wins over every nested request on the actual VM thread."
                                   (sanitized
                                     (remove-if-not
                                      (lambda (name)
-                                       (member name initial :test #'eq))
+                                       (member name ceiling :test #'eq))
                                      post)))
                              (setf (agent-tools agent)
                                    (copy-list sanitized)))
@@ -137,14 +139,14 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
 
   (defun %effective-agent-tool-names
       (agent &optional (current (slot-value agent 'tools)))
-    "Apply AGENT's pinned evaluation ceiling to its current visible tools."
-    (multiple-value-bind (initial pinned-p)
+    "Apply AGENT's monotonic evaluation ceiling to its current visible tools."
+    (multiple-value-bind (ceiling pinned-p)
         (sb-thread:with-mutex (evaluation-authority-lock)
           (gethash agent initial-authority-by-agent))
       (if pinned-p
           (let ((canonical (%canonical-evaluation-tool-names current)))
             (remove-if-not
-             (lambda (name) (member name initial :test #'eq))
+             (lambda (name) (member name ceiling :test #'eq))
              canonical))
           current))))
 
@@ -152,14 +154,29 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
   "Expose at most the immutable ceiling pinned by AGENT's first evaluation."
   (%effective-agent-tool-names agent (call-next-method)))
 
+(defun %lock-package-family! (root-package root-name)
+  "Lock ROOT-PACKAGE and every loaded dot/slash-named implementation package."
+  (unless (find-package root-package)
+    (error "Required package ~A is unavailable." root-name))
+  (let ((prefix-length (length root-name)))
+    (dolist (package (list-all-packages))
+      (let ((name (package-name package)))
+        (when (and (>= (length name) prefix-length)
+                   (string-equal root-name name :end2 prefix-length)
+                   (or (= (length name) prefix-length)
+                       (member (char name prefix-length) '(#\. #\/))))
+          (sb-ext:lock-package package)
+          (unless (sb-ext:package-locked-p package)
+            (error "Package ~A could not be locked." name))))))
+  t)
+
 (defun %ensure-jzon-package-locked! ()
-  "Lock Jzon's implementation package before exposing HARNESS-EVAL."
-  (let ((package (or (find-package :com.inuoe.jzon)
-                     (error "The Jzon package is unavailable."))))
-    (sb-ext:lock-package package)
-    (unless (sb-ext:package-locked-p package)
-      (error "The Jzon package could not be locked."))
-    t))
+  "Lock Jzon's public package and loaded implementation package family."
+  (%lock-package-family! :com.inuoe.jzon "COM.INUOE.JZON"))
+
+(defun %ensure-dexador-package-locked! ()
+  "Lock Dexador's public package and loaded implementation package family."
+  (%lock-package-family! :dexador "DEXADOR"))
 
 ;; =========================================================================
 ;; CON-003 / ADR-012 §A1 — safety-layer symbol set
@@ -183,6 +200,96 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
 ;; assignment slipped past %prefilter-setf (which only inspected cons
 ;; places) and past the lift (which only saw head-of-cons symbols).
 
+(defparameter *prefilter-denylist*
+  '(;; SPEC-012 CON-002 table
+    (unintern                        . :unintern)
+    (delete-package                  . :delete-package)
+    (sb-ext:save-lisp-and-die        . :save-lisp-and-die)
+    (sb-ext:exit                     . :exit)
+    (sb-ext:quit                     . :quit)
+    (sb-ext:without-package-locks    . :without-package-locks)
+    (sb-ext:unlock-package           . :unlock-package)
+    (sb-sys:without-interrupts       . :interrupt-suppression)
+    ;; ADR-012 §A1 — eval/load/read primitives at top level
+    (eval                            . :eval-bypass)
+    (compile                         . :compile-bypass)
+    (compile-file                    . :compile-file-bypass)
+    (load                            . :load-bypass)
+    (read                            . :read-bypass)
+    (read-from-string                . :read-from-string-bypass)
+    (read-preserving-whitespace      . :read-bypass)
+    ;; Reader-macro pollution (also in the safety layer, but cheap to catch
+    ;; at the root too).
+    (set-macro-character             . :reader-macro-pollution)
+    (set-dispatch-macro-character    . :reader-macro-pollution)
+    (set-syntax-from-char            . :reader-macro-pollution)
+    ;; Thread interruption bypasses the evaluation worker boundary.
+    (sb-thread:interrupt-thread      . :thread-interrupt)
+    (sb-thread:terminate-thread      . :thread-terminate))
+  "Top-level operator → rejection rule keyword. Every key is also folded
+into *SAFETY-LAYER-SYMBOLS*, so burying an operator cannot bypass this gate.")
+
+(defparameter *protected-runtime-definition-targets*
+  '(make-instance allocate-instance initialize-instance reinitialize-instance
+    shared-initialize change-class update-instance-for-different-class
+    update-instance-for-redefined-class slot-missing slot-unbound
+    compute-applicable-methods no-applicable-method no-next-method
+    sb-mop:slot-value-using-class sb-mop:slot-boundp-using-class
+    sb-mop:slot-makunbound-using-class
+    sb-mop:compute-applicable-methods-using-classes)
+  "Runtime protocols that evaluated code may call but may never extend.")
+
+(defun %runtime-package-p (package)
+  (when package
+    (let ((name (package-name package)))
+      (or (string= name "COMMON-LISP")
+          (string= name "KEYWORD")
+          (and (>= (length name) 3) (string= name "SB-" :end1 3 :end2 3))
+          (and (>= (length name) 4) (string= name "UIOP" :end1 4 :end2 4))
+          (and (>= (length name) 4) (string= name "ASDF" :end1 4 :end2 4))))))
+
+(defun %protected-runtime-definition-target-p (name)
+  (let ((base (cond
+                ((symbolp name) name)
+                ((and (%proper-list-p name) (= 2 (length name))
+                      (eq (first name) 'setf) (symbolp (second name)))
+                 (second name)))))
+    (and base
+         (not (safety-layer-symbol-p base))
+         (or (member base *protected-runtime-definition-targets* :test #'eq)
+             (%runtime-package-p (symbol-package base))))))
+
+(defun %protected-runtime-definition-rejection (form)
+  "Reject protected definitions and mutation forms anywhere in FORM's graph."
+  (let ((pending (list form))
+        (seen (make-hash-table :test #'eq)))
+    (loop while pending
+          for node = (pop pending)
+          when (and (consp node) (not (gethash node seen)))
+            do (setf (gethash node seen) t)
+               (let ((head (car node)))
+                 (cond
+                   ((and (member head '(defmethod defgeneric defun defmacro)
+                                 :test #'eq)
+                         (consp (cdr node))
+                         (%protected-runtime-definition-target-p (second node)))
+                    (return
+                      (list :status :rejected
+                            :rule :runtime-protocol-redefinition
+                            :reason
+                            "Definitions of runtime/package protocols are operator-only.")))
+                   ((member head '(setf psetf) :test #'eq)
+                    (let ((result (%prefilter-setf node)))
+                      (unless (eq result :pass) (return result))))
+                   ((member head '(setq psetq) :test #'eq)
+                    (let ((result (%prefilter-setq node)))
+                      (unless (eq result :pass) (return result))))
+                   ((member head '(set makunbound) :test #'eq)
+                    (let ((result (%prefilter-symbol-mutator node)))
+                      (unless (eq result :pass) (return result)))))
+               (push (car node) pending)
+               (push (cdr node) pending)))))
+
 (defparameter *authorization-tcb-symbols*
   '(;; The recognizer, fact seam, proof gate, evaluator, and audit/rollback
     ;; pipeline.  Every named link is protected across sequential calls.
@@ -195,6 +302,10 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     %derivation-trigger-symbol
     %vetoed-hint
     *prefilter-denylist*
+    *protected-runtime-definition-targets*
+    %runtime-package-p
+    %protected-runtime-definition-target-p
+    %protected-runtime-definition-rejection
     %prefilter-denylist-rule
     %harness-eval-prefilter
     %prefilter-setf
@@ -202,11 +313,16 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     %prefilter-setq
     %prefilter-symbol-mutator
     %symbol-eq
+    %definition-function-name-p
     %defmethod-target-and-spec
     %spec-name-of-arg
     %lift-form
     *harness-eval-audit-log*
+    %unicode-scalar-string-p
+    %auditable-form-string
+    %auditable-receipt-tree
     %form-fingerprint
+    sb-md5:md5sum-sequence
     %tool-receipt!
     *redefine-history*
     *redefine-history-verbatim-cap*
@@ -229,11 +345,22 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     *harness-eval-default-timeout-ms*
     *harness-eval-max-timeout-ms*
     *harness-eval-default-package*
+    *harness-eval-maximum-source-characters*
+    *harness-eval-maximum-reader-introducers*
+    *harness-eval-maximum-reader-dispatch-argument*
+    *harness-eval-maximum-form-nodes*
+    *harness-eval-maximum-form-depth*
     *form-counter*
     *form-counter-lock*
     %next-form-id
     %bounded-prin1
+    %bounded-princ
+    %truncate-harness-eval-output
+    %harness-eval-argument-plist-p
+    %oversized-reader-dispatch-prefix-p
+    %source-structure-rejection
     %parse-form-locked
+    %form-structure-rejection
     %lift-facts
     %assert-lift-facts!
     %retract-lift-facts!
@@ -306,10 +433,42 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     with-operator-tool-dispatch
     *current-agent*
     agent
+    agent-id
     agent-tools
     sb-thread:*current-thread*
     sb-thread:current-thread-sap
     sb-sys:sap-int
+    ;; Evaluation timeouts rely on asynchronous thread interruption. Literal
+    ;; suppression forms and their dynamic state are therefore trusted.
+    sb-sys:without-interrupts
+    sb-sys:allow-with-interrupts
+    sb-sys:with-interrupts
+    sb-sys:with-local-interrupts
+    sb-sys:with-interrupt-bindings
+    sb-sys:in-interruption
+    sb-sys:*interrupts-enabled*
+    sb-sys:*allow-with-interrupts*
+    sb-sys:*interrupt-pending*
+    sb-thread:*interrupt-handler*
+    sb-unix::*unblock-deferrables-on-enabling-interrupts-p*
+    ;; Parser behavior must not inherit ambient debugger/reader state left by
+    ;; an earlier worker.
+    *break-on-signals*
+    *read-suppress*
+    *read-base*
+    *read-default-float-format*
+    *print-base*
+    *print-radix*
+    *print-case*
+    *print-array*
+    *print-gensym*
+    *print-pretty*
+    *print-readably*
+    *print-circle*
+    *print-length*
+    *print-level*
+    *print-escape*
+    *package*
     ;; Every same-thread entry and helper that can reach dispatch.
     process-turn
     *max-tool-use-iterations*
@@ -324,7 +483,38 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     tool-results-message-content
     agent-provider
     agent-message-history
+    ;; Provider construction, request metadata, credentials, and clean-image
+    ;; erasure are one sequential authority boundary.  A broad :AROUND method
+    ;; on an endpoint reader must not be able to redirect a later request while
+    ;; retaining the real Authorization header; nor may an evaluated form turn
+    ;; a later :CLEAN image save into a secret-bearing image.
+    auth-headers
     build-request
+    anthropic-provider
+    make-anthropic-provider
+    anthropic-api-key
+    anthropic-model
+    anthropic-base-url
+    anthropic-max-tokens
+    anthropic-version
+    anthropic-clear-credentials!
+    openrouter-provider
+    make-openrouter-provider
+    openrouter-api-key
+    openrouter-model
+    openrouter-base-url
+    openrouter-max-tokens
+    openrouter-temperature
+    openrouter-site-url
+    openrouter-app-name
+    openrouter-clear-credentials!
+    *clean-checklist*
+    pre-save-clean!
+    save-image!
+    agent-identity
+    identity-private-key
+    clear-identity-private-key!
+    register-identity-for-clean!
     %ht
     %param-key
     %type-string
@@ -339,6 +529,19 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     ;; Provider response ingress must stay coupled to its recognizer before a
     ;; frame can reach dispatch.  Protect both the built-in Anthropic chain and
     ;; the opt-in OpenRouter recognizer, including every mutable resource bound.
+    dex:post
+    dex:request
+    #-windows dexador.backend.usocket:request
+    #+windows dexador.backend.winhttp:request
+    dex:*default-connect-timeout*
+    dex:*default-read-timeout*
+    dex:*default-proxy*
+    dex:*verbose*
+    dex:*not-verify-ssl*
+    dex:*connection-pool*
+    dex:*use-connection-pool*
+    dex:*dexador-backend*
+    #-windows dexador.backend.usocket:*ca-bundle*
     *anthropic-http-post*
     %anthropic-stop-reason-keyword
     %anthropic-response->frames
@@ -373,6 +576,7 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     %openrouter-response->frames
     %openrouter-bounded-response-string
     %openrouter-fetch-and-parse
+    uiop:symbol-call
     ;; Jzon is an unlocked dependency. Its public parser/writer cells and the
     ;; constructor/closer emitted by WITH-PARSER are part of the same ingress
     ;; TCB as our wrappers.
@@ -382,7 +586,9 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     com.inuoe.jzon:make-parser
     com.inuoe.jzon:close-parser
     com.inuoe.jzon:stringify
+    %lock-package-family!
     %ensure-jzon-package-locked!
+    %ensure-dexador-package-locked!
     sb-ext:lock-package
     sb-ext:package-locked-p
     sb-ext:unlock-package
@@ -414,12 +620,43 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     %receipt-log-stream
     %receipt-log-seqs
     %receipt-log-lock
+    +receipt-maximum-form-characters+
+    +receipt-maximum-form-depth+
+    +receipt-maximum-form-nodes+
+    +receipt-maximum-token-characters+
+    +receipt-maximum-string-characters+
+    +receipt-maximum-summary-characters+
+    +receipt-maximum-log-octets+
+    +receipt-entry-keys+
+    +receipt-general-entry-keys+
+    +receipt-selfmod-entry-keys+
+    +receipt-reader-symbol-tokens+
+    +receipt-summary-keywords+
+    %receipt-whitespace-p
+    %receipt-unicode-scalar-character-p
+    %receipt-simple-string
+    %receipt-integer-token-p
+    %receipt-token-allowed-p
+    %read-receipt-source
+    %proper-receipt-list-p
+    %receipt-summary-plist-p
+    %receipt-entry-keys-exact-p
+    %receipt-entry-shape-p
+    %receipt-entry-structure-p
+    %reject-receipt-sharp-reader
+    %read-receipt-locked
+    %receipt-file-size
+    %ensure-receipt-file-size!
+    %write-receipt-entry!
+    %recover-seqs!
+    content-hash
     iso-8601-now
     *open-receipt-logs*
     *credential-erasers*
     register-receipt-log-for-clean!
     register-credential-eraser!
     append-receipt!
+    read-receipts
     open-receipt-log
     close-receipt-log!
     *self-modification-tool-names*
@@ -443,6 +680,9 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
   (remove-duplicates
    (append
     *authorization-tcb-symbols*
+    ;; Structural top-level rejects also need a reasoner-floor counterpart
+    ;; when the same operator is buried inside another form.
+    (mapcar #'car *prefilter-denylist*)
     '(;; Legacy generic retained by the SPEC-012 floor theory.
       tool-call
       ;; ADR-012 §A1 — eval/load/read primitives
@@ -558,13 +798,14 @@ shape ((forbidden eval-call F)
        (safety-layer-symbol SYMBOL))
 We pick the SYMBOL out of the second clause. Returns NIL on shapes we
 don't recognise so future-proof rules degrade gracefully."
-  (loop for clause in derivation
-        when (and (consp clause)
-                  (member (first clause)
-                          '(mentions defmethod-targets defgeneric-targets
-                            defun-targets))
-                  (>= (length clause) 3))
-          return (third clause)))
+  (unless (%form-structure-rejection derivation)
+    (loop for clause in derivation
+          when (and (%proper-list-p clause)
+                    (member (first clause)
+                            '(mentions defmethod-targets defgeneric-targets
+                              defun-targets))
+                    (>= (length clause) 3))
+            return (third clause))))
 
 (defun %vetoed-hint (derivation)
   "Build the :hint string emitted on a vetoed receipt. Returns NIL when
@@ -585,41 +826,15 @@ depth :no-active-theory case)."
 ;; does NOT walk past the top-level operator (and, for defmethod/defgeneric,
 ;; the target). Body inspection is the reasoner's job via *safety-layer-symbols*.
 
-(defparameter *prefilter-denylist*
-  '(;; SPEC-012 CON-002 table
-    (unintern                        . :unintern)
-    (delete-package                  . :delete-package)
-    (sb-ext:save-lisp-and-die        . :save-lisp-and-die)
-    (sb-ext:exit                     . :exit)
-    (sb-ext:quit                     . :quit)
-    (sb-ext:without-package-locks    . :without-package-locks)
-    (sb-ext:unlock-package           . :unlock-package)
-    ;; ADR-012 §A1 — eval/load/read primitives at top level
-    (eval                            . :eval-bypass)
-    (compile                         . :compile-bypass)
-    (compile-file                    . :compile-file-bypass)
-    (load                            . :load-bypass)
-    (read                            . :read-bypass)
-    (read-from-string                . :read-from-string-bypass)
-    (read-preserving-whitespace      . :read-bypass)
-    ;; ADR-012 §A1 — reader-macro pollution (also in safety-layer set, but
-    ;; cheap to catch at top level too)
-    (set-macro-character             . :reader-macro-pollution)
-    (set-dispatch-macro-character    . :reader-macro-pollution)
-    (set-syntax-from-char            . :reader-macro-pollution)
-    ;; ADR-012 §A1 — thread interrupt
-    (sb-thread:interrupt-thread      . :thread-interrupt)
-    (sb-thread:terminate-thread      . :thread-terminate))
-  "Top-level operator → rejection rule keyword. The pre-filter rejects any
-form whose CAR is a key here. Body-buried calls are caught by the reasoner
-via *safety-layer-symbols*. CON-002 + ADR-012 §A1.")
-
 (defun %prefilter-denylist-rule (op)
   (cdr (assoc op *prefilter-denylist* :test #'eq)))
 
 (defun %harness-eval-prefilter (form)
   "Pre-filter per CON-002 + ADR-012 §A2/§A3/§A4. Returns :PASS or
   (:REJECTED :RULE <kw> :REASON <str>)."
+  (let ((runtime-rejection (%protected-runtime-definition-rejection form)))
+    (when runtime-rejection
+      (return-from %harness-eval-prefilter runtime-rejection)))
   (cond
     ;; literals / atoms / nil — pre-filter has nothing to say
     ((not (consp form)) :pass)
@@ -642,6 +857,16 @@ via *safety-layer-symbols*. CON-002 + ADR-012 §A1.")
           (%prefilter-setq form))
          ((member op '(set makunbound))
           (%prefilter-symbol-mutator form))
+
+         ;; Rollback capture calls FBOUNDP/FIND-METHOD before the worker. Keep
+         ;; malformed method names from escaping the audited rejection path.
+         ((and (eq op 'defmethod)
+               (not (%definition-function-name-p
+                     (and (consp (cdr form)) (second form)))))
+          (list :status :rejected
+                :rule :invalid-definition-target
+                :reason
+                "defmethod requires a symbol or exact (setf SYMBOL) name"))
 
          ;; defmethod against safety-layer target — CON-002
          ((and (eq op 'defmethod)
@@ -774,6 +999,14 @@ added to *safety-layer-symbols* so the reasoner mentions/2 path also fires."
 (defun %symbol-eq (a b)
   (and (symbolp a) (symbolp b) (eq a b)))
 
+(defun %definition-function-name-p (name)
+  "Recognize the function-name subset supported by rollback capture."
+  (or (and name (symbolp name))
+      (and (%proper-list-p name)
+           (= 2 (length name))
+           (eq (first name) 'setf)
+           (symbolp (second name)))))
+
 (defun %defmethod-target-and-spec (form)
   "Given `(defmethod NAME [QUALIFIER] (LAMBDA-LIST) BODY...)`, return
    (values target qualifier specialisers-list)."
@@ -821,7 +1054,8 @@ return the specialiser identifier (class symbol or eql object)."
         (free       (make-hash-table :test 'eq))
         (defm-tgts  (make-hash-table :test 'eq))
         (defg-tgts  (make-hash-table :test 'eq))
-        (defn-tgts  (make-hash-table :test 'eq)))
+        (defn-tgts  (make-hash-table :test 'eq))
+        (walked     (make-hash-table :test 'eq)))
     ;; top-level destructure
     (when (consp form)
       (case operator
@@ -841,8 +1075,17 @@ return the specialiser identifier (class symbol or eql object)."
                  ((symbolp x)
                   (when (safety-layer-symbol-p x)
                     (setf (gethash x free) t)))
+                 ((and (arrayp x)
+                       (not (stringp x))
+                       (not (typep x 'bit-vector)))
+                  (unless (gethash x walked)
+                    (setf (gethash x walked) t)
+                    (dotimes (index (array-total-size x))
+                      (walk (row-major-aref x index)))))
                  ((not (consp x)) nil)
+                 ((gethash x walked) nil)
                  (t
+                  (setf (gethash x walked) t)
                   (let ((head (car x)))
                     (when (symbolp head) (setf (gethash head free) t))
                     (case head
@@ -901,7 +1144,8 @@ return the specialiser identifier (class symbol or eql object)."
                                  (consp (cdr fn-arg))
                                  (symbolp (cadr fn-arg)))
                             (setf (gethash (cadr fn-arg) free) t))))))
-                    (dolist (e (cdr x)) (walk e)))))))
+                    (walk (car x))
+                    (walk (cdr x)))))))
       (walk form))
     (list :operator      operator
           :target        target
@@ -925,38 +1169,147 @@ return the specialiser identifier (class symbol or eql object)."
   "RECEIPT-LOG instance bound by (install-self-modification-tools!).
    Closed by save-clean! via register-receipt-log-for-clean!.")
 
+(defun %unicode-scalar-string-p (value)
+  "Whether VALUE is a string containing only Unicode scalar characters."
+  (and (stringp value)
+       (loop for character across value
+             for code = (char-code character)
+             always (and (<= code #x10FFFF)
+                         (not (<= #xD800 code #xDFFF))))))
+
+(defun %auditable-form-string (value)
+  "Return VALUE when UTF-8 encodable, otherwise a stable ASCII placeholder."
+  (if (%unicode-scalar-string-p value)
+      (%receipt-simple-string value)
+      "[INVALID-UNICODE-SOURCE]"))
+
+(defun %auditable-receipt-tree (value)
+  "Copy VALUE into the closed, acyclic data grammar used by receipt files.
+Shared/cyclic edges and unsupported objects become explicit inert markers;
+excessive evidence becomes one bounded omission marker rather than unreadable
+printer abbreviations such as # or ...."
+  (let ((seen (make-hash-table :test #'eq))
+        (nodes 0)
+        (characters 0))
+    (labels ((charge (amount)
+               (incf characters amount)
+               (when (> characters +receipt-maximum-summary-characters+)
+                 (error "Receipt summary exceeds the character budget.")))
+             (safe-string (string)
+               ;; Account for the worst case in CL string syntax, where every
+               ;; source character needs a leading escape.
+               (let ((safe (if (%unicode-scalar-string-p string)
+                               string
+                               "[INVALID-UNICODE-AUDIT-VALUE]")))
+                 (charge (* 2 (length safe)))
+                 (%receipt-simple-string safe)))
+             (copy-value (item depth)
+               (incf nodes)
+               (when (or (> nodes +receipt-maximum-form-nodes+)
+                         (> depth +receipt-maximum-form-depth+))
+                 (error "Receipt summary exceeds structural bounds."))
+               (typecase item
+                 (null nil)
+                 (cons
+                  (charge 2)
+                  (if (gethash item seen)
+                      (list "AUDIT-REFERENCE" "OMITTED")
+                      (progn
+                        (setf (gethash item seen) t)
+                        (cons (copy-value (car item) (1+ depth))
+                              (copy-value (cdr item) depth)))))
+                 (string
+                  (cond
+                    ((not (%unicode-scalar-string-p item))
+                     "[INVALID-UNICODE-AUDIT-VALUE]")
+                    ((<= (length item) +receipt-maximum-string-characters+)
+                     (safe-string item))
+                    (t "[OVERSIZED-AUDIT-STRING]")))
+                 (symbol
+                  (if (member item +receipt-summary-keywords+ :test #'eq)
+                      (progn (charge 32) item)
+                      (safe-string
+                       (let ((package (symbol-package item)))
+                         (cond
+                           ((keywordp item)
+                            (format nil ":~A" (symbol-name item)))
+                           (package
+                            (format nil "~A::~A" (package-name package)
+                                    (symbol-name item)))
+                           (t
+                            (format nil "[UNINTERNED-SYMBOL:~A]"
+                                    (symbol-name item))))))))
+                 (integer
+                  (if (<= (integer-length (abs item)) 256)
+                      (progn (charge 80) item)
+                      (safe-string "[OVERSIZED-AUDIT-INTEGER]")))
+                 (character (safe-string (string item)))
+                 (real (safe-string (%bounded-prin1 item)))
+                 (t (safe-string
+                     (format nil "[UNSUPPORTED-AUDIT-VALUE:~A]"
+                             (type-of item)))))))
+      (handler-case (copy-value value 0)
+        (error () (list :message
+                        "Audit summary omitted: structural bound."))))))
+
 (defun %form-fingerprint (form-string)
-  "SHA-256-ish hex digest of FORM-STRING for cross-referencing entries.
-Uses sb-md5's md5sum for now (matches receipt-log.lisp's choice — content
-addressing for dedup, not crypto)."
-  (let ((bytes (sb-ext:string-to-octets form-string :external-format :utf-8)))
-    (with-output-to-string (s)
-      (loop for b across (sb-md5:md5sum-sequence bytes)
-            do (format s "~(~2,'0x~)" b)))))
+  "MD5 content fingerprint of FORM-STRING for audit cross-references, not trust."
+  (let ((bytes (sb-ext:string-to-octets
+                (%auditable-form-string form-string)
+                :external-format :utf-8)))
+    (%receipt-simple-string
+     (with-output-to-string (s)
+       (loop for b across (sb-md5:md5sum-sequence bytes)
+             do (format s "~(~2,'0x~)" b))))))
 
 (defun %tool-receipt! (log &key tool agent-id form result-phase result-tag
                                 elapsed-ms result-summary)
-  "Append a CON-004 entry to LOG. Verbatim FORM never normalised /
-truncated. Thread-safe via the underlying receipt-log mutex."
+  "Append a CON-004 entry to LOG. Valid Unicode FORM text is preserved
+verbatim; invalid source is replaced by a stable ASCII audit placeholder.
+Thread-safe via the underlying receipt-log mutex."
   (when log
-    (sb-thread:with-mutex ((%receipt-log-lock log))
-      (let* ((entry (list :tool tool
-                          :agent-id (princ-to-string (or agent-id "?"))
-                          :timestamp (iso-8601-now)
-                          :form (or form "")
-                          :form-hash (and form (%form-fingerprint form))
-                          :result-phase result-phase
-                          :result-tag result-tag
-                          :elapsed-ms elapsed-ms
-                          :result-summary result-summary))
-             (stream (%receipt-log-stream log)))
-        (when stream
-          (let ((*print-pretty* nil) (*print-readably* nil) (*print-circle* t)
-                (*print-length* 200) (*print-level* 12))
-            (prin1 entry stream))
-          (terpri stream)
-          (force-output stream))
-        entry))))
+    ;; Bind the complete printer environment around entry construction too:
+    ;; numeric/custom AGENT-ID rendering is persisted evidence, not merely UI.
+    (let ((*print-pretty* nil) (*print-readably* t) (*print-circle* nil)
+          (*print-length* nil) (*print-level* nil)
+          (*print-base* 10) (*print-radix* nil) (*print-case* :upcase)
+          (*print-array* t) (*print-gensym* t)
+          (*package* (find-package :anuna-imago)))
+      (sb-thread:with-mutex ((%receipt-log-lock log))
+        (let* ((raw-form (%auditable-form-string (or form "")))
+               (safe-form
+                 (if (<= (length raw-form)
+                         +receipt-maximum-string-characters+)
+                     raw-form
+                     (%receipt-simple-string
+                      (format nil "[OVERSIZED-SOURCE:~A]"
+                              (%form-fingerprint raw-form)))))
+               (summary-input
+                 (if (%receipt-summary-plist-p result-summary)
+                     result-summary
+                     (list :message
+                           "Audit summary omitted: invalid plist.")))
+               (entry (list :tool
+                            (if (and (symbolp tool)
+                                     (string-equal (symbol-name tool)
+                                                   "HARNESS-EVAL"))
+                                'harness-eval
+                                tool)
+                            :agent-id
+                            (%auditable-form-string
+                             (princ-to-string (or agent-id "?")))
+                            :timestamp (iso-8601-now)
+                            :form safe-form
+                            :form-hash (and form (%form-fingerprint safe-form))
+                            :result-phase result-phase
+                            :result-tag result-tag
+                            :elapsed-ms elapsed-ms
+                            :result-summary
+                            (%auditable-receipt-tree summary-input)))
+               (stream (%receipt-log-stream log)))
+          (when stream
+            (%write-receipt-entry! log entry))
+          entry)))))
 
 ;; =========================================================================
 ;; CON-005 — symbol-origin index
@@ -988,7 +1341,8 @@ larger forms are stored as form-hash only.")
 (defun %record-definition! (target form-string agent-id prior-spec rollback-ref)
   "Push a CON-005 event onto *redefine-history* for TARGET. Returns the
 event."
-  (let* ((bytes (length form-string))
+  (let* ((bytes (length (sb-ext:string-to-octets
+                         form-string :external-format :utf-8)))
          (verbatim-p (<= bytes *redefine-history-verbatim-cap*))
          (event (list :symbol target
                       :defining-form (if verbatim-p
@@ -1161,6 +1515,11 @@ entries on success."
 (defparameter *harness-eval-default-timeout-ms* 1000)
 (defparameter *harness-eval-max-timeout-ms*     30000)
 (defparameter *harness-eval-default-package* :anuna-imago-user)
+(defparameter *harness-eval-maximum-source-characters* 65536)
+(defparameter *harness-eval-maximum-reader-introducers* 256)
+(defparameter *harness-eval-maximum-reader-dispatch-argument* 8192)
+(defparameter *harness-eval-maximum-form-nodes* 8192)
+(defparameter *harness-eval-maximum-form-depth* 256)
 
 (defvar *form-counter* 0)
 (defvar *form-counter-lock* (sb-thread:make-mutex :name "form-counter"))
@@ -1170,26 +1529,293 @@ entries on success."
     (incf *form-counter*)
     (intern (format nil "FORM-~D" *form-counter*) :keyword)))
 
+(defun %truncate-harness-eval-output (string)
+  "Return STRING within the configured UTF-8 octet cap, marking truncation."
+  (labels ((utf8-prefix (octets limit)
+             (let ((end (min limit (length octets))))
+               ;; A UTF-8 continuation octet cannot begin a decoded suffix.
+               ;; Back up to the leading octet when LIMIT splits a codepoint.
+               (loop while (and (plusp end)
+                                (< end (length octets))
+                                (= #x80 (logand #xC0 (aref octets end))))
+                     do (decf end))
+               (sb-ext:octets-to-string octets :external-format :utf-8
+                                                :end end))))
+    (let* ((limit *harness-eval-result-truncate-bytes*)
+           (octets (sb-ext:string-to-octets string :external-format :utf-8)))
+      (cond
+        ((<= (length octets) limit) string)
+        (t
+         (let* ((marker "…[TRUNCATED]")
+                (marker-octets
+                  (sb-ext:string-to-octets marker :external-format :utf-8)))
+           (if (<= limit (length marker-octets))
+               (utf8-prefix marker-octets limit)
+               (concatenate
+                'string
+                (utf8-prefix octets (- limit (length marker-octets)))
+                marker))))))))
+
 (defun %bounded-prin1 (value)
   "Per ADR-013 OQ-003: bound the printer + truncate at *harness-eval-result-truncate-bytes*."
   (let* ((s (let ((*print-circle* t)
                   (*print-length* 100)
                   (*print-level* 10)
                   (*print-pretty* nil)
-                  (*print-readably* nil))
+                  (*print-readably* nil)
+                  (*print-base* 10)
+                  (*print-radix* nil)
+                  (*print-case* :upcase)
+                  (*print-array* t)
+                  (*print-gensym* t))
               (with-output-to-string (out) (prin1 value out)))))
-    (cond
-      ((<= (length s) *harness-eval-result-truncate-bytes*) s)
-      (t (concatenate 'string
-                      (subseq s 0 *harness-eval-result-truncate-bytes*)
-                      "…[TRUNCATED]")))))
+    (%truncate-harness-eval-output s)))
 
-(defun %parse-form-locked (form-string)
+(defun %bounded-princ (value)
+  "Render VALUE for a human-facing message under the harness result cap."
+  (let* ((s (let ((*print-circle* t)
+                  (*print-length* 100)
+                  (*print-level* 10)
+                  (*print-pretty* nil)
+                  (*print-readably* nil)
+                  (*print-base* 10)
+                  (*print-radix* nil)
+                  (*print-case* :upcase)
+                  (*print-array* t)
+                  (*print-gensym* t))
+              (with-output-to-string (out) (princ value out)))))
+    (%truncate-harness-eval-output s)))
+
+(defun %harness-eval-argument-plist-p (args)
+  "Recognize a finite proper even-length argument plist before any GETF."
+  (and (%proper-list-p args)
+       (evenp (length args))))
+
+(defun %oversized-reader-dispatch-prefix-p (source hash-index)
+  "Whether # at HASH-INDEX has a decimal argument above the reader bound.
+Accumulate only while the value is known to fit the configured small bound;
+never call PARSE-INTEGER or construct an attacker-sized bignum."
+  (let ((value 0)
+        (index (1+ hash-index))
+        (length (length source)))
+    (loop while (< index length)
+          for digit = (digit-char-p (char source index) 10)
+          while digit
+          do (when (> value
+                      (floor (- *harness-eval-maximum-reader-dispatch-argument*
+                                digit)
+                             10))
+               (return t))
+             (setf value (+ (* value 10) digit))
+             (incf index)
+          finally (return nil))))
+
+(defun %source-structure-rejection (source)
+  "Bound recursive reader syntax before READ-FROM-STRING can consume SOURCE.
+Counting introducers inside strings/comments is an intentional conservative
+false denial: the gate must be iterative and independent of reader recursion."
+  (cond
+    ((not (%unicode-scalar-string-p source))
+     (list :status :rejected
+           :rule :invalid-source-character
+           :reason "The source contains a non-Unicode-scalar character."))
+    ((> (length source) *harness-eval-maximum-source-characters*)
+     (list :status :rejected
+           :rule :source-too-large
+           :reason "The source exceeds the character limit."))
+    (t
+     (let ((introducers 0))
+       (loop for index below (length source)
+             for character = (char source index)
+             for code = (char-code character)
+             when (= code 35)
+               do (let ((dispatch-index (1+ index)))
+                    (loop while (and (< dispatch-index (length source))
+                                     (digit-char-p
+                                      (char source dispatch-index) 10))
+                          do (incf dispatch-index))
+                    (when (< dispatch-index (length source))
+                      (case (char-upcase (char source dispatch-index))
+                        (#\S
+                         (return-from %source-structure-rejection
+                           (list
+                            :status :rejected
+                            :rule :reader-structure-literal
+                            :reason
+                            "Structure reader dispatch is not accepted.")))
+                        (#\A
+                         (return-from %source-structure-rejection
+                           (list
+                            :status :rejected
+                            :rule :reader-array-literal
+                            :reason
+                            "Array reader dispatch is not accepted.")))
+                        ((#\+ #\- #\= #\#)
+                         (return-from %source-structure-rejection
+                           (list
+                            :status :rejected
+                            :rule :recursive-reader-dispatch
+                            :reason
+                            "Recursive reader dispatch is not accepted."))))))
+             when (and (= code 35)
+                       (%oversized-reader-dispatch-prefix-p source index))
+               do (return-from %source-structure-rejection
+                    (list
+                     :status :rejected
+                     :rule :reader-dispatch-argument-too-large
+                     :reason
+                     "The source exceeds the numeric reader-dispatch limit."))
+             when (member code '(40 39 96 44 35))
+               do (when (> (incf introducers)
+                           *harness-eval-maximum-reader-introducers*)
+                    (return-from %source-structure-rejection
+                      (list
+                       :status :rejected
+                       :rule :reader-structure-too-deep
+                       :reason
+                       "The source exceeds the recursive reader-syntax limit."))))))))
+
+(defun %form-structure-rejection (form)
+  "Return a rejection plist for an unsafe source/proof cons graph, else NIL.
+The iterative grey/black walk accepts shared acyclic structure, rejects cycles
+and bounds unique nodes and cons depth before recursive prefilter or lift code
+observes the graph. A second pass rejects improper expression tails while
+permitting acyclic dotted data beneath QUOTE."
+  (let ((states (make-hash-table :test #'eq))
+        (stack (list (list :enter form 0)))
+        (nodes 0)
+        (array-elements 0))
+    (labels ((rejection (rule reason)
+               (list :status :rejected :rule rule :reason reason))
+             (array-container-p (value)
+               (and (arrayp value)
+                    (not (stringp value))
+                    (not (typep value 'bit-vector)))))
+      (loop while stack
+            for item = (pop stack)
+            for action = (first item)
+            for node = (second item)
+            for depth = (third item)
+            do (cond
+                 ((eq action :leave)
+                  (setf (gethash node states) :done))
+                 ((> depth *harness-eval-maximum-form-depth*)
+                  (return-from %form-structure-rejection
+                    (rejection
+                     :form-too-deep
+                     "The parsed form exceeds the structural depth limit.")))
+                 ((consp node)
+                  (case (gethash node states)
+                    (:active
+                     (return-from %form-structure-rejection
+                       (rejection
+                        :cyclic-form
+                        "The parsed form contains a cyclic cons graph.")))
+                    (:done nil)
+                    (otherwise
+                     (when (> (incf nodes)
+                              *harness-eval-maximum-form-nodes*)
+                       (return-from %form-structure-rejection
+                         (rejection
+                          :form-too-large
+                          "The parsed form exceeds the structural node limit.")))
+                     (setf (gethash node states) :active)
+                     (push (list :leave node depth) stack)
+                     ;; The CDR is the current list spine, not an additional
+                     ;; expression nesting level. Nested elements in the CAR
+                     ;; still increase depth.
+                     (push (list :enter (cdr node) depth) stack)
+                     (push (list :enter (car node) (1+ depth)) stack))))
+                 ((typep node 'bit-vector)
+                  (when (or (> (incf nodes)
+                               *harness-eval-maximum-form-nodes*)
+                            (> (incf array-elements (length node))
+                               *harness-eval-maximum-form-nodes*))
+                    (return-from %form-structure-rejection
+                      (rejection
+                       :form-too-large
+                       "The parsed form exceeds the structural node limit."))))
+                 ((array-container-p node)
+                  (case (gethash node states)
+                    (:active
+                     (return-from %form-structure-rejection
+                       (rejection
+                        :cyclic-form
+                        "The parsed form contains a cyclic array graph.")))
+                    (:done nil)
+                    (otherwise
+                     (when (or (> (incf nodes)
+                                  *harness-eval-maximum-form-nodes*)
+                               (> (incf array-elements
+                                        (array-total-size node))
+                                  *harness-eval-maximum-form-nodes*))
+                       (return-from %form-structure-rejection
+                         (rejection
+                          :form-too-large
+                          "The parsed form exceeds the structural node limit.")))
+                     (setf (gethash node states) :active)
+                     (push (list :leave node depth) stack)
+                     (dotimes (index (array-total-size node))
+                       (push (list :enter (row-major-aref node index)
+                                   (1+ depth))
+                             stack)))))
+                 ((typep node 'structure-object)
+                  (return-from %form-structure-rejection
+                    (rejection
+                     :unsupported-form-object
+                     "Structure literals are not accepted in evaluated source.")))
+                 ((stringp node)
+                  (unless (and (%unicode-scalar-string-p node)
+                               (<= (length node)
+                                   *harness-eval-maximum-source-characters*))
+                    (return-from %form-structure-rejection
+                      (rejection
+                       :unsupported-form-object
+                       "The parsed form contains an invalid or oversized string."))))
+                 ((symbolp node)
+                  (unless (and (%unicode-scalar-string-p (symbol-name node))
+                               (<= (length (symbol-name node))
+                                   *harness-eval-maximum-source-characters*))
+                    (return-from %form-structure-rejection
+                      (rejection
+                       :unsupported-form-object
+                       "The parsed form contains an invalid or oversized symbol."))))
+                 (t nil)))
+      (let ((pending (list form))
+            (checked (make-hash-table :test #'eq)))
+        (loop while pending
+              for expression = (pop pending)
+              when (and (consp expression)
+                        (not (gethash expression checked)))
+                do (setf (gethash expression checked) t)
+                   (unless (%proper-list-p expression)
+                     (return-from %form-structure-rejection
+                       (rejection
+                        :improper-form
+                        "The parsed form contains an improper expression tail.")))
+                   ;; QUOTE's operand is data. The graph pass above still
+                   ;; checks it for cycles and bounds, while %LIFT-FORM still
+                   ;; records protected literal symbols conservatively.
+                   (unless (eq (car expression) 'quote)
+                     (when (consp (car expression))
+                       (push (car expression) pending))
+                     (dolist (argument (cdr expression))
+                       (when (consp argument)
+                         (push argument pending)))))))
+      nil))
+
+(defun %parse-form-locked (form-string &optional package-name)
   "ADR-012 §A2 — read FORM-STRING with a pristine readtable and *read-eval* nil.
 Returns (values form parse-error-or-nil)."
   (handler-case
       (let ((*readtable* (copy-readtable nil))
-            (*read-eval* nil))
+            (*read-eval* nil)
+            (*read-suppress* nil)
+            (*read-base* 10)
+            (*read-default-float-format* 'single-float)
+            (*break-on-signals* nil)
+            (*package* (or (and package-name (find-package package-name))
+                           (find-package :cl-user))))
         (values (read-from-string form-string) nil))
     (error (c) (values nil c))))
 
@@ -1292,7 +1918,7 @@ load-theory and before the first harness-eval call."
                                    (list
                                     :error
                                     (type-of c)
-                                    (handler-case (princ-to-string c)
+                                    (handler-case (%bounded-princ c)
                                       (error ()
                                         "Unprintable evaluation condition."))
                                     (get-output-stream-string buf)
@@ -1311,13 +1937,17 @@ load-theory and before the first harness-eval call."
     (cond
       ((eq wire-reply :timeout)
        (handler-case (sb-thread:terminate-thread worker) (error () nil))
-       (handler-case (sb-thread:join-thread worker) (error () nil))
+       (handler-case
+           (sb-thread:join-thread worker :timeout 0.05 :default :still-running)
+         (error () nil))
        :timeout)
       ((and (consp wire-reply) (eq nonce (first wire-reply)))
        (rest wire-reply))
       (t
        (handler-case (sb-thread:terminate-thread worker) (error () nil))
-       (handler-case (sb-thread:join-thread worker) (error () nil))
+       (handler-case
+           (sb-thread:join-thread worker :timeout 0.05 :default :still-running)
+         (error () nil))
        (list :error 'invalid-worker-transport
              "Evaluation worker transport failed closed."
              "" (%elapsed-ms start))))))
@@ -1440,44 +2070,98 @@ a rollback record, e.g. defparameter / defclass)."
 :package (string or keyword, optional), :timeout (integer ms, optional).
 
 Always returns a plist; never raises."
-  (let* ((agent-id    (when *current-agent* (agent-id *current-agent*)))
-         (form-string (getf args :form))
-         (pkg-arg     (getf args :package))
-         (pkg-name    (cond
-                        ((null pkg-arg) *harness-eval-default-package*)
-                        ((stringp pkg-arg) (intern (string-upcase pkg-arg) :keyword))
-                        ((symbolp pkg-arg) (intern (string (symbol-name pkg-arg)) :keyword))
-                        (t *harness-eval-default-package*)))
-         (timeout-ms  (max 1 (min *harness-eval-max-timeout-ms*
-                                  (or (getf args :timeout)
-                                      *harness-eval-default-timeout-ms*))))
-         (start (get-internal-real-time)))
+  (let ((agent-id (when *current-agent* (agent-id *current-agent*)))
+        (start (get-internal-real-time)))
     (cond
-      ((or (null form-string) (not (stringp form-string)))
-       (let ((res (list :status :error :phase :evaluation
-                        :condition-type 'invalid-argument
-                        :message ":form must be a non-empty string"
-                        :elapsed-ms 0)))
-         (%emit-receipt! 'harness-eval agent-id (or form-string "") :evaluation :error 0
-                         (list :condition-type 'invalid-argument))
+      ((not (%harness-eval-argument-plist-p args))
+       (let* ((elapsed (%elapsed-ms start))
+              (res (list :status :error :phase :evaluation
+                         :condition-type 'invalid-argument
+                         :message "arguments must be a finite proper even-length plist"
+                         :elapsed-ms elapsed)))
+         (%emit-receipt! 'harness-eval agent-id "" :evaluation :error elapsed
+                         (list :condition-type 'invalid-argument
+                               :message
+                               "arguments must be a finite proper even-length plist"))
          res))
 
       (t
-       (multiple-value-bind (form parse-err) (%parse-form-locked form-string)
+       (let* ((form-string (getf args :form))
+              (pkg-arg (getf args :package))
+              (pkg-name
+                (cond
+                  ((null pkg-arg) *harness-eval-default-package*)
+                  ((stringp pkg-arg)
+                   (string-upcase pkg-arg))
+                  ((symbolp pkg-arg)
+                   (symbol-name pkg-arg))
+                  (t *harness-eval-default-package*)))
+              (timeout-arg (getf args :timeout)))
          (cond
-           (parse-err
-            (let ((res (list :status :error :phase :evaluation
-                             :condition-type 'parse-error
-                             :message (princ-to-string parse-err)
-                             :elapsed-ms (%elapsed-ms start))))
-              (%emit-receipt! 'harness-eval agent-id form-string :evaluation :error
-                              (%elapsed-ms start)
-                              (list :condition-type 'parse-error
-                                    :message (princ-to-string parse-err)))
+           ((or (null form-string) (not (stringp form-string)))
+            (let* ((elapsed (%elapsed-ms start))
+                   (res (list :status :error :phase :evaluation
+                              :condition-type 'invalid-argument
+                              :message ":form must be a non-empty string"
+                              :elapsed-ms elapsed)))
+              (%emit-receipt! 'harness-eval agent-id ""
+                              :evaluation :error elapsed
+                              (list :condition-type 'invalid-argument
+                                    :message ":form must be a non-empty string"))
+              res))
+
+           ((and timeout-arg (not (integerp timeout-arg)))
+            (let* ((elapsed (%elapsed-ms start))
+                   (res (list :status :error :phase :evaluation
+                              :condition-type 'invalid-argument
+                              :message ":timeout must be an integer"
+                              :elapsed-ms elapsed)))
+              (%emit-receipt! 'harness-eval agent-id form-string
+                              :evaluation :error elapsed
+                              (list :condition-type 'invalid-argument
+                                    :message ":timeout must be an integer"))
               res))
 
            (t
-            (%after-parse-pipeline form form-string pkg-name timeout-ms agent-id start))))))))
+            (let ((source-rejection
+                    (%source-structure-rejection form-string)))
+              (cond
+                (source-rejection
+                 (let ((rule (getf source-rejection :rule))
+                       (reason (getf source-rejection :reason)))
+                   (%emit-receipt! 'harness-eval agent-id form-string
+                                   :pre-filter :rejected (%elapsed-ms start)
+                                   (list :rule rule :reason reason))
+                   (list :status :rejected :phase :pre-filter
+                         :rule rule :reason reason)))
+
+                (t
+                 (let ((timeout-ms
+                         (max 1 (min *harness-eval-max-timeout-ms*
+                                     (or timeout-arg
+                                         *harness-eval-default-timeout-ms*)))))
+                   (multiple-value-bind (form parse-err)
+                       (%parse-form-locked form-string pkg-name)
+                     (cond
+                       (parse-err
+                        (let* ((message (%bounded-princ parse-err))
+                               (res
+                                (list
+                                 :status :error :phase :evaluation
+                                 :condition-type 'parse-error
+                                 :message message
+                                 :elapsed-ms (%elapsed-ms start))))
+                          (%emit-receipt!
+                           'harness-eval agent-id form-string
+                           :evaluation :error (%elapsed-ms start)
+                           (list :condition-type 'parse-error
+                                 :message message))
+                          res))
+
+                       (t
+                        (%after-parse-pipeline
+                         form form-string pkg-name timeout-ms
+                         agent-id start)))))))))))))))
 
 (defun %emit-receipt! (tool agent-id form-string phase tag elapsed-ms summary)
   (when *harness-eval-audit-log*
@@ -1492,7 +2176,8 @@ Always returns a plist; never raises."
 
 (defun %after-parse-pipeline (form form-string pkg-name timeout-ms agent-id start)
   ;; Step 2 — prefilter
-  (let ((pf (%harness-eval-prefilter form)))
+  (let ((pf (or (%form-structure-rejection form)
+                (%harness-eval-prefilter form))))
     (cond
       ((not (eq pf :pass))
        (let* ((rule (getf pf :rule))
@@ -1535,7 +2220,7 @@ Always returns a plist; never raises."
                      (list :status :vetoed :phase :reasoner
                            :goal (list 'forbidden 'eval-call form-id)
                            :derivation '((reasoner-fact-assertion-failed))
-                           :hint (princ-to-string assertion-error)
+                           :hint (%bounded-princ assertion-error)
                            :time-ms 0))
                (let ((proof (%query-forbidden handle form-id)))
                  (multiple-value-bind (retracted-p retraction-error)
@@ -1546,9 +2231,11 @@ Always returns a plist; never raises."
                             (list :status :vetoed :phase :reasoner
                                   :goal (list 'forbidden 'eval-call form-id)
                                   :derivation '((reasoner-fact-retraction-failed))
-                                  :hint (princ-to-string retraction-error)
+                                  :hint (%bounded-princ retraction-error)
                                   :time-ms 0)))
-                     ((not (%proof-result-valid-p proof))
+                     ((or (not (%proof-result-valid-p proof))
+                          (%form-structure-rejection
+                           (getf proof :derivation)))
                       (setf veto-result
                             (list :status :vetoed :phase :reasoner
                                   :goal (list 'forbidden 'eval-call form-id)

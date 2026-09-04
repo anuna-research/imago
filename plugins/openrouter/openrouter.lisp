@@ -392,7 +392,13 @@ env var if :api-key is omitted. :model accepts any OpenRouter model slug.
          "OpenRouter completion token details")))))
 
 (defun %openrouter-validate-root-metadata! (response)
-  (dolist (key '("id" "object" "model" "system_fingerprint" "provider"))
+  (multiple-value-bind (value present-p) (gethash "id" response)
+    (when (and present-p
+               (not (or (%openrouter-token-string-p
+                         value +openrouter-maximum-identifier-characters+)
+                        (eq value 'null))))
+      (error "OpenRouter metadata field \"id\" is not a bounded identifier.")))
+  (dolist (key '("object" "model" "system_fingerprint" "provider"))
     (multiple-value-bind (value present-p) (gethash key response)
       (when (and present-p (not (or (stringp value) (eq value 'null))))
         (error "OpenRouter metadata field ~S has the wrong type." key))))
