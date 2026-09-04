@@ -103,7 +103,8 @@
 
 (defparameter +pointer-event-keys+
   '(:event :timestamp :candidate-id :pointer :prior-candidate-id
-    :authorizer-did :authorizer-signature :seq :previous-hash :event-hash))
+    :evidence-head :authorizer-did :authorizer-signature
+    :seq :previous-hash :event-hash))
 
 (defparameter +gate-keys+
   '(:candidate-digest-valid
@@ -138,8 +139,15 @@
 (defparameter +maximum-canonical-nodes+ 16384)
 (defparameter +maximum-list-elements+ 4096)
 (defparameter +maximum-string-characters+ 65536)
-(defparameter +maximum-integer-digits+ 20)
+(defparameter +maximum-source-integer+ (1- (expt 10 20)))
+;; Derived decision totals add bounded source metrics.  Thirty-two decimal
+;; digits cover every possible aggregate admitted by the campaign and ledger
+;; ceilings while retaining a finite parser allocation bound.
+(defparameter +maximum-integer-digits+ 32)
+(defparameter +maximum-canonical-integer+
+  (1- (expt 10 +maximum-integer-digits+)))
 (defparameter +maximum-keyword-characters+ 64)
+(defparameter +maximum-held-out-events-per-candidate-campaign+ 256)
 
 (defparameter +persisted-keywords+
   (remove-duplicates
@@ -174,14 +182,17 @@
 (defun ledger-head-path (store)
   (merge-pathnames +ledger-head-file+ (store-root store)))
 
+(defun %ascii-digit-p (character)
+  (and (char>= character #\0) (char<= character #\9)))
+
 (defun %candidate-id-p (value)
   (and (stringp value)
        (<= 1 (length value) 63)
        (let ((first (char value 0)))
-         (or (digit-char-p first)
+         (or (%ascii-digit-p first)
              (and (char>= first #\a) (char<= first #\z))))
        (every (lambda (character)
-                (or (digit-char-p character)
+                (or (%ascii-digit-p character)
                     (and (char>= character #\a) (char<= character #\z))
                     (char= character #\-)))
               value)))
@@ -219,7 +230,7 @@
 
 (defun %control-character-p (character)
   (let ((code (char-code character)))
-    (or (< code 32) (= code 127))))
+    (or (< code 32) (<= #x7f code #x9f))))
 
 (defun %safe-string-p (value &key (nonempty nil) (ascii nil))
   (and (stringp value)
@@ -232,7 +243,7 @@
 (defun %utc-string-p (value)
   (labels ((digits (start end)
              (loop for index from start below end
-                   always (digit-char-p (char value index))))
+                   always (%ascii-digit-p (char value index))))
            (number (start end)
              (parse-integer value :start start :end end)))
     (and (%safe-string-p value :ascii t)
@@ -269,27 +280,73 @@
                       slow (cdr slow))))
            (when (eq slow fast) (return nil))))
 
-(defun %validate-canonical-value (value &optional seen)
-  (cond
-    ((or (null value) (eq value t)) t)
-    ((keywordp value) t)
-    ((integerp value) t)
-    ((stringp value)
-     (unless (%safe-string-p value)
-       (error "Canonical strings cannot contain control characters."))
-     t)
-    ((consp value)
-     (unless (%proper-list-p value)
-       (error "Canonical values require proper, acyclic lists."))
-     (let ((seen (or seen (make-hash-table :test #'eq))))
-       (when (gethash value seen)
-         (error "Canonical values cannot contain cycles."))
-       (setf (gethash value seen) t)
-       (dolist (element value)
-         (%validate-canonical-value element seen))
-       (remhash value seen)
-       t))
-    (t (error "Value ~S is outside the canonical grammar." value))))
+(defun %validate-canonical-value (value &optional state (depth 0))
+  "Validate the in-memory encoder domain with the same finite grammar bounds."
+  (let ((state (or state (vector (make-hash-table :test #'eq) 0))))
+    (when (> depth +maximum-canonical-depth+)
+      (error "Canonical nesting exceeds its depth limit."))
+    (when (> (incf (svref state 1)) +maximum-canonical-nodes+)
+      (error "Canonical form contains too many values."))
+    (cond
+      ((or (null value) (eq value t)) t)
+      ((keywordp value)
+       (unless (and (<= (length (symbol-name value))
+                         +maximum-keyword-characters+)
+                    (member value +persisted-keywords+ :test #'eq))
+         (error "Keyword ~S is outside the persisted schema." value))
+       t)
+      ((integerp value)
+       (when (> (abs value) +maximum-canonical-integer+)
+         (error "Canonical integer exceeds its digit limit."))
+       t)
+      ((stringp value)
+       (unless (and (<= (length value) +maximum-string-characters+)
+                    (%safe-string-p value))
+         (error "Canonical string exceeds its bounds."))
+       t)
+      ((consp value)
+       (let ((seen (svref state 0)) (marked nil) (tail value) (count 0))
+         (unwind-protect
+              (loop
+                (cond
+                  ((null tail) (return t))
+                  ((atom tail)
+                   (error "Canonical values require proper lists.")))
+                (when (gethash tail seen)
+                  (error "Canonical values cannot contain cycles."))
+                (setf (gethash tail seen) t)
+                (push tail marked)
+                (when (> (incf count) +maximum-list-elements+)
+                  (error "Canonical list contains too many elements."))
+                (%validate-canonical-value (car tail) state (1+ depth))
+                (setf tail (cdr tail)))
+           (dolist (cell marked) (remhash cell seen)))))
+      (t (error "Value ~S is outside the canonical grammar." value)))))
+
+(defun %canonical-serialized-octets (value)
+  "Return serialized UTF-8 size, aborting before a combined output allocation."
+  (let ((total 0))
+    (labels ((add (text)
+               (incf total
+                     (length (sb-ext:string-to-octets
+                              text :external-format :utf-8)))
+               (when (> total +maximum-form-octets+)
+                 (error "Canonical form exceeds its UTF-8 octet limit.")))
+             (walk (item)
+               (cond
+                 ((null item) (add "nil"))
+                 ((eq item t) (add "t"))
+                 ((consp item)
+                  (add "(")
+                  (loop for element in item
+                        for first = t then nil
+                        unless first do (add " ")
+                        do (walk element))
+                  (add ")"))
+                 (t (add (with-output-to-string (stream)
+                           (prin1 item stream)))))))
+      (walk value)
+      total)))
 
 (defun %write-canonical-value (value stream)
   ;; T and NIL are emitted explicitly because SBCL qualifies inherited
@@ -310,18 +367,21 @@
 (defun canonical-bytes (value)
   "Return the exact UTF-8 bytes defined by SPEC-014 CON-006."
   (%validate-canonical-value value)
-  (sb-ext:string-to-octets
-   (with-output-to-string (stream)
-     (let ((*package* (find-package :keyword))
-           (*print-base* 10)
-           (*print-radix* nil)
-           (*print-case* :downcase)
-           (*print-pretty* nil)
-           (*print-circle* nil)
-           (*print-escape* t)
-           (*print-readably* t))
-       (%write-canonical-value value stream)))
-   :external-format :utf-8))
+  (let ((*package* (find-package :keyword))
+        (*print-base* 10)
+        (*print-radix* nil)
+        (*print-case* :downcase)
+        (*print-pretty* nil)
+        (*print-circle* nil)
+        (*print-escape* t)
+        (*print-readably* t))
+    (%canonical-serialized-octets value)
+    (let* ((text (with-output-to-string (stream)
+                   (%write-canonical-value value stream)))
+           (bytes (sb-ext:string-to-octets text :external-format :utf-8)))
+      (unless (equal value (%read-one-form-string text "Canonical encoder"))
+        (error "Canonical encoder and recognizer disagree."))
+      bytes)))
 
 (defun %canonical-string (value)
   (sb-ext:octets-to-string (canonical-bytes value) :external-format :utf-8))
@@ -339,7 +399,7 @@
   (and (stringp value)
        (= (length value) 64)
        (every (lambda (character)
-                (or (digit-char-p character)
+                (or (%ascii-digit-p character)
                     (and (char>= character #\a) (char<= character #\f))))
               value)))
 
@@ -347,7 +407,7 @@
   (and (stringp value)
        (= (length value) 128)
        (every (lambda (character)
-                (or (digit-char-p character)
+                (or (%ascii-digit-p character)
                     (and (char>= character #\a) (char<= character #\f))))
               value)))
 
@@ -384,6 +444,10 @@
 
 (defun %nonnegative-integer-p (value)
   (and (integerp value) (not (minusp value))))
+
+(defun %bounded-source-integer-p (value)
+  (and (%nonnegative-integer-p value)
+       (<= value +maximum-source-integer+)))
 
 (defun %sorted-unique-strings-p (value)
   (and (%proper-list-p value)
@@ -490,7 +554,7 @@
   (let ((temporary (%temporary-peer path)))
     (unwind-protect
          (progn
-           (%write-file-string temporary content)
+           (%write-file-string temporary content :if-exists :error)
            (sb-posix:rename (namestring temporary) (namestring path))
            path)
       (when (%path-entry-exists-p temporary)
@@ -505,7 +569,9 @@ schema-derived vocabulary and only the corresponding pre-existing keyword is
 returned."
   (unless (stringp content)
     (error "~A is not textual input." context))
-  (when (> (length content) +maximum-form-octets+)
+  (when (> (length (sb-ext:string-to-octets
+                    content :external-format :utf-8))
+           +maximum-form-octets+)
     (error "~A exceeds the canonical form size limit." context))
   (let ((position 0)
         (length (length content))
@@ -599,7 +665,7 @@ returned."
                  (fail "incomplete integer")))
              (let ((digit-start position))
                (loop while (and (< position length)
-                                (digit-char-p (char content position)))
+                                (%ascii-digit-p (char content position)))
                      do (incf position)
                         (when (> (- position digit-start)
                                  +maximum-integer-digits+)
@@ -630,7 +696,7 @@ returned."
              (incf position (length prefix))
              (let ((digit-start position))
                (loop while (and (< position length)
-                                (digit-char-p (char content position)))
+                                (%ascii-digit-p (char content position)))
                      do (incf position)
                         (when (> (- position digit-start)
                                  +maximum-integer-digits+)
@@ -671,7 +737,7 @@ returned."
                                          (char<= character #\z))
                                     (and (char>= character #\A)
                                          (char<= character #\Z))
-                                    (digit-char-p character)
+                                    (%ascii-digit-p character)
                                     (char= character #\-))))
                    do (incf position)
                       (when (> (- position start)
@@ -710,7 +776,7 @@ returned."
                ((char= character #\") (parse-string-value))
                ((char= character #\#) (parse-base-string-array))
                ((char= character #\:) (parse-keyword-value))
-               ((or (digit-char-p character) (char= character #\-))
+               ((or (%ascii-digit-p character) (char= character #\-))
                 (parse-integer-value))
                ((and (<= (+ position 3) length)
                      (slice-equal-p position (+ position 3) "nil")
@@ -800,8 +866,8 @@ returned."
 (defun %validate-budgets (budgets)
   (%require-keys budgets +budget-keys+ "Candidate budgets")
   (dolist (key +budget-keys+)
-    (unless (%nonnegative-integer-p (getf budgets key))
-      (error "Budget ~S must be a nonnegative integer." key)))
+    (unless (%bounded-source-integer-p (getf budgets key))
+      (error "Budget ~S must be a bounded nonnegative integer." key)))
   budgets)
 
 (defun %basename-p (value)
@@ -934,7 +1000,7 @@ returned."
       (error "Evaluation Boolean ~S is invalid." key)))
   (dolist (key '(:capability-score-micros :duration-ms :input-tokens
                  :output-tokens :estimated-cost-microusd))
-    (unless (%nonnegative-integer-p (getf event key))
+    (unless (%bounded-source-integer-p (getf event key))
       (error "Evaluation metric ~S is invalid." key)))
   (%validate-activation-evidence (getf event :activation-evidence))
   (unless (and (%signature-p (getf event :executor-signature))
@@ -1130,6 +1196,10 @@ returned."
   (let ((prior (getf event :prior-candidate-id)))
     (unless (or (null prior) (%candidate-id-p prior))
       (error "Pointer event prior candidate is invalid.")))
+  (unless (and (%sha256-p (getf event :evidence-head))
+               (string= (getf event :evidence-head)
+                        (getf event :previous-hash)))
+    (error "Pointer authorization must bind the immediately prior ledger head."))
   (unless (and (%did-key-p (getf event :authorizer-did))
                (%signature-p (getf event :authorizer-signature)))
     (error "Pointer authorizer evidence is invalid."))
@@ -1181,6 +1251,18 @@ returned."
 
 (defun %validate-evaluation-ledger-constraints (event prior-events)
   (when (eq (getf event :event) :evaluation)
+    (when (and (eq (getf event :split) :held-out)
+               (>= (count-if
+                    (lambda (prior)
+                      (and (eq (getf prior :event) :evaluation)
+                           (eq (getf prior :split) :held-out)
+                           (string= (getf event :campaign-id)
+                                    (getf prior :campaign-id))
+                           (string= (getf event :candidate-id)
+                                    (getf prior :candidate-id))))
+                    prior-events)
+                   +maximum-held-out-events-per-candidate-campaign+))
+      (error "Held-out campaign exceeds the per-candidate evidence bound."))
     (dolist (prior prior-events)
       (when (eq (getf prior :event) :evaluation)
         (when (string= (getf event :run-id) (getf prior :run-id))
@@ -1202,17 +1284,32 @@ returned."
 
 (defun %make-head (store sequence hash)
   (let* ((payload (%head-payload sequence hash (store-authority-did store)))
-         (signature (%sign-value (store-authority store) payload)))
-    (append payload (list :authority-signature signature))))
+         (signature (%sign-value (store-authority store) payload))
+         (head (append payload (list :authority-signature signature))))
+    ;; Signing is a synchronous precondition, not part of the filesystem
+    ;; commit.  Catch cleared or mismatched private keys before any ledger byte
+    ;; can be appended.
+    (unless (%verify-value (store-authority-did store) payload signature)
+      (error "Store authority cannot produce a self-verifying ledger head."))
+    head))
 
-(defun %write-head (store sequence hash)
+(defun %write-head (store sequence hash &optional prepared-head)
   (%assert-store-root store)
-  (%atomic-write-string
-   (ledger-head-path store)
-   (concatenate 'string
-                (%persisted-form-string
-                 (%make-head store sequence hash) "Generated ledger head")
-                (string #\Newline))))
+  (let ((head (or prepared-head (%make-head store sequence hash))))
+    (unless (and (= sequence (getf head :seq))
+                 (string= hash (getf head :event-hash))
+                 (string= (store-authority-did store)
+                          (getf head :authority-did))
+                 (%verify-value
+                  (getf head :authority-did)
+                  (%without-keys head '(:authority-signature))
+                  (getf head :authority-signature)))
+      (error "Prepared ledger head does not match the requested commit."))
+    (%atomic-write-string
+     (ledger-head-path store)
+     (concatenate 'string
+                  (%persisted-form-string head "Generated ledger head")
+                  (string #\Newline)))))
 
 (defun %read-head-unlocked (store)
   (%assert-store-root store)
@@ -1229,13 +1326,19 @@ returned."
 
 (defun read-ledger-head (store)
   (sb-thread:with-mutex ((store-lock store))
+    ;; The exported observer returns a terminal head only after establishing
+    ;; that the complete ledger prefix actually commits to it.
+    (%read-ledger-unlocked store)
     (%read-head-unlocked store)))
 
 (defun %complete-ledger-lines (content)
   (loop with start = 0
         for newline = (position #\Newline content :start start)
         while newline
-        when (> (- newline start) +maximum-form-octets+)
+        when (> (length (sb-ext:string-to-octets
+                         content :start start :end newline
+                         :external-format :utf-8))
+                +maximum-form-octets+)
           do (error "Ledger event exceeds the canonical form size limit.")
         collect (subseq content start newline)
         do (setf start (1+ newline))))
@@ -1296,23 +1399,41 @@ returned."
         (when (and (eq (getf event :event) :decision)
                    (not (string= (getf event :evidence-head) previous-hash)))
           (error "Decision does not bind the immediately preceding evidence head."))
-        (when (and (eq (getf event :event) :evaluation)
-                   (eq (getf event :split) :held-out))
+        (when (eq (getf event :event) :evaluation)
           (let* ((manifest (%read-manifest-form
                             store (getf event :candidate-id)))
                  (creator (getf manifest :creator-did)))
+            (unless (and (string= (getf event :candidate-id)
+                                  (getf manifest :candidate-id))
+                         (%candidate-freeze-evidence-valid-p
+                          store manifest (reverse events)))
+              (error "Evaluation manifest is not anchored to a prior freeze event."))
             (unless (%manifest-signature-valid-p manifest)
-              (error "Held-out evaluation refers to an unsigned manifest."))
-            (unless (= 3 (length
-                          (remove-duplicates
-                           (list creator
-                                 (getf event :executor-did)
-                                 (getf event :evaluator-did))
-                           :test #'string=)))
-              (error "Held-out ledger roles are not pairwise distinct."))))
+              (error "Evaluation refers to an unsigned manifest."))
+            (when (eq (getf event :split) :held-out)
+              (unless (= 3 (length
+                            (remove-duplicates
+                             (list creator
+                                   (getf event :executor-did)
+                                   (getf event :evaluator-did))
+                             :test #'string=)))
+                (error "Held-out ledger roles are not pairwise distinct.")))))
         (%validate-evaluation-ledger-constraints event events)
         (unless (%verify-event-actors store event)
           (error "Ledger actor signature verification failed."))
+        (when (eq (getf event :event) :freeze)
+          ;; Every freeze is a durable reference to its immutable manifest,
+          ;; even when no held-out evaluation or decision exists yet.
+          (%require-anchored-candidate-context
+           store (getf event :candidate-id) (cons event events)))
+        ;; Decisions are caches of facts derived from their signed prefix, not
+        ;; new sources of truth.  Recompute every derived field while replaying
+        ;; the ledger.  The two digest gates are point-in-time attestations: a
+        ;; later image mutation must not make history unreadable (and is still
+        ;; checked afresh by promotion).
+        (when (eq (getf event :event) :decision)
+          (%validate-decision-against-events
+           store event (reverse events) :historical-p t))
         (push event events)
         (setf previous-hash (getf event :event-hash))
         (incf expected-sequence)))
@@ -1348,23 +1469,36 @@ returned."
     (%validate-evaluation-ledger-constraints event events)
     (unless (%verify-event-actors store event)
       (error "Refusing to append an event with invalid actor evidence."))
-    ;; Establish parser round-trip before pruning or writing anything.  A
-    ;; caller-supplied exotic string representation cannot poison the store.
-    (let* ((event-text (%persisted-form-string event "Generated ledger event"))
+    ;; Establish both signatures and parser round-trips before pruning or
+    ;; writing anything.  A caller-supplied exotic form or an unavailable
+    ;; authority key cannot leave the ledger ahead of its signed head.
+    (let* ((prospective-head
+             (%make-head store sequence (getf event :event-hash)))
+           (event-text (%persisted-form-string event "Generated ledger event"))
            (ledger (ledger-path store))
            (content (%read-file-string
                      ledger :maximum-octets +maximum-ledger-octets+))
            (last-newline (position #\Newline content :from-end t))
-           (complete-end (if last-newline (1+ last-newline) 0)))
+           (complete-end (if last-newline (1+ last-newline) 0))
+           (complete-prefix (subseq content 0 complete-end))
+           (projected-octets
+             (+ (length (sb-ext:string-to-octets
+                         complete-prefix :external-format :utf-8))
+                (length (sb-ext:string-to-octets
+                         event-text :external-format :utf-8))
+                1)))
+      (when (> projected-octets +maximum-ledger-octets+)
+        (error "Ledger append would exceed the ~D-octet recognition ceiling."
+               +maximum-ledger-octets+))
       ;; A crash may leave an incomplete, unsigned final fragment.  Readers
       ;; ignore it by contract; remove only that fragment before the next append.
       (unless (= complete-end (length content))
-        (%atomic-write-string ledger (subseq content 0 complete-end)))
+        (%atomic-write-string ledger complete-prefix))
       (%write-file-string
        ledger
        (concatenate 'string event-text (string #\Newline))
-       :if-exists :append))
-    (%write-head store sequence (getf event :event-hash))
+       :if-exists :append)
+      (%write-head store sequence (getf event :event-hash) prospective-head))
     event))
 
 ;; ------------------------------------------------------------ lifecycle ---
@@ -1377,11 +1511,11 @@ returned."
       (error "~A roster contains invalid DID ~S." name did)))
   (unless (= (length roster) (length (remove-duplicates roster :test #'string=)))
     (error "~A roster contains duplicates." name))
-  (copy-list roster))
+  (mapcar #'copy-seq roster))
 
 (defun open-evolution-store (path &key authority trusted-executors
                                        trusted-evaluators trusted-authorizers)
-  (let* ((authority-did (%identity-did authority))
+  (let* ((authority-did (copy-seq (%identity-did authority)))
          (executors (%validate-roster trusted-executors "Executor"))
          (evaluators (%validate-roster trusted-evaluators "Evaluator"))
          (authorizers (%validate-roster trusted-authorizers "Authorizer")))
@@ -1399,35 +1533,36 @@ returned."
                                  :authority-did authority-did
                                  :trusted-executors executors
                                  :trusted-evaluators evaluators
-                                 :trusted-authorizers authorizers)))
+                                 :trusted-authorizers authorizers))
+           (root-entry (string-right-trim "/" (namestring root)))
+           (root-exists (%path-entry-exists-p root-entry)))
       ;; Reject a pre-existing symlink before any managed path can be opened.
-      ;; If the root is absent, create it and immediately lstat the resulting
-      ;; entry.  Races with a hostile OS peer are outside the process boundary.
-      (let ((root-entry (string-right-trim "/" (namestring root))))
-        (if (%path-entry-exists-p root-entry)
-            (unless (%directory-entry-p root-entry)
-              (error "Evolution store root must be a real directory."))
-            (ensure-directories-exist (merge-pathnames "anchor" root))))
-      (%assert-store-root store)
-      (dolist (relative '("candidates/" "pointers/"))
-        (let* ((managed (merge-pathnames relative root))
-               (entry (string-right-trim "/" (namestring managed))))
-          (cond
-            ((%path-entry-exists-p entry)
-             (unless (%directory-entry-p entry)
-               (error "Managed evolution directory ~A is symlinked or invalid."
-                      managed)))
-            (t (sb-posix:mkdir entry #o700)))))
-      (%assert-managed-directory store "candidates/")
-      (%assert-managed-directory store "pointers/")
+      (when (and root-exists (not (%directory-entry-p root-entry)))
+        (error "Evolution store root must be a real directory."))
       (let ((ledger-exists (%path-entry-exists-p (ledger-path store)))
             (head-exists (%path-entry-exists-p (ledger-head-path store))))
-        (cond
-          ((and (null ledger-exists) (null head-exists))
-           (%write-file-string (ledger-path store) "")
-           (%write-head store 0 +zero-sha256+))
-          ((not (and ledger-exists head-exists))
-           (error "Evolution store has only one ledger component."))))
+        (when (not (eq (not (null ledger-exists)) (not (null head-exists))))
+          (error "Evolution store has only one ledger component."))
+        ;; For a fresh store, signature construction and self-verification
+        ;; precede even directory creation.
+        (let ((initial-head
+                (unless ledger-exists (%make-head store 0 +zero-sha256+))))
+          (unless root-exists
+            (ensure-directories-exist (merge-pathnames "anchor" root)))
+          (%assert-store-root store)
+          (dolist (relative '("candidates/" "pointers/"))
+            (let* ((managed (merge-pathnames relative root))
+                   (entry (string-right-trim "/" (namestring managed))))
+              (cond
+                ((%path-entry-exists-p entry)
+                 (unless (%directory-entry-p entry)
+                   (error "Managed evolution directory ~A is invalid." managed)))
+                (t (sb-posix:mkdir entry #o700)))))
+          (%assert-managed-directory store "candidates/")
+          (%assert-managed-directory store "pointers/")
+          (when initial-head
+            (%write-file-string (ledger-path store) "")
+            (%write-head store 0 +zero-sha256+ initial-head))))
       (unless (and (%regular-file-p (ledger-path store))
                    (%regular-file-p (ledger-head-path store)))
         (error "Evolution ledger components must be regular files."))
@@ -1497,7 +1632,8 @@ returned."
           store (first candidate-events) manifest))))
 
 (defun %verify-candidate-internal (store candidate-id seen events
-                                   require-freeze-evidence-p)
+                                   require-freeze-evidence-p
+                                   &optional image-digest-exemption-id)
   (when (member candidate-id seen :test #'string=)
     (error "Candidate lineage contains a cycle."))
   (let* ((manifest (read-candidate-manifest store candidate-id))
@@ -1511,7 +1647,9 @@ returned."
      (or (not require-freeze-evidence-p)
          (%candidate-freeze-evidence-valid-p store manifest events))
      (%regular-file-p image-path)
-     (string= (%sha256-file image-path) (getf manifest :image-sha256))
+     (or (and image-digest-exemption-id
+              (string= candidate-id image-digest-exemption-id))
+         (string= (%sha256-file image-path) (getf manifest :image-sha256)))
      (let ((parent (getf manifest :parent-id)))
        (if (null parent)
            (null (getf manifest :parent-image-sha256))
@@ -1521,10 +1659,16 @@ returned."
                   (%verify-candidate-internal store parent
                                               (cons candidate-id seen)
                                               events
-                                              require-freeze-evidence-p))))))))
+                                              require-freeze-evidence-p
+                                              image-digest-exemption-id))))))))
 
 (defun %verify-candidate-with-events (store candidate-id events)
   (%verify-candidate-internal store candidate-id nil events t))
+
+(defun %verify-rollback-candidate (store prior-id current-id events)
+  ;; CURRENT may occur in PRIOR's ancestor chain.  Keep all manifest, freeze,
+  ;; lineage, and file-type checks, but exempt exactly CURRENT's image digest.
+  (%verify-candidate-internal store prior-id nil events t current-id))
 
 (defun %verify-candidate-files (store candidate-id)
   ;; Used only after a new immutable directory is fully materialized but
@@ -1585,6 +1729,10 @@ returned."
   (let ((creator-did (%identity-did creator)))
     (sb-thread:with-mutex ((store-lock store))
       (let ((events (%read-ledger-unlocked store)))
+        ;; Candidate materialization precedes its freeze event, so establish
+        ;; that the authority can sign a self-verifying head before copying any
+        ;; image or manifest bytes.
+        (%make-head store 0 +zero-sha256+)
         (when parent-id
           (unless (and (%verify-candidate-with-events store parent-id events)
                        (string= parent-image-sha256
@@ -1627,6 +1775,8 @@ returned."
                  (append (subseq unsigned-manifest 0 14)
                          (list :creator-signature signature)
                          (nthcdr 14 unsigned-manifest)))
+               (manifest-text
+                 (%persisted-form-string manifest "Generated candidate manifest"))
                (directory (candidate-directory store candidate-id))
                (directory-name (string-right-trim "/" (namestring directory)))
                (created-directory nil))
@@ -1652,10 +1802,7 @@ returned."
                      (error "Source image changed while the candidate was copied.")))
                  (%atomic-write-string
                   (merge-pathnames +manifest-file+ directory)
-                  (concatenate 'string
-                               (%persisted-form-string
-                                manifest "Generated candidate manifest")
-                               (string #\Newline)))
+                  (concatenate 'string manifest-text (string #\Newline)))
                  (unless (%verify-candidate-files store candidate-id)
                    (error "Materialized candidate failed pre-freeze verification."))
                  (let* ((event-payload
@@ -1725,7 +1872,7 @@ returned."
                       (cons :input-tokens input-tokens)
                       (cons :output-tokens output-tokens)
                       (cons :estimated-cost-microusd estimated-cost-microusd)))
-    (unless (%nonnegative-integer-p (cdr pair))
+    (unless (%bounded-source-integer-p (cdr pair))
       (error "Evaluation field ~S must be nonnegative." (car pair))))
   (%validate-activation-evidence activation-evidence)
   (let ((executor-did (%trusted-identity-did
@@ -1941,6 +2088,30 @@ returned."
                   store candidate-id ledger-events)))
     (error () nil)))
 
+(defun %require-anchored-candidate-context (store candidate-id events
+                                            &optional seen)
+  (when (member candidate-id seen :test #'string=)
+    (error "Candidate history contains a lineage cycle."))
+  (let* ((manifest (read-candidate-manifest store candidate-id))
+         (unsigned (%without-keys manifest '(:creator-signature))))
+    (unless (and (string= candidate-id (getf manifest :candidate-id))
+                 (string= candidate-id (%candidate-id-for-manifest manifest))
+                 (%verify-value (getf manifest :creator-did) unsigned
+                                (getf manifest :creator-signature))
+                 (%candidate-freeze-evidence-valid-p store manifest events))
+      (error "Candidate ~A lacks its anchored signed freeze context."
+             candidate-id))
+    (let ((parent (getf manifest :parent-id)))
+      (when parent
+        (let ((parent-manifest
+                (%require-anchored-candidate-context
+                 store parent events (cons candidate-id seen))))
+          (unless (string= (getf manifest :parent-image-sha256)
+                           (getf parent-manifest :image-sha256))
+            (error "Candidate ~A has inconsistent historical lineage."
+                   candidate-id)))))
+    manifest))
+
 (defun %single-evaluation-plan-context-p (events)
   (and events
        (= 1 (length
@@ -1996,11 +2167,16 @@ returned."
                         minimum-executors minimum-delta maximum-token-increase
                         maximum-cost-increase authorizer-did replicate-deltas
                         conservative-delta executor-deltas token-delta cost-delta
-                        trusted-authorizer-signature-p)
+                        trusted-authorizer-signature-p
+                        &optional historical-digest-gates)
   (let* ((candidate-valid
-           (%candidate-valid-p store candidate-id ledger-events))
+           (if historical-digest-gates
+               (getf historical-digest-gates :candidate-digest-valid)
+               (%candidate-valid-p store candidate-id ledger-events)))
          (baseline-valid
-           (%candidate-valid-p store baseline-id ledger-events))
+           (if historical-digest-gates
+               (getf historical-digest-gates :baseline-digest-valid)
+               (%candidate-valid-p store baseline-id ledger-events)))
          (selected (append baseline-events candidate-events)))
     (list
       :candidate-digest-valid candidate-valid
@@ -2097,7 +2273,8 @@ returned."
 (defun %decision-analysis (store baseline-id candidate-id campaign-id events
                            minimum-repetitions minimum-executors minimum-delta
                            maximum-token-increase maximum-cost-increase
-                           authorizer-did trusted-authorizer-signature-p)
+                           authorizer-did trusted-authorizer-signature-p
+                           &optional historical-digest-gates)
   (let* ((held-out (%held-out-comparison-events
                     events campaign-id baseline-id candidate-id))
          (baseline-events (%candidate-events held-out baseline-id))
@@ -2135,16 +2312,13 @@ returned."
             minimum-repetitions minimum-executors minimum-delta
             maximum-token-increase maximum-cost-increase authorizer-did
             replicate-deltas conservative-delta executor-deltas token-delta
-            cost-delta trusted-authorizer-signature-p))
+            cost-delta trusted-authorizer-signature-p historical-digest-gates))
          (failed-gates
            (loop for (key value) on gates by #'cddr
                  unless value collect key))
          (development-cost
-           (if (%candidate-valid-p store candidate-id events)
-               (getf (getf (read-candidate-manifest store candidate-id)
-                           :budgets)
-                     :development-cost-microusd)
-               0)))
+           (getf (getf (read-candidate-manifest store candidate-id) :budgets)
+                 :development-cost-microusd)))
     (list :gates gates
           :failed-gates failed-gates
           :baseline-capability-mean-micros baseline-mean
@@ -2166,8 +2340,13 @@ returned."
           :development-cost-microusd development-cost
           :eligible-p (null failed-gates))))
 
-(defun %validate-decision-against-events (store decision prior-events)
+(defun %validate-decision-against-events (store decision prior-events
+                                          &key historical-p)
   (%validate-decision-event decision)
+  (%require-anchored-candidate-context
+   store (getf decision :baseline-id) prior-events)
+  (%require-anchored-candidate-context
+   store (getf decision :candidate-id) prior-events)
   (let ((expected
           (%decision-analysis
            store (getf decision :baseline-id) (getf decision :candidate-id)
@@ -2178,7 +2357,8 @@ returned."
            (getf decision :maximum-execution-token-increase)
            (getf decision :maximum-runtime-cost-increase-microusd)
            (getf decision :authorizer-did)
-           (%verify-event-actors store decision))))
+           (%verify-event-actors store decision)
+           (and historical-p (getf decision :gates)))))
     (dolist (key +decision-derived-keys+)
       (unless (equal (getf decision key) (getf expected key))
         (error "Decision field ~S does not match its signed evidence prefix."
@@ -2218,6 +2398,12 @@ returned."
                                  "Authorizer")))
     (sb-thread:with-mutex ((store-lock store))
       (let* ((events (%read-ledger-unlocked store))
+             (baseline-manifest
+               (%require-anchored-candidate-context
+                store baseline-id events))
+             (candidate-manifest
+               (%require-anchored-candidate-context
+                store candidate-id events))
              (head (if events
                        (getf (car (last events)) :event-hash)
                        +zero-sha256+))
@@ -2250,6 +2436,7 @@ returned."
              (signature (%sign-value authorizer payload))
              (actor-event
                (append payload (list :authorization-signature signature))))
+        (declare (ignore baseline-manifest candidate-manifest))
         (%append-event-unlocked store actor-event events)))))
 
 ;; -------------------------------------------------------------- pointers ---
@@ -2269,14 +2456,16 @@ returned."
       (%validate-pointer-form
        (%read-one-form-file path "Evolution pointer") keyword))))
 
+(defun %latest-pointer-event (pointer events)
+  (loop with latest = nil
+        for event in events
+        when (and (member (getf event :event) '(:promotion :rollback))
+                  (eq (getf event :pointer) pointer))
+          do (setf latest event)
+        finally (return latest)))
+
 (defun %pointer-corresponds-to-events-p (form events)
-  (let ((latest
-          (loop with latest = nil
-                for event in events
-                when (and (member (getf event :event) '(:promotion :rollback))
-                          (eq (getf event :pointer) (getf form :pointer)))
-                  do (setf latest event)
-                finally (return latest))))
+  (let ((latest (%latest-pointer-event (getf form :pointer) events)))
     (and latest
          (string= (getf latest :event-hash) (getf form :event-hash))
          (eq (getf latest :pointer) (getf form :pointer))
@@ -2291,10 +2480,14 @@ returned."
     ;; success; this observer has no repair or write path.
     (let ((events (%read-ledger-unlocked store))
           (form (%read-pointer-form store pointer)))
-      (when form
-        (unless (%pointer-corresponds-to-events-p form events)
-          (error "Pointer does not correspond to latest signed ledger evidence."))
-        (getf form :candidate-id)))))
+      (cond
+        (form
+         (unless (%pointer-corresponds-to-events-p form events)
+           (error "Pointer does not correspond to latest signed ledger evidence."))
+         (getf form :candidate-id))
+        ((%latest-pointer-event (%pointer-keyword pointer) events)
+         (error "Signed pointer evidence exists but its pointer file is absent."))
+        (t nil)))))
 
 (defun %write-pointer (store pointer candidate-id prior-id event-hash)
   (%atomic-write-string
@@ -2341,16 +2534,24 @@ returned."
           (error "Promotion candidate or baseline no longer verifies."))
         (let* ((prior-form (%read-pointer-form store pointer))
                (prior
-                 (when prior-form
-                   (unless (%pointer-corresponds-to-events-p prior-form events)
-                     (error "Pointer does not correspond to latest signed ledger evidence."))
-                   (getf prior-form :candidate-id)))
-               (payload
+                 (cond
+                   (prior-form
+                    (unless (%pointer-corresponds-to-events-p prior-form events)
+                      (error "Pointer does not correspond to latest signed ledger evidence."))
+                   (getf prior-form :candidate-id))
+                   ((%latest-pointer-event pointer events)
+                    (error "Signed pointer evidence exists but its pointer file is absent."))
+                   (t nil))))
+          (when (and prior
+                     (string= prior (getf decision :candidate-id)))
+            (error "A promotion must change the selected candidate."))
+          (let* ((payload
                  (list :event :promotion
                        :timestamp (anuna-imago:iso-8601-now)
                        :candidate-id (getf decision :candidate-id)
                        :pointer pointer
                        :prior-candidate-id prior
+                       :evidence-head (getf last-event :event-hash)
                        :authorizer-did authorizer-did))
                (signature (%sign-value authorizer payload))
                (event (%append-event-unlocked
@@ -2359,7 +2560,7 @@ returned."
                        events)))
           (%write-pointer store pointer (getf decision :candidate-id) prior
                           (getf event :event-hash))
-          event)))))
+          event))))))
 
 (defun rollback-pointer! (store pointer &key authorizer)
   (let* ((pointer (%pointer-keyword pointer))
@@ -2374,8 +2575,10 @@ returned."
               (prior (getf form :prior-candidate-id)))
           (unless prior
             (error "Pointer ~S has no recorded prior candidate." pointer))
-          (unless (and (%verify-candidate-with-events store current events)
-                       (%verify-candidate-with-events store prior events))
+          ;; Rollback is the recovery path for a corrupt current image.  The
+          ;; signed pointer and ledger establish CURRENT; only the recovery
+          ;; target must still pass present-time candidate verification.
+          (unless (%verify-rollback-candidate store prior current events)
             (error "Rollback candidate verification failed."))
           (let* ((payload
                    (list :event :rollback
@@ -2383,6 +2586,10 @@ returned."
                          :candidate-id prior
                          :pointer pointer
                          :prior-candidate-id current
+                         :evidence-head
+                         (if events
+                             (getf (car (last events)) :event-hash)
+                             +zero-sha256+)
                          :authorizer-did authorizer-did))
                  (signature (%sign-value authorizer payload))
                  (event (%append-event-unlocked

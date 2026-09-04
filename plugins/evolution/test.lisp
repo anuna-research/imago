@@ -15,6 +15,7 @@
 (defvar *evolution-reader-attack-fired* nil)
 
 (defparameter +evolution-fixed-time+ "2026-09-04T00:00:00Z")
+(defparameter +evolution-zero-sha256+ (make-string 64 :initial-element #\0))
 (defparameter +evolution-sha-a+ (make-string 64 :initial-element #\a))
 (defparameter +evolution-sha-b+ (make-string 64 :initial-element #\b))
 (defparameter +evolution-sha-c+ (make-string 64 :initial-element #\c))
@@ -149,17 +150,10 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
 (defun %write-form (path form &key (trailing-newline t))
   (%write-string
    path
-   (with-output-to-string (stream)
-     (let ((*package* (find-package :keyword))
-           (*print-base* 10)
-           (*print-radix* nil)
-           (*print-case* :downcase)
-           (*print-pretty* nil)
-           (*print-circle* nil)
-           (*print-escape* t)
-           (*print-readably* t))
-       (prin1 form stream)
-       (when trailing-newline (terpri stream))))))
+   (concatenate
+    'string
+    (funcall (%evo-function "%CANONICAL-STRING") form)
+    (if trailing-newline (string #\Newline) ""))))
 
 (defun %plist-without (plist key)
   (loop for (candidate-key value) on plist by #'cddr
@@ -181,11 +175,14 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                collect (symbol-name symbol))
          #'string<)))
 
+(defun %ascii-digit-p (character)
+  (and (char>= character #\0) (char<= character #\9)))
+
 (defun %valid-sha256-p (value)
   (and (stringp value)
        (= 64 (length value))
        (every (lambda (character)
-                (or (digit-char-p character)
+                (or (%ascii-digit-p character)
                     (find character "abcdef" :test #'char=)))
               value)))
 
@@ -193,17 +190,17 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
   (and (stringp value)
        (= 128 (length value))
        (every (lambda (character)
-                (or (digit-char-p character)
+                (or (%ascii-digit-p character)
                     (find character "abcdef" :test #'char=)))
               value)))
 
 (defun %valid-candidate-id-p (value)
   (and (stringp value)
        (<= 1 (length value) 63)
-       (or (digit-char-p (char value 0))
+       (or (%ascii-digit-p (char value 0))
            (find (char value 0) "abcdefghijklmnopqrstuvwxyz" :test #'char=))
        (every (lambda (character)
-                (or (digit-char-p character)
+                (or (%ascii-digit-p character)
                     (find character "abcdefghijklmnopqrstuvwxyz-" :test #'char=)))
               value)))
 
@@ -520,11 +517,200 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
        (check (equalp manifest-before (%read-octets manifest-path)))
        (check (equalp ledger-before (%read-octets (%evo-call "LEDGER-PATH" store-a)))
               "a collision leaves the ledger prefix unchanged")
+       (let* ((oversized-arguments (copy-tree arguments))
+              (wide-components
+                (loop for index below 4096
+                      collect (format nil "component-~4,'0D-~A" index
+                                      (make-string 256
+                                                   :initial-element #\x))))
+              (candidate-root (merge-pathnames "candidates/"
+                                               (%evo-call "STORE-ROOT" store-a)))
+              (entries-before
+                (append (uiop:directory-files candidate-root)
+                        (uiop:subdirectories candidate-root)))
+              (head-before (%read-octets (%evo-call "LEDGER-HEAD-PATH"
+                                                    store-a))))
+         (setf (getf oversized-arguments :changed-components) wide-components)
+         (check (%signals-error-p
+                 (lambda ()
+                   (%freeze store-a source (%actor actors :creator)
+                            :arguments oversized-arguments)))
+                "an oversized semantic manifest fails bounded recognition")
+         (check (equal entries-before
+                       (append (uiop:directory-files candidate-root)
+                               (uiop:subdirectories candidate-root)))
+                "manifest recognition precedes candidate directory creation")
+         (check (equalp ledger-before
+                        (%read-octets (%evo-call "LEDGER-PATH" store-a))))
+         (check (equalp head-before
+                        (%read-octets (%evo-call "LEDGER-HEAD-PATH" store-a)))
+                "oversized manifest rejection preserves ledger and head"))
        (%write-octets source #(9 9 9))
        (check (equalp copy-before (%read-octets copy-path))
               "later source mutation cannot alter frozen bytes")
        (%close-test-store store-a)
        (%close-test-store store-b)))))
+
+(defun test-evolution-ledger-size-preflight ()
+  "TEST-056: an append cannot cross the store's own recognition ceiling."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let* ((actors (%make-actors))
+            (store (%open-test-store (merge-pathnames "store/" directory)
+                                     actors))
+            (image (%make-image directory "bounded.core" #(1 2 3)))
+            (ledger-path (%evo-call "LEDGER-PATH" store))
+            (head-path (%evo-call "LEDGER-HEAD-PATH" store))
+            (ledger-before (%read-string ledger-path))
+            (head-before (%read-string head-path))
+            (limit-symbol
+              (find-symbol "+MAXIMUM-LEDGER-OCTETS+"
+                           "ANUNA-IMAGO.EVOLUTION")))
+       (check (%signals-error-p
+               (lambda ()
+                 (progv (list limit-symbol) (list 1)
+                   (%freeze store image (%actor actors :creator)))))
+              "projected oversized append is rejected before persistence")
+       (check (string= ledger-before (%read-string ledger-path))
+              "oversized append leaves ledger bytes unchanged")
+       (check (string= head-before (%read-string head-path))
+              "oversized append leaves signed head unchanged")
+       (%close-test-store store)))))
+
+(defun test-evolution-rejects-unicode-control-strings ()
+  "TEST-057: canonical strings reject Unicode C1 control characters."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let* ((actors (%make-actors))
+            (store (%open-test-store (merge-pathnames "store/" directory)
+                                     actors))
+            (image (%make-image directory "c1.core" #(4 5 6)))
+            (arguments (%base-freeze-arguments (%actor actors :creator)))
+            (c1-string (format nil "component~Cname" (code-char #x85))))
+       (setf (getf arguments :changed-components) (list c1-string))
+       (check (%signals-error-p
+               (lambda ()
+                 (%freeze store image (%actor actors :creator)
+                          :arguments arguments)))
+              "U+0085 is rejected from canonical signed strings")
+       (%close-test-store store)))))
+
+(defun test-evolution-authority-signing-preflight ()
+  "TEST-060: authority signing failures precede every persistent mutation."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let* ((bad-actors (%make-actors))
+            (fresh-root (merge-pathnames "fresh-signing-failure/" directory))
+            (fresh-ledger (merge-pathnames "ledger.sexp" fresh-root))
+            (fresh-head (merge-pathnames "ledger.head" fresh-root)))
+       (clear-identity-private-key! (%actor bad-actors :authority))
+       (check (%signals-error-p
+               (lambda () (%open-test-store fresh-root bad-actors)))
+              "fresh-store signing failure is reported synchronously")
+       (check (null (probe-file fresh-root))
+              "fresh-store signing failure creates no store directory")
+       (check (null (probe-file fresh-ledger))
+              "fresh-store failure creates no ledger component")
+       (check (null (probe-file fresh-head))
+              "fresh-store failure creates no head component"))
+     (let* ((actors (%make-actors))
+            (existing-root (merge-pathnames "existing/" directory))
+            (store (%open-test-store existing-root actors))
+            (image (%make-image directory "wrong-authority.core" #(7 8 9)))
+            (candidate-root (merge-pathnames "candidates/" existing-root))
+            (candidate-entries-before
+              (append (uiop:directory-files candidate-root)
+                      (uiop:subdirectories candidate-root)))
+            (ledger-path (%evo-call "LEDGER-PATH" store))
+            (head-path (%evo-call "LEDGER-HEAD-PATH" store))
+            (ledger-before (%read-string ledger-path))
+            (head-before (%read-string head-path))
+            (authority (%actor actors :authority))
+            (wrong (generate-identity)))
+       (setf (identity-private-key authority) (identity-private-key wrong))
+       (check (%signals-error-p
+               (lambda () (%freeze store image (%actor actors :creator))))
+              "a private key that does not match the authority DID is rejected")
+       (check (string= ledger-before (%read-string ledger-path))
+              "failed append leaves ledger bytes unchanged")
+       (check (string= head-before (%read-string head-path))
+              "failed append leaves head bytes unchanged")
+       (check (equal candidate-entries-before
+                     (append (uiop:directory-files candidate-root)
+                             (uiop:subdirectories candidate-root)))
+              "authority preflight precedes candidate materialization")
+       (%close-test-store store)))))
+
+(defun test-evolution-aggregate-serialization-bounds ()
+  "TEST-062: admitted evidence remains serializable as a derived decision."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors))
+           (maximum (1- (expt 10 20))))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         (loop for index from 1 to 3
+               for executor = (if (oddp index) :executor-1 :executor-2)
+               for evaluator = (if (oddp index) :evaluator-1 :evaluator-2)
+               do (%record-evaluation
+                   store actors baseline-id (format nil "aggregate-b~D" index)
+                   "aggregate-task" (- maximum 2)
+                   :campaign-id "aggregate" :replicate-index index
+                   :executor executor :evaluator evaluator
+                   :duration-ms maximum :input-tokens maximum
+                   :output-tokens maximum :cost maximum)
+                  (%record-evaluation
+                   store actors candidate-id (format nil "aggregate-c~D" index)
+                   "aggregate-task" (- maximum 1)
+                   :campaign-id "aggregate" :replicate-index index
+                   :executor executor :evaluator evaluator
+                   :duration-ms maximum :input-tokens maximum
+                   :output-tokens maximum :cost maximum))
+         (let ((decision
+                 (%make-decision store baseline-id candidate-id
+                                 (%actor actors :authorizer)
+                                 :campaign-id "aggregate"
+                                 :minimum-capability-delta-micros 1)))
+           (check (> (getf decision :candidate-execution-tokens-total)
+                     maximum)
+                  "derived totals may exceed the source-field digit width")
+           (check (equal decision (car (last (%evo-call "READ-LEDGER" store))))
+                  "large derived totals round-trip through the ledger grammar"))
+         (let ((count-before (length (%evo-call "READ-LEDGER" store))))
+           (check (%signals-error-p
+                   (lambda ()
+                     (%record-evaluation
+                      store actors candidate-id "aggregate-too-large"
+                      "aggregate-other" (expt 10 20)
+                      :campaign-id "aggregate-other" :split :development)))
+                  "a 21-digit source metric is rejected")
+           (check (= count-before (length (%evo-call "READ-LEDGER" store)))))
+         (%close-test-store store)))
+     ;; Exercise the exact campaign cardinality boundary without manufacturing
+     ;; hundreds of signatures and files: this private recognizer is also run
+     ;; for every append and every ledger replay.
+     (let* ((validate
+              (%evo-function "%VALIDATE-EVALUATION-LEDGER-CONSTRAINTS"))
+            (prior
+              (loop for index below 256
+                    collect (list :event :evaluation :split :held-out
+                                  :candidate-id "c-bounded"
+                                  :campaign-id "bounded-campaign"
+                                  :run-id (format nil "bounded-~D" index)
+                                  :benchmark-id "bounded-benchmark"
+                                  :task-id (format nil "task-~D" index))))
+            (event (list :event :evaluation :split :held-out
+                         :candidate-id "c-bounded"
+                         :campaign-id "bounded-campaign"
+                         :run-id "bounded-next"
+                         :benchmark-id "bounded-benchmark"
+                         :task-id "task-next")))
+       (check (funcall validate event (subseq prior 0 255))
+              "the 256th held-out row is admitted")
+       (check (%signals-error-p (lambda () (funcall validate event prior)))
+              "the 257th held-out row is rejected")))))
 
 (defun test-evolution-freeze-surface-and-symlink-scope ()
   (%call-with-evolution-directory
@@ -686,6 +872,36 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
               (check (%signals-error-p
                       (lambda () (%evo-call "READ-POINTER" store :canary)))
                      "a symlinked pointer leaf is rejected")))
+           ;; A predictable temporary-name collision must use exclusive
+           ;; creation.  Otherwise a regular hard link could redirect the
+           ;; pre-rename write into an operator file outside the store.
+           (let* ((outside (merge-pathnames "outside-hardlink" directory))
+                  (outside-before "outside-bytes-must-survive")
+                  (seed (sb-ext:seed-random-state 26014))
+                  (prediction (make-random-state seed))
+                  (suffix (random 1000000000 prediction))
+                  (now (get-universal-time))
+                  (peers
+                    (loop for delta from -1 to 3
+                          collect
+                          (parse-namestring
+                           (format nil "~A.tmp-~D-~D"
+                                   (namestring pointer) (+ now delta) suffix)))))
+             (%write-string outside outside-before)
+             (unwind-protect
+                  (progn
+                    (dolist (peer peers)
+                      (sb-posix:link (namestring outside) (namestring peer)))
+                    (let ((*random-state* (make-random-state seed)))
+                      (check (%signals-error-p
+                              (lambda ()
+                                (%evo-call "%ATOMIC-WRITE-STRING"
+                                           pointer "replacement")))
+                             "a pre-existing atomic temp peer is rejected"))
+                    (check (string= outside-before (%read-string outside))
+                           "temp-peer collision cannot overwrite hardlinked outside bytes"))
+               (dolist (peer peers)
+                 (when (probe-file peer) (ignore-errors (delete-file peer))))))
            (check (equalp ledger-before (%read-octets ledger)))
            (check (equalp head-before (%read-octets head)))
            (check (equalp manifest-before (%read-octets manifest)))
@@ -937,7 +1153,9 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
             :development-cost-microusd 12
             :eligible-p t
             :authorizer-did ,+evolution-fixture-did+))
-        (head `(:seq 7 :event-hash ,+evolution-sha-c+)))
+        (head `(:seq 7
+                :event-hash ,+evolution-sha-c+
+                :authority-did ,+evolution-fixture-did+)))
     (list
      (list :manifest manifest
            "(:version 1 :candidate-id \"c-fixed\" :parent-id nil :parent-image-sha256 nil :image-file \"agent.core\" :image-sha256 \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" :creator-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\" :created-at \"2026-09-04T00:00:00Z\" :theory-fingerprint \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" :prompt-schema-sha256 \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" :tool-schema-sha256 \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\" :changed-components (\"prompt/system\") :budgets (:development-cost-microusd 12 :wall-time-ms 34 :input-tokens 56 :output-tokens 78) :activation-evidence (\"prompt/system:sha256:aa\"))"
@@ -949,8 +1167,8 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
            "(:event :decision :timestamp \"2026-09-04T00:00:00Z\" :candidate-id \"c-fixed\" :baseline-id \"b-fixed\" :campaign-id \"campaign-fixed\" :evidence-head \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" :minimum-held-out-repetitions 3 :minimum-distinct-executors 2 :minimum-capability-delta-micros 1 :maximum-execution-token-increase 0 :maximum-runtime-cost-increase-microusd 0 :gates (:candidate-digest-valid t :baseline-digest-valid t :comparison-cells-match t :candidate-cells-unique t :single-evaluation-plan-context t :replicate-templates-match t :minimum-held-out-repetitions-met t :minimum-distinct-executors-met t :correctness-retained t :changed-components-activated t :runs-complete t :creator-evaluator-separated t :roles-pairwise-distinct t :trusted-actor-signatures t :replicate-capability-delta-met t :per-executor-config-capability-delta-met t :execution-token-increase-within-limit t :runtime-cost-increase-within-limit t :authorizer-rosters-disjoint t :authorizer-creators-separated t :trusted-authorizer-signature t) :failed-gates nil :baseline-capability-mean-micros 500000 :candidate-capability-mean-micros 750000 :capability-delta-micros 250000 :replicate-capability-deltas ((:replicate-index 1 :baseline-capability-mean-micros 500000 :candidate-capability-mean-micros 750000 :capability-delta-micros 250000)) :conservative-capability-delta-micros 250000 :executor-capability-deltas ((:executor-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\" :executor-config-sha256 \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" :baseline-capability-mean-micros 500000 :candidate-capability-mean-micros 750000 :capability-delta-micros 250000)) :baseline-execution-tokens-total 40 :candidate-execution-tokens-total 51 :baseline-execution-tokens-mean-per-event 40 :candidate-execution-tokens-mean-per-event 51 :execution-token-delta 11 :baseline-runtime-cost-microusd-total 70 :candidate-runtime-cost-microusd-total 78 :baseline-runtime-cost-microusd-mean-per-event 70 :candidate-runtime-cost-microusd-mean-per-event 78 :runtime-cost-delta-microusd 8 :development-cost-microusd 12 :eligible-p t :authorizer-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\")"
            "53db45ce660a9f418b4a3fda0d350e0c2fd3741b4acfbfb9058749d0e6c7df0e8e7637e4e78b441c5f4bb18ca27f051ede936ab8479938e54a7731c7f9bac109")
      (list :head head
-           "(:seq 7 :event-hash \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\")"
-           "4b48f4958fe2da0dadab2db37f7eb6bc8128b0c2c1a485f59d02fe2920a9aaf4183b286b864f0412a0f215c6262de92e9974bfa81885436c92750d3daa0cbc08"))))
+           "(:seq 7 :event-hash \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\" :authority-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\")"
+           "279af648be81df8436fe4028fbc4e2d61c8379c22a71a3614da84801e88b296514cc351195f75f20c863015d997ab4eadcc1cd8463dee81e7e14e7943b899103"))))
 
 (defun test-evolution-canonical-bytes-and-actor-signatures ()
   (let ((identity (%fixed-signing-identity)))
@@ -973,12 +1191,67 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
           (check (string= expected-signature (bytes->hex signature))
                  (format nil "~S matches the fixed Ed25519 signature" name))
           (check (verify-bytes +evolution-fixture-did+
-                               bytes-1 (hex->bytes expected-signature))))))
+                               bytes-1 (hex->bytes expected-signature)))
+          (when (eq name :head)
+            (check (equal value
+                          (%evo-call "%HEAD-PAYLOAD" 7 +evolution-sha-c+
+                                     +evolution-fixture-did+))
+                   "the fixed head vector signs the production head payload")))))
     (dolist (bad (list 1.5 'not-a-keyword '(1 . 2)
                        (format nil "control~Ccharacter" #\Newline)))
       (check (%signals-error-p
               (lambda () (%evo-call "CANONICAL-BYTES" (list :value bad))))
-             (format nil "canonical grammar rejects ~S" bad))))
+             (format nil "canonical grammar rejects ~S" bad)))
+    (let* ((parse (%evo-function "%READ-ONE-FORM-STRING"))
+           (arabic-one (code-char #x0661))
+           (fullwidth-one (code-char #xff11))
+           (arabic-digest (make-string 64 :initial-element arabic-one))
+           (fullwidth-signature
+             (make-string 128 :initial-element fullwidth-one)))
+      (dolist (identifier
+                (list (string arabic-one)
+                      (format nil "c-~C" arabic-one)
+                      (string fullwidth-one)))
+        (check (not (%evo-call "%CANDIDATE-ID-P" identifier))
+               "candidate identifiers admit ASCII digits only"))
+      (check (not (%evo-call "%SHA256-P" arabic-digest))
+             "SHA-256 text rejects Unicode decimal digits")
+      (check (not (%evo-call "%SIGNATURE-P" fullwidth-signature))
+             "signature text rejects Unicode decimal digits")
+      (dolist (text
+                (list (string arabic-one)
+                      (string fullwidth-one)
+                      (format nil
+                              "#A((~C) common-lisp:base-char . \"x\")"
+                              arabic-one)
+                      (format nil
+                              "#A((~C) common-lisp:base-char . \"x\")"
+                              fullwidth-one)))
+        (check (%signals-error-p
+                (lambda () (funcall parse text "ASCII digit grammar")))
+               "canonical numeric syntax admits ASCII digits only")))
+    (labels ((nest (value count)
+               (if (zerop count) value (nest (list value) (1- count)))))
+      (let* ((max-int (1- (expt 10 32)))
+             (max-string (make-string 65536 :initial-element #\x))
+             (max-list (make-list 4096))
+             (depth-64 (nest nil 64))
+             (node-boundary
+               (list (make-list 4095) (make-list 4095)
+                     (make-list 4095) (make-list 4094))))
+        (dolist (value (list max-int (- max-int) max-string max-list
+                             depth-64 node-boundary))
+          (check (typep (%evo-call "CANONICAL-BYTES" value)
+                        '(vector (unsigned-byte 8)))
+                 "an exact encoder grammar boundary is accepted"))
+        (dolist (value (list (expt 10 32) (make-string 65537)
+                             (make-list 4097) (list depth-64)
+                             (list (make-list 4095) (make-list 4095)
+                                   (make-list 4095) (make-list 4095))
+                             :provider-invented-keyword))
+          (check (%signals-error-p
+                  (lambda () (%evo-call "CANONICAL-BYTES" value)))
+                 "one step beyond an encoder grammar boundary is rejected")))))
   (%call-with-evolution-directory
    (lambda (directory)
      (multiple-value-bind (store store-path baseline baseline-id
@@ -992,9 +1265,25 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
          (check (and (stringp (getf candidate :creator-did))
                      (string= "did:key:z6Mk" (getf candidate :creator-did)
                               :end2 12)))
-         (check (%valid-signature-hex-p (getf candidate :creator-signature)))
-         (check (%evo-call "VERIFY-CANDIDATE" store candidate-id)))
-       (%close-test-store store)))))
+       (check (%valid-signature-hex-p (getf candidate :creator-signature)))
+       (check (%evo-call "VERIFY-CANDIDATE" store candidate-id))
+       (let* ((head (%evo-call "READ-LEDGER-HEAD" store))
+              (payload (%plist-without head :authority-signature))
+              (head-path (%evo-call "LEDGER-HEAD-PATH" store)))
+         (check (verify-bytes (getf head :authority-did)
+                              (%evo-call "CANONICAL-BYTES" payload)
+                              (hex->bytes (getf head :authority-signature)))
+                "a live store head signs its complete production payload")
+         (unwind-protect
+              (progn
+                (%write-form head-path
+                             (%plist-put head :authority-did
+                                         +evolution-fixture-did+))
+                (check (%signals-error-p
+                        (lambda () (%evo-call "READ-LEDGER-HEAD" store)))
+                       "tampering the head authority invalidates the head"))
+           (%write-form head-path head)))
+       (%close-test-store store))))))
 
 ;; -------------------------------- TEST-010, TEST-027, TEST-034 / ledger ---
 
@@ -1015,6 +1304,64 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
            (current (char copy position)))
       (setf (char copy position) (if (char= current #\0) #\1 #\0)))
     copy))
+
+(defun %rechain-evolution-event (event sequence previous-hash)
+  "Return EVENT with fresh chain fields; actor signatures remain unchanged."
+  (let* ((actor-event
+           (%plist-without-keys event '(:seq :previous-hash :event-hash)))
+         (with-chain
+           (append actor-event
+                   (list :seq sequence :previous-hash previous-hash))))
+    (append with-chain
+            (list :event-hash (%evo-call "%SHA256-VALUE" with-chain)))))
+
+(defun test-evolution-evaluation-requires-prior-freeze ()
+  "TEST-066: every evaluation split is ordered after its signed freeze."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (dolist (split '(:feedback :development :selection :held-out))
+       (let* ((actors (%make-actors))
+              (label (string-downcase (symbol-name split)))
+              (store-path
+                (merge-pathnames (format nil "before-freeze-~A/" label)
+                                 directory))
+              (image (%make-image directory
+                                  (format nil "before-freeze-~A.core" label)))
+              (store (%open-test-store store-path actors)))
+         (unwind-protect
+              (let* ((manifest
+                       (%freeze store image (%actor actors :creator)))
+                     (candidate-id (%candidate-id manifest)))
+                (%record-evaluation
+                 store actors candidate-id
+                 (format nil "before-freeze-~A" label)
+                 "task-before-freeze" 500000
+                 :campaign-id (format nil "before-freeze-~A" label)
+                 :split split)
+                (let* ((events (%evo-call "READ-LEDGER" store))
+                       (evaluation
+                         (%rechain-evolution-event
+                          (second events) 1 +evolution-zero-sha256+))
+                       (freeze
+                         (%rechain-evolution-event
+                          (first events) 2 (getf evaluation :event-hash)))
+                       (ledger-text
+                         (with-output-to-string (stream)
+                           (dolist (event (list evaluation freeze))
+                             (write-line
+                              (funcall (%evo-function "%CANONICAL-STRING")
+                                       event)
+                              stream)))))
+                  (%write-string (%evo-call "LEDGER-PATH" store) ledger-text)
+                  (%evo-call "%WRITE-HEAD" store 2 (getf freeze :event-hash))
+                  (check (%signals-error-p
+                          (lambda () (%evo-call "READ-LEDGER" store)))
+                         (format nil
+                                 "~S evaluation before freeze is rejected"
+                                 split))
+                  (check (not (%evo-call "VERIFY-LEDGER" store))
+                         "verification fails closed on reordered evidence")))
+           (%close-test-store store)))))))
 
 (defun test-evolution-ledger-chain-head-and-replay ()
   (%call-with-evolution-directory
@@ -1078,6 +1425,9 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                        (lambda () (%evo-call "READ-LEDGER" store)))
                       "a complete chain corruption is rejected by the reader")
                (check (%signals-error-p
+                       (lambda () (%evo-call "READ-LEDGER-HEAD" store)))
+                      "the exported head observer validates ledger correspondence")
+               (check (%signals-error-p
                        (lambda () (%evo-call "READ-POINTER" store :canary)))
                       "pointer reads fail closed on corrupt ledger evidence")
                (check (equalp pointer-bytes-before (%read-octets pointer-path))
@@ -1119,6 +1469,83 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                                    :executor-dids overlap
                                    :evaluator-dids overlap)))
               "executor and evaluator trust rosters must be disjoint")
+       (let* ((executor-string (copy-seq (%did actors :executor-1)))
+              (evaluator-string (copy-seq (%did actors :evaluator-1)))
+              (authorizer-string (copy-seq (%did actors :authorizer)))
+              (executor-roster (list executor-string))
+              (evaluator-roster (list evaluator-string))
+              (authorizer-roster (list authorizer-string))
+              (store
+                (%open-test-store
+                 (merge-pathnames "roster-copy/" directory) actors
+                 :executor-dids executor-roster
+                 :evaluator-dids evaluator-roster
+                 :authorizer-dids authorizer-roster)))
+         (replace executor-string (%did actors :outsider))
+         (replace evaluator-string (%did actors :outsider))
+         (replace authorizer-string (%did actors :outsider))
+         (setf (car executor-roster) (%did actors :outsider)
+               (car evaluator-roster) (%did actors :outsider)
+               (car authorizer-roster) (%did actors :outsider))
+         (check (equal (list (%did actors :executor-1))
+                       (%evo-call "STORE-TRUSTED-EXECUTORS" store))
+                "the executor roster owns its DID strings")
+         (check (equal (list (%did actors :evaluator-1))
+                       (%evo-call "STORE-TRUSTED-EVALUATORS" store))
+                "the evaluator roster owns its DID strings")
+         (check (equal (list (%did actors :authorizer))
+                       (%evo-call "STORE-TRUSTED-AUTHORIZERS" store))
+                "the authorizer roster owns its DID strings")
+         (%close-test-store store))
+       (let* ((authority-actors (%make-actors))
+              (expected
+                (copy-seq (%did authority-actors :authority)))
+              (store
+                (%open-test-store
+                 (merge-pathnames "authority-did-copy/" directory)
+                 authority-actors)))
+         (replace (%did authority-actors :authority)
+                  (%did authority-actors :outsider))
+         (check (string= expected (%evo-call "STORE-AUTHORITY-DID" store))
+                "the store owns its authority DID string")
+         (%close-test-store store))
+       ;; Enrol the creator in exactly the attempted actor roster so these
+       ;; probes reach pairwise role separation rather than failing roster
+       ;; membership first.
+       (dolist (creator-role '(:executor :evaluator))
+         (let* ((root (merge-pathnames
+                       (format nil "creator-as-~(~A~)/" creator-role) directory))
+                (store
+                  (%open-test-store
+                   root actors
+                   :executor-dids
+                   (if (eq creator-role :executor)
+                       (list (%did actors :creator) (%did actors :executor-1))
+                       (list (%did actors :executor-1) (%did actors :executor-2)))
+                   :evaluator-dids
+                   (if (eq creator-role :evaluator)
+                       (list (%did actors :creator) (%did actors :evaluator-1))
+                       (list (%did actors :evaluator-1)
+                             (%did actors :evaluator-2)))))
+                (image (%make-image
+                        directory (format nil "creator-~(~A~).core" creator-role)
+                        #(8 8 8)))
+                (candidate-id
+                  (%candidate-id (%freeze store image (%actor actors :creator)))))
+           (check (%signals-error-p
+                   (lambda ()
+                     (%record-evaluation
+                      store actors candidate-id
+                      (format nil "creator-~(~A~)" creator-role) "role-task"
+                      500000
+                      :executor (if (eq creator-role :executor)
+                                    :creator :executor-1)
+                      :evaluator (if (eq creator-role :evaluator)
+                                     :creator :evaluator-1))))
+                  "an enrolled creator cannot be reused as held-out actor")
+           (check (null (%events-of-kind (%evo-call "READ-LEDGER" store)
+                                         :evaluation)))
+           (%close-test-store store)))
        (let* ((store (%open-test-store (merge-pathnames "valid/" directory) actors))
               (image (%make-image directory "roles.core" #(4 5 6)))
               (manifest (%freeze store image (%actor actors :creator)))
@@ -1259,7 +1686,24 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                     (format nil "invalid envelope field ~S is rejected"
                             (first invalid)))
              (check (= ledger-count
-                       (length (%evo-call "READ-LEDGER" store)))))))
+                       (length (%evo-call "READ-LEDGER" store))))))
+         (let ((unicode-digests
+                 (list (make-string 64 :initial-element (code-char #x0661))
+                       (make-string 64 :initial-element (code-char #xff11)))))
+           (dolist (field '(:evaluation-plan-sha256
+                            :executor-config-sha256
+                            :scorer-config-sha256))
+             (dolist (digest unicode-digests)
+               (let ((changed (copy-list (cdr arguments))))
+                 (setf (getf changed field) digest)
+                 (check (%signals-error-p
+                         (lambda ()
+                           (%evo-apply "RECORD-EVALUATION!"
+                                       (cons store changed))))
+                        (format nil "~S rejects non-ASCII decimal digits"
+                                field))
+                 (check (= ledger-count
+                           (length (%evo-call "READ-LEDGER" store)))))))))
        (%record-evaluation store actors candidate-id
                            "NIL" "task-nil-string" 765432
                            :campaign-id "campaign-envelope"
@@ -1718,27 +2162,28 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                               (list baseline-id
                                     (format nil "cohort-b~D-a" index)
                                     "task-a" 500000 index
-                                    :executor-1 :evaluator-1)
+                                    +evolution-sha-b+ :executor-1 :evaluator-1)
                               (list candidate-id
                                     (format nil "cohort-c~D-a" index)
                                     "task-a" 900000 index
-                                    :executor-1 :evaluator-1)
+                                    +evolution-sha-b+ :executor-1 :evaluator-1)
                               (list baseline-id
                                     (format nil "cohort-b~D-b" index)
                                     "task-b" 500000 index
-                                    :executor-2 :evaluator-2)
+                                    +evolution-sha-c+ :executor-1 :evaluator-2)
                               (list candidate-id
                                     (format nil "cohort-c~D-b" index)
                                     "task-b" 400000 index
-                                    :executor-2 :evaluator-2)))))
+                                    +evolution-sha-c+ :executor-1 :evaluator-2)))))
                     (when reverse-p (setf rows (reverse rows)))
                     (dolist (row rows)
                       (destructuring-bind
-                          (id run task score index executor evaluator) row
+                          (id run task score index config executor evaluator) row
                         (%record-evaluation
                          store actors id run task score
                          :campaign-id "cohort"
                          :replicate-index index
+                         :executor-config-sha256 config
                          :executor executor :evaluator evaluator)))
                     (values
                      store
@@ -1763,6 +2208,19 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
              (check (some (lambda (record)
                             (minusp (getf record :capability-delta-micros)))
                           (getf decision-a :executor-capability-deltas)))
+             (check (every (lambda (record)
+                             (string= (%did actors :executor-1)
+                                      (getf record :executor-did)))
+                           (getf decision-a :executor-capability-deltas))
+                    "one executor is evaluated independently per configuration")
+             (check (= 2 (length (remove-duplicates
+                                   (mapcar
+                                    (lambda (record)
+                                      (getf record :executor-config-sha256))
+                                    (getf decision-a
+                                          :executor-capability-deltas))
+                                   :test #'string=)))
+                    "executor configuration digest is part of the cohort key")
              (check (equal (getf decision-a :executor-capability-deltas)
                            (getf decision-b :executor-capability-deltas))
                     "executor/config cohort order is deterministic")
@@ -2104,6 +2562,26 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
   (%call-with-evolution-directory
    (lambda (directory)
      (let ((actors (%make-actors)))
+       (let* ((empty-store
+                (%open-test-store (merge-pathnames "missing-candidates/"
+                                                   directory)
+                                  actors))
+              (ledger-before
+                (%read-string (%evo-call "LEDGER-PATH" empty-store)))
+              (head-before
+                (%read-string (%evo-call "LEDGER-HEAD-PATH" empty-store))))
+         (check (%signals-error-p
+                 (lambda ()
+                   (%make-decision empty-store "baseline" "candidate"
+                                   (%actor actors :authorizer))))
+                "a decision requires both referenced frozen candidates")
+         (check (string= ledger-before
+                         (%read-string (%evo-call "LEDGER-PATH" empty-store))))
+         (check (string= head-before
+                         (%read-string
+                          (%evo-call "LEDGER-HEAD-PATH" empty-store)))
+                "missing-candidate rejection preserves ledger and head")
+         (%close-test-store empty-store))
        (multiple-value-bind (store store-path baseline baseline-id
                              candidate candidate-id)
            (%make-candidate-pair directory actors)
@@ -2542,10 +3020,66 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                   "eligibility is true exactly when no gate failed"))
          (%close-test-store store))))))
 
+(defun test-evolution-persisted-decision-context-rederivation ()
+  "TEST-053: persisted decisions are re-derived from their evidence prefix."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         (%record-comparison-matrix store actors baseline-id candidate-id)
+         (let* ((decision (%make-decision store baseline-id candidate-id
+                                          (%actor actors :authorizer)))
+                (events (%evo-call "READ-LEDGER" store))
+                (altered
+                  (%plist-put
+                   decision :development-cost-microusd
+                   (1+ (getf decision :development-cost-microusd))))
+                (resigned
+                  (%resign-decision-for-validation
+                   altered (%actor actors :authorizer)))
+                (without-hash (%plist-without resigned :event-hash))
+                (forged
+                  (append
+                   without-hash
+                   (list :event-hash
+                         (funcall (%evo-function "%SHA256-VALUE")
+                                  without-hash))))
+                (forged-events (append (butlast events) (list forged)))
+                (ledger-path (%evo-call "LEDGER-PATH" store)))
+           ;; Model a persisted record whose actor and terminal-head signatures
+           ;; are valid but whose report is inconsistent with signed run data.
+           ;; The store's reader must still reject it before promotion.
+           (%write-string
+            ledger-path
+            (with-output-to-string (stream)
+              (dolist (event forged-events)
+                (write-string
+                 (funcall (%evo-function "%PERSISTED-FORM-STRING")
+                          event "Persisted decision Red Gate")
+                 stream)
+                (terpri stream))))
+           (funcall (%evo-function "%WRITE-HEAD")
+                    store (length forged-events) (getf forged :event-hash))
+           (check (%signals-error-p
+                   (lambda () (%evo-call "READ-LEDGER" store)))
+                  "ledger read re-derives a decision from its evidence prefix")
+           (check (%signals-error-p
+                   (lambda ()
+                     (%evo-call "PROMOTE-CANDIDATE!" store forged
+                                :pointer :canary
+                                :authorizer (%actor actors :authorizer))))
+                  "promotion rejects an evidence-inconsistent persisted decision")
+           (check (null (probe-file (%evo-call "POINTER-PATH" store :canary)))
+                  "rejected persisted decision cannot create a pointer"))
+         (%close-test-store store))))))
+
 ;; ----------------------------- TEST-015, TEST-016, TEST-028, TEST-029 ---
 
 (defun %promote-with-pointer-observer (store decision old-id new-id authorizer)
-  "Promote once while another thread repeatedly validates the pointer file."
+  "Promote once while a raw concurrent reader observes the pointer file."
   (let ((observed (list old-id))
         (done nil)
         (lock (sb-thread:make-mutex :name "evolution-pointer-observer"))
@@ -2559,7 +3093,10 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                    (when done (return)))
                  (let ((value
                          (handler-case
-                             (%evo-call "READ-POINTER" store :canary)
+                             (let ((form
+                                     (%evo-call "%READ-POINTER-FORM"
+                                                store :canary)))
+                               (and form (getf form :candidate-id)))
                            (error () :partial-read-error))))
                    (sb-thread:with-mutex (lock)
                      (push value observed)))
@@ -2625,6 +3162,19 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                       :pointer :canary :authorizer (%actor actors :authorizer))
            (check (string= candidate-id
                            (%evo-call "READ-POINTER" store :canary)))
+           (let* ((no-op-decision
+                    (%make-decision store baseline-id candidate-id
+                                    (%actor actors :authorizer)))
+                  (ledger-count (length (%evo-call "READ-LEDGER" store))))
+             (check (%signals-error-p
+                     (lambda ()
+                       (%evo-call "PROMOTE-CANDIDATE!" store no-op-decision
+                                  :pointer :canary
+                                  :authorizer (%actor actors :authorizer))))
+                    "a promotion must change the selected candidate")
+             (check (= ledger-count (length (%evo-call "READ-LEDGER" store))))
+             (check (string= candidate-id
+                             (%evo-call "READ-POINTER" store :canary))))
            (check (equalp candidate-image-before
                           (%read-octets
                            (%evo-call "CANDIDATE-IMAGE-PATH" store candidate-id)))
@@ -2677,10 +3227,109 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
            (check (string= candidate-id (%evo-call "READ-POINTER" store :canary)))
            (let ((events (%evo-call "READ-LEDGER" store)))
              (check (= 3 (length (%events-of-kind events :promotion))))
-             (check (= 1 (length (%events-of-kind events :rollback))))))
+             (check (= 1 (length (%events-of-kind events :rollback)))))
+           ;; TEST-061: a previously valid authorizer signature is scoped to
+           ;; its exact evidence head and cannot authorize a later transition.
+           (let* ((old-rollback
+                    (%event-of-kind (%evo-call "READ-LEDGER" store) :rollback))
+                  (fresh (%make-decision store baseline-id next-id
+                                         (%actor actors :authorizer)
+                                         :campaign-id "next")))
+             (%evo-call "PROMOTE-CANDIDATE!" store fresh
+                        :pointer :canary
+                        :authorizer (%actor actors :authorizer))
+             (let* ((events-before (%evo-call "READ-LEDGER" store))
+                    (replay-payload
+                      (%plist-without-keys
+                       old-rollback '(:seq :previous-hash :event-hash))))
+               (check (%signals-error-p
+                       (lambda ()
+                         (funcall (%evo-function "%APPEND-EVENT-UNLOCKED")
+                                  store replay-payload events-before)))
+                      "old rollback authorization cannot be replayed at a new head")
+               (check (= (length events-before)
+                         (length (%evo-call "READ-LEDGER" store))))
+               (check (string= next-id
+                               (%evo-call "READ-POINTER" store :canary))))))
          (%close-test-store store))))))
 
 ;; ------------------------------------- TEST-017, TEST-034 / stale/tamper ---
+
+(defun test-evolution-signed-manifest-substitution-rejected ()
+  "TEST-034: a valid manifest for another frozen ID cannot rewrite history."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         (%record-comparison-matrix store actors baseline-id candidate-id)
+         (%make-decision store baseline-id candidate-id
+                         (%actor actors :authorizer))
+         (let* ((arguments
+                  (%base-freeze-arguments (%actor actors :creator)))
+                (source (%evo-call "CANDIDATE-IMAGE-PATH" store candidate-id)))
+           (setf (getf arguments :created-at) "2026-09-05T00:00:00Z"
+                 (getf arguments :theory-fingerprint) +evolution-sha-c+)
+           (let* ((alternate
+                    (%freeze store source (%actor actors :creator)
+                             :arguments arguments))
+                  (alternate-id (%candidate-id alternate))
+                  (target-path
+                    (%evo-call "CANDIDATE-MANIFEST-PATH" store candidate-id))
+                  (original (%read-string target-path)))
+             (check (not (string= candidate-id alternate-id)))
+             (unwind-protect
+                  (progn
+                    (%write-form target-path alternate)
+                    (check (not (%evo-call "VERIFY-LEDGER" store))
+                           "another valid signed manifest cannot satisfy this ID")
+                    (check (%signals-error-p
+                            (lambda () (%evo-call "READ-LEDGER" store)))
+                           "historical replay anchors manifests to freeze evidence"))
+               (%write-string target-path original))
+             (check (%evo-call "VERIFY-LEDGER" store)
+                    "restoring the anchored manifest restores verification")))
+         (%close-test-store store))))))
+
+(defun test-evolution-freeze-manifest-anchoring ()
+  "TEST-034: every freeze retains its exact signed manifest during replay."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let* ((actors (%make-actors))
+            (store (%open-test-store (merge-pathnames "store/" directory)
+                                     actors))
+            (image (%make-image directory "freeze-anchor.core" #(3 4 5)))
+            (manifest (%freeze store image (%actor actors :creator)))
+            (candidate-id (%candidate-id manifest))
+            (manifest-path
+              (%evo-call "CANDIDATE-MANIFEST-PATH" store candidate-id))
+            (manifest-before (%read-string manifest-path)))
+       (delete-file manifest-path)
+       (check (not (%evo-call "VERIFY-LEDGER" store))
+              "a lone freeze cannot survive manifest deletion")
+       (check (%signals-error-p
+               (lambda () (%evo-call "READ-LEDGER" store))))
+       (%write-string manifest-path manifest-before)
+       (check (%evo-call "VERIFY-LEDGER" store))
+       (%write-string manifest-path "nil\n")
+       (check (not (%evo-call "VERIFY-LEDGER" store))
+              "a lone freeze cannot survive manifest corruption")
+       (%write-string manifest-path manifest-before)
+       (%record-evaluation store actors candidate-id
+                           "feedback-anchor" "feedback-task" 500000
+                           :campaign-id "feedback-anchor"
+                           :split :feedback)
+       (delete-file manifest-path)
+       (check (not (%evo-call "VERIFY-LEDGER" store))
+              "feedback-only history still requires its frozen manifest")
+       (check (%signals-error-p
+               (lambda () (%evo-call "READ-LEDGER" store))))
+       (%write-string manifest-path manifest-before)
+       (check (%evo-call "VERIFY-LEDGER" store)
+              "restoring the exact frozen manifest restores replay")
+       (%close-test-store store)))))
 
 (defun test-evolution-stale-decision-and-image-tamper ()
   (%call-with-evolution-directory
@@ -2706,26 +3355,267 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                                 :authorizer (%actor actors :authorizer))))
                   "new evidence makes the prior decision stale")
            (check (null (%evo-call "READ-POINTER" store :canary))))
-         (let* ((fresh (%make-decision store baseline-id candidate-id
-                                       (%actor actors :authorizer)))
-                (image-path (%evo-call "CANDIDATE-IMAGE-PATH" store candidate-id))
-                (image-before (%read-octets image-path))
-                (ledger-count (length (%evo-call "READ-LEDGER" store))))
+         (let* ((image-path (%evo-call "CANDIDATE-IMAGE-PATH" store candidate-id))
+                (image-before (%read-octets image-path)))
            (setf (aref image-before 0) (logxor #xff (aref image-before 0)))
            (%write-octets image-path image-before)
            (check (%rejected-p
                    (lambda () (%evo-call "VERIFY-CANDIDATE" store candidate-id)))
                   "one changed image byte invalidates the candidate")
-           (check (%signals-error-p
-                   (lambda ()
-                     (%evo-call "PROMOTE-CANDIDATE!" store fresh
-                                :pointer :canary
-                                :authorizer (%actor actors :authorizer))))
-                  "a mutated candidate cannot be promoted")
-           (check (null (%evo-call "READ-POINTER" store :canary)))
-           (check (= ledger-count (length (%evo-call "READ-LEDGER" store)))
-                  "failed promotion appends no event"))
+           (let* ((invalid-decision
+                    (%make-decision store baseline-id candidate-id
+                                    (%actor actors :authorizer)))
+                  (ledger-count (length (%evo-call "READ-LEDGER" store))))
+             (check (not (getf (getf invalid-decision :gates)
+                               :candidate-digest-valid)))
+             (check (= 1200
+                       (getf invalid-decision :development-cost-microusd))
+                    "image invalidity does not erase signed development cost")
+             (check (%signals-error-p
+                     (lambda ()
+                       (%evo-call "PROMOTE-CANDIDATE!" store invalid-decision
+                                  :pointer :canary
+                                  :authorizer (%actor actors :authorizer))))
+                    "a mutated candidate cannot be promoted")
+             (check (null (%evo-call "READ-POINTER" store :canary)))
+             (check (= ledger-count (length (%evo-call "READ-LEDGER" store)))
+                    "failed promotion appends no event")))
          (%close-test-store store))))))
+
+(defun test-evolution-rollback-recovers-from-current-image-tamper ()
+  "TEST-058: rollback can escape a corrupt current candidate."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         (%record-comparison-matrix store actors baseline-id candidate-id)
+         (let ((decision (%make-decision store baseline-id candidate-id
+                                         (%actor actors :authorizer))))
+           (%evo-call "PROMOTE-CANDIDATE!" store decision
+                      :pointer :canary
+                      :authorizer (%actor actors :authorizer)))
+         ;; Move the pointer again so the corrupt current candidate has a
+         ;; signed predecessor that rollback can restore.
+         (let* ((next-image
+                  (%make-image directory "rollback-next.core" #(41 42 43)))
+                (next-manifest
+                  (%freeze store next-image (%actor actors :creator-2)))
+                (next-id (%candidate-id next-manifest)))
+           (%record-comparison-matrix store actors baseline-id next-id
+                                      :prefix "rollback-next")
+           (let ((next-decision
+                   (%make-decision store baseline-id next-id
+                                   (%actor actors :authorizer)
+                                   :campaign-id "rollback-next")))
+             (%evo-call "PROMOTE-CANDIDATE!" store next-decision
+                        :pointer :canary
+                        :authorizer (%actor actors :authorizer)))
+           (let* ((image-path (%evo-call "CANDIDATE-IMAGE-PATH" store next-id))
+                  (tampered (%read-octets image-path)))
+             (setf (aref tampered 0) (logxor #xff (aref tampered 0)))
+             (%write-octets image-path tampered))
+           (check (listp (%evo-call "READ-LEDGER" store))
+                  "historical evidence remains readable after image tamper")
+           (let ((rollback
+                   (handler-case
+                       (%evo-call "ROLLBACK-POINTER!" store :canary
+                                  :authorizer (%actor actors :authorizer))
+                     (error () nil))))
+             (check rollback
+                    "rollback accepts a corrupt current candidate")
+             (check (and rollback (eq :rollback (getf rollback :event)))))
+           (check (string= candidate-id
+                           (%evo-call "READ-POINTER" store :canary))
+                  "rollback restores the verified prior candidate"))
+         (%close-test-store store))))))
+
+(defun test-evolution-rollback-descendant-prior-of-corrupt-current ()
+  "TEST-058: current image exemption follows identity through prior lineage."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let* ((actors (%make-actors))
+            (store (%open-test-store (merge-pathnames "store/" directory)
+                                     actors))
+            (root-image (%make-image directory "ancestor.core" #(51 52 53)))
+            (root (%freeze store root-image (%actor actors :creator)))
+            (root-id (%candidate-id root))
+            (child-image (%make-image directory "descendant.core" #(61 62 63)))
+            (child
+              (%freeze store child-image (%actor actors :creator-2)
+                       :parent-id root-id
+                       :parent-image-sha256 (getf root :image-sha256)))
+            (child-id (%candidate-id child)))
+       (%record-comparison-matrix store actors root-id child-id
+                                  :prefix "descendant-child")
+       (%evo-call "PROMOTE-CANDIDATE!"
+                  store
+                  (%make-decision store root-id child-id
+                                  (%actor actors :authorizer)
+                                  :campaign-id "descendant-child")
+                  :pointer :canary
+                  :authorizer (%actor actors :authorizer))
+       (%record-comparison-matrix store actors child-id root-id
+                                  :prefix "descendant-root")
+       (%evo-call "PROMOTE-CANDIDATE!"
+                  store
+                  (%make-decision store child-id root-id
+                                  (%actor actors :authorizer)
+                                  :campaign-id "descendant-root")
+                  :pointer :canary
+                  :authorizer (%actor actors :authorizer))
+       (check (string= root-id (%evo-call "READ-POINTER" store :canary)))
+       (let* ((root-path (%evo-call "CANDIDATE-IMAGE-PATH" store root-id))
+              (tampered (%read-octets root-path)))
+         (setf (aref tampered 0) (logxor #xff (aref tampered 0)))
+         (%write-octets root-path tampered))
+       (check (%evo-call "ROLLBACK-POINTER!" store :canary
+                         :authorizer (%actor actors :authorizer))
+              "rollback exempts the corrupt current image in prior lineage")
+       (check (string= child-id (%evo-call "READ-POINTER" store :canary))
+              "rollback restores the verified descendant prior candidate")
+       (%close-test-store store)))))
+
+(defun test-evolution-pointer-deletion-fails-closed ()
+  "TEST-059: deletion cannot downgrade a signed pointer to never-promoted."
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         (%record-comparison-matrix store actors baseline-id candidate-id)
+         (let* ((decision (%make-decision store baseline-id candidate-id
+                                          (%actor actors :authorizer))))
+           (%evo-call "PROMOTE-CANDIDATE!" store decision
+                      :pointer :canary
+                      :authorizer (%actor actors :authorizer))
+           (let ((fresh (%make-decision store baseline-id candidate-id
+                                        (%actor actors :authorizer)))
+                 (pointer-path (%evo-call "POINTER-PATH" store :canary))
+                 (ledger-path (%evo-call "LEDGER-PATH" store))
+                 (head-path (%evo-call "LEDGER-HEAD-PATH" store)))
+             (delete-file pointer-path)
+             (let ((ledger-before (%read-string ledger-path))
+                   (head-before (%read-string head-path)))
+               (check (%signals-error-p
+                       (lambda () (%evo-call "READ-POINTER" store :canary)))
+                      "missing pointer contradicts signed pointer evidence")
+               (check (%signals-error-p
+                       (lambda ()
+                         (%evo-call "PROMOTE-CANDIDATE!" store fresh
+                                    :pointer :canary
+                                    :authorizer (%actor actors :authorizer))))
+                      "a later promotion cannot erase missing-pointer lineage")
+               (check (string= ledger-before (%read-string ledger-path)))
+               (check (string= head-before (%read-string head-path)))
+               (check (null (probe-file pointer-path))))))
+         (%close-test-store store))))))
+
+(defun test-evolution-closed-parser-properties ()
+  "TEST-063: generated grammar values round-trip; arbitrary text is inert."
+  (let* ((parse (%evo-function "%READ-ONE-FORM-STRING"))
+         (serialize (%evo-function "%CANONICAL-STRING"))
+         (keywords (append +evolution-decision-gate-keys+
+                           '(:event :evaluation :held-out :candidate-id
+                             :run-id :campaign-id :active :canary)))
+         (state #x5eed1234)
+         (valid-roundtrips-p t)
+         (fuzz-closure-p t)
+         (tools-before (sort (mapcar #'symbol-name (list-tools)) #'string<))
+         (packages-before (%package-registry-snapshot)))
+    ;; A canonical list with 4,095 253-octet strings and one 252-octet string
+    ;; is exactly 1 MiB including quotes, separators, and parentheses.  This
+    ;; distinguishes the contract's octet ceiling from a character ceiling.
+    (let* ((wide-prefix (make-string 126 :initial-element #\é))
+           (wide-253 (concatenate 'string wide-prefix "x"))
+           (exact-value (append (make-list 4095 :initial-element wide-253)
+                                (list wide-prefix)))
+           (exact-text (funcall serialize exact-value))
+           (exact-octets (sb-ext:string-to-octets
+                          exact-text :external-format :utf-8)))
+      (check (= (* 1024 1024) (length exact-octets))
+             "multibyte parser fixture is exactly the 1 MiB octet ceiling")
+      (check (equalp exact-octets
+                     (%evo-call "CANONICAL-BYTES" exact-value))
+             "the encoder accepts the exact 1 MiB UTF-8 boundary")
+      (check (equal exact-value (funcall parse exact-text "exact octet bound"))
+             "the exact UTF-8 octet boundary is accepted")
+      (check (= 1 (length (%evo-call "%COMPLETE-LEDGER-LINES"
+                                     (concatenate 'string exact-text
+                                                  (string #\Newline)))))
+             "a ledger line at the exact UTF-8 octet boundary is accepted")
+      (let ((oversized (concatenate 'string exact-text " ")))
+        (check (%signals-error-p
+                (lambda () (funcall parse oversized "oversized octet bound")))
+               "one UTF-8 octet beyond the form ceiling is rejected")
+        (check (%signals-error-p
+                (lambda ()
+                  (%evo-call "%COMPLETE-LEDGER-LINES"
+                             (concatenate 'string oversized
+                                          (string #\Newline)))))
+               "one UTF-8 octet beyond the ledger-line ceiling is rejected")
+        (check (%signals-error-p
+                (lambda ()
+                  (%evo-call "CANONICAL-BYTES"
+                             (append (butlast exact-value)
+                                     (list wide-253)))))
+               "the encoder rejects one UTF-8 octet beyond its form ceiling")))
+    (labels ((next (limit)
+               (setf state (mod (+ (* state 1103515245) 12345) #x80000000))
+               (mod state limit))
+             (atom-value ()
+               (case (next 5)
+                 (0 nil)
+                 (1 t)
+                 (2 (- (next 1000000) 500000))
+                 (3 (nth (next (length keywords)) keywords))
+                 (otherwise
+                  (let* ((alphabet "abcXYZ 019-_\\\"")
+                         (value (make-string (next 48))))
+                    (dotimes (index (length value) value)
+                      (setf (char value index)
+                            (char alphabet (next (length alphabet)))))))))
+             (value (depth)
+               (if (or (zerop depth) (< (next 4) 3))
+                   (atom-value)
+                   (loop repeat (next 7) collect (value (1- depth)))))
+             (try-parse (text)
+               (handler-case (values (funcall parse text "parser property") t)
+                 (error () (values nil nil)))))
+      (loop repeat 1000 do
+        (let* ((original (value 4))
+               (text (funcall serialize original)))
+          (multiple-value-bind (parsed accepted-p) (try-parse text)
+            (unless (and accepted-p (equal original parsed))
+              (setf valid-roundtrips-p nil)))))
+      (let ((alphabet
+              (coerce (append (coerce "()[]{}:#.;'\\\"-+ nilt012abcXYZ \t\n" 'list)
+                              (list (code-char #x85)))
+                      'string)))
+        (loop repeat 1000 do
+          (let ((text (make-string (next 160))))
+            (dotimes (offset (length text))
+              (setf (char text offset)
+                    (char alphabet (next (length alphabet)))))
+            (multiple-value-bind (parsed accepted-p) (try-parse text)
+              (when accepted-p
+                (multiple-value-bind (reparsed canonical-p)
+                    (try-parse (funcall serialize parsed))
+                  (unless (and canonical-p (equal parsed reparsed))
+                    (setf fuzz-closure-p nil))))))))
+    (check valid-roundtrips-p
+           "1,000 generated grammar values satisfy parse(serialize(v)) = v")
+    (check fuzz-closure-p
+           "1,000 arbitrary inputs either reject or canonicalize idempotently")
+    (check (equal tools-before
+                  (sort (mapcar #'symbol-name (list-tools)) #'string<))
+           "parser properties cause no tool-registry effects")
+    (check (equal packages-before (%package-registry-snapshot))
+           "parser properties intern no packages or symbols"))))
 
 ;; --------------------------------------- TEST-021, TEST-030 / readers ---
 
@@ -2757,7 +3647,7 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
                                      store candidate-id)))
               "a second complete form is rejected")
-       (%write-form manifest-path (append manifest '(:unknown-field t)))
+       (%write-string manifest-path "(:unknown-field t)\n")
        (check (%signals-error-p
                (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
                                      store candidate-id)))
@@ -2816,7 +3706,7 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
               "deep forms are rejected at the parser depth bound")
        (%write-string manifest-path
                       (format nil "(:version ~A)~%"
-                              (make-string 21 :initial-element #\9)))
+                              (make-string 33 :initial-element #\9)))
        (check (%signals-error-p
                (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
                                      store candidate-id)))
@@ -2922,6 +3812,14 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
     (when (find-package "ANUNA-IMAGO.EVOLUTION")
       (%run-evolution-case "TEST-007/019 freeze identity and immutability"
                            #'test-evolution-freeze-copy-hash-immutability-and-identity)
+      (%run-evolution-case "TEST-056 ledger-size preflight"
+                           #'test-evolution-ledger-size-preflight)
+      (%run-evolution-case "TEST-057 Unicode control strings"
+                           #'test-evolution-rejects-unicode-control-strings)
+      (%run-evolution-case "TEST-060 authority signing preflight"
+                           #'test-evolution-authority-signing-preflight)
+      (%run-evolution-case "TEST-062 aggregate serialization bounds"
+                           #'test-evolution-aggregate-serialization-bounds)
       (%run-evolution-case "TEST-009/026 surface and filesystem scope"
                            #'test-evolution-freeze-surface-and-symlink-scope)
       (%run-evolution-case "TEST-026 managed-entry symlink confinement"
@@ -2934,6 +3832,8 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                            #'test-evolution-canonical-bytes-and-actor-signatures)
       (%run-evolution-case "TEST-010/027/034 ledger chain and replay"
                            #'test-evolution-ledger-chain-head-and-replay)
+      (%run-evolution-case "TEST-066 evaluation requires prior freeze"
+                           #'test-evolution-evaluation-requires-prior-freeze)
       (%run-evolution-case "TEST-011/035 disjoint role rosters"
                            #'test-evolution-disjoint-role-rosters)
       (%run-evolution-case "TEST-036 signed protocol envelope"
@@ -2976,10 +3876,24 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                            #'test-evolution-decision-all-events-and-order-determinism)
       (%run-evolution-case "TEST-020 decision semantic coherence"
                            #'test-evolution-decision-form-coherence)
+      (%run-evolution-case "TEST-053 persisted decision context"
+                           #'test-evolution-persisted-decision-context-rederivation)
       (%run-evolution-case "TEST-015/016/028/029 trusted promotion and rollback"
                            #'test-evolution-trusted-promotion-pointers-and-rollback)
       (%run-evolution-case "TEST-017/034 stale and tampered candidate denial"
                            #'test-evolution-stale-decision-and-image-tamper)
+      (%run-evolution-case "TEST-034 signed manifest substitution denial"
+                           #'test-evolution-signed-manifest-substitution-rejected)
+      (%run-evolution-case "TEST-034 freeze manifest anchoring"
+                           #'test-evolution-freeze-manifest-anchoring)
+      (%run-evolution-case "TEST-058 rollback after current-image tamper"
+                           #'test-evolution-rollback-recovers-from-current-image-tamper)
+      (%run-evolution-case "TEST-058 descendant-prior rollback"
+                           #'test-evolution-rollback-descendant-prior-of-corrupt-current)
+      (%run-evolution-case "TEST-059 pointer deletion denial"
+                           #'test-evolution-pointer-deletion-fails-closed)
+      (%run-evolution-case "TEST-063 closed-parser properties"
+                           #'test-evolution-closed-parser-properties)
       (%run-evolution-case "TEST-021/030 reader and path attack corpus"
                            #'test-evolution-reader-and-path-attack-corpus)
       (%run-evolution-case "TEST-006 signed responsibility reload"
