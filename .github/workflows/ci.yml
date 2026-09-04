@@ -14,11 +14,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-22.04]
-        # M6 needs cbcl-rs cdylib at a known path. Skip in CI for now —
-        # M6 tests skip cleanly when libcbcl_ffi isn't found. Add cbcl-rs
-        # checkout + cargo build to enable M6 in matrix.
-        suite: [core, image]
+        # Core and saved-image behavior stay cross-platform. The SPEC-014
+        # safety, plugin, and generated-runtime gates run on Linux to keep
+        # the matrix proportional while still exercising their real paths.
+        include:
+          - os: macos-14
+            suite: core
+          - os: ubuntu-22.04
+            suite: core
+          - os: macos-14
+            suite: image
+          - os: ubuntu-22.04
+            suite: image
+          - os: ubuntu-22.04
+            suite: spec-014
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,7 +49,7 @@ jobs:
                --load quicklisp.lisp \
                --eval '(quicklisp-quickstart:install)'
 
-      - name: Run core tests (M1–M5, M8)
+      - name: Run core tests (M1–M5, M8, M10)
         if: matrix.suite == 'core'
         run: |
           bash bin/run-tests.sh m1
@@ -57,6 +66,17 @@ jobs:
           bash bin/run-tests.sh m9
           bash bin/run-tests.sh m11
 
+      - name: Run SPEC-014 safety and plugin gates
+        if: matrix.suite == 'spec-014'
+        run: |
+          bash bin/run-tests.sh m12
+          bash bin/run-tests.sh openrouter
+          bash bin/run-tests.sh evolution
+
+      - name: Run scaffolded-runtime gate
+        if: matrix.suite == 'spec-014'
+        run: bash bin/test-scaffolder.sh
+
   loc-budget:
     name: LOC budget audit
     runs-on: ubuntu-22.04
@@ -67,7 +87,7 @@ jobs:
           total=$(wc -l \
             src/agent.lisp src/builtin-tools.lisp src/cbcl-ffi.lisp \
             src/fileops-tools.lisp \
-            src/gateway.lisp src/hooks.lisp src/identity.lisp \
+            src/gateway.lisp src/hooks.lisp \
             src/mailbox.lisp src/main.lisp \
             src/packages.lisp src/producer-gateway.lisp src/reasoner.lisp \
             src/receipt-log.lisp src/save-image.lisp src/supervisor.lisp \
@@ -75,8 +95,8 @@ jobs:
             src/providers/stub.lisp src/providers/anthropic.lisp \
             | tail -1 | awk '{print $1}')
           echo "Harness LOC: $total"
-          # Hard cap: 3300 (post-identity / did:key).
-          if [[ "$total" -gt 3300 ]]; then
+          # Match the M11 core-harness budget (identity remains a separate tier).
+          if [[ "$total" -ge 3300 ]]; then
             echo "::error::Harness LOC ($total) exceeds 3300 cap — trim before merge"
             exit 1
           fi

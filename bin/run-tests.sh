@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# run-tests.sh — run all milestone test suites
-# Usage: bin/run-tests.sh [m1|m2|m3|m4|m5|m8|m9|all]
+# run-tests.sh — run milestone and optional plugin test suites
+# Usage: bin/run-tests.sh [all|m1..m12|builtin|fileops|identity|openrouter|evolution]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,24 +12,20 @@ if [[ ! -f "${QL}" ]]; then
   exit 1
 fi
 
+# Run the aggregate gate in fresh Lisp processes. Several milestone suites
+# deliberately exercise live redefinition, so sharing one image would let
+# their test-local mutations contaminate later saved-image checks.
+if [[ "${TARGET}" == "all" ]]; then
+  for suite in m1 m2 m3 m4 m5 m6 m7 m7-wss m7-producer m8 m9 m10 m11 \
+               builtin fileops identity m12 openrouter evolution; do
+    "${ROOT}/bin/run-tests.sh" "${suite}"
+  done
+  exit 0
+fi
+
+LOADS='(asdf:load-system :imago/test)'
+
 case "${TARGET}" in
-  all)  RUNS='(progn (anuna-imago.test:run-m1-tests)
-                       (anuna-imago.test:run-m2-tests)
-                       (anuna-imago.test:run-m3-tests)
-                       (anuna-imago.test:run-m4-tests)
-                       (anuna-imago.test:run-m5-tests)
-                       (anuna-imago.test:run-m6-tests)
-                       (anuna-imago.test:run-m7-tests)
-                       (anuna-imago.test:run-m7-wss-tests)
-                       (anuna-imago.test:run-m7-producer-tests)
-                       (anuna-imago.test:run-m8-tests)
-                       (anuna-imago.test:run-m9-tests)
-                       (anuna-imago.test:run-m10-tests)
-                       (anuna-imago.test:run-m11-tests)
-                       (anuna-imago.test:run-builtin-tools-tests)
-                       (anuna-imago.test:run-fileops-tools-tests)
-                       (anuna-imago.test:run-identity-tests)
-                       (anuna-imago.test:run-m12-tests))' ;;
   m1)   RUNS='(anuna-imago.test:run-m1-tests)' ;;
   m2)   RUNS='(anuna-imago.test:run-m2-tests)' ;;
   m3)   RUNS='(anuna-imago.test:run-m3-tests)' ;;
@@ -47,11 +43,19 @@ case "${TARGET}" in
   fileops) RUNS='(anuna-imago.test:run-fileops-tools-tests)' ;;
   identity) RUNS='(anuna-imago.test:run-identity-tests)' ;;
   m12)  RUNS='(anuna-imago.test:run-m12-tests)' ;;
+  openrouter)
+        LOADS='(asdf:load-system :imago/openrouter/test)'
+        RUNS='(unless (anuna-imago.test:run-openrouter-tests)
+                (uiop:quit 1))' ;;
+  evolution)
+        LOADS='(asdf:load-system :imago/evolution/test)'
+        RUNS='(unless (anuna-imago.test:run-evolution-tests)
+                (uiop:quit 1))' ;;
   *)    echo "Unknown target: ${TARGET}" >&2; exit 2 ;;
 esac
 
 sbcl --non-interactive --no-userinit --no-sysinit \
      --load "${QL}" \
      --eval "(push (truename \"${ROOT}/\") asdf:*central-registry*)" \
-     --eval "(asdf:load-system :imago/test)" \
+     --eval "${LOADS}" \
      --eval "${RUNS}"
