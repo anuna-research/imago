@@ -230,6 +230,13 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     (uiop:launch-program             . :process-launch)
     (asdf:run-shell-command          . :process-launch)
     (sb-ext:run-program              . :process-launch)
+    (cffi-toolchain:invoke           . :process-launch)
+    (cffi-toolchain:invoke-build     . :process-launch)
+    (cffi-toolchain:cc-compile       . :process-launch)
+    (cffi-toolchain:link-static-library . :process-launch)
+    (cffi-toolchain:link-shared-library . :process-launch)
+    (cffi-toolchain:link-executable  . :process-launch)
+    (cffi-toolchain:link-lisp-executable . :process-launch)
     ;; ADR-012 §A1 — eval/load/read primitives at top level
     (eval                            . :eval-bypass)
     (compile                         . :compile-bypass)
@@ -552,6 +559,13 @@ into *SAFETY-LAYER-SYMBOLS*, so burying an operator cannot bypass this gate.")
     uiop:launch-program
     asdf:run-shell-command
     sb-ext:run-program
+    cffi-toolchain:invoke
+    cffi-toolchain:invoke-build
+    cffi-toolchain:cc-compile
+    cffi-toolchain:link-static-library
+    cffi-toolchain:link-shared-library
+    cffi-toolchain:link-executable
+    cffi-toolchain:link-lisp-executable
     *clean-checklist*
     pre-save-clean!
     save-image!
