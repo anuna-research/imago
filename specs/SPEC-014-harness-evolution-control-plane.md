@@ -526,7 +526,8 @@ finite token vocabulary. It SHALL reject reader dispatch, quoting, escaped
 symbols, unknown tokens, excessive source/depth/node/string/file resources, and
 invalid Unicode before invoking the Lisp reader. Malformed history SHALL fail
 closed during inspection and sequence recovery. Receipt writers SHALL preflight
-the same grammar before consuming a sequence number.
+the same grammar before consuming a sequence number. Escaped string characters
+SHALL consume the same pre-read decoded-character budget as ordinary characters.
 
 Trace: [[SPEC-014-harness-evolution-control-plane#TEST-021]],
 [[SPEC-014-harness-evolution-control-plane#TEST-030]],
@@ -774,9 +775,10 @@ It also includes proof recognition, dispatch membership, evaluation reachability
 mailbox result transport, audit recording, and safety-tool installation. The
 named provider TCB includes request advertisement, response ingress, JSON
 recognition, argument conversion, frame production, and dispatch-loop helpers.
-It also includes endpoint, authentication, and configuration readers. It covers
-credential accessors, credential erasers, clean-image entry points, and their
-mutable bounds. Runtime lifecycle and MOP generics that can intercept object
+It also includes endpoint, authentication, and configuration readers. Direct
+environment readers and named process launchers belong to this boundary. It
+covers credential accessors, credential erasers, clean-image entry points, and
+their mutable bounds. Runtime lifecycle and MOP generics that can intercept object
 construction or slot access are definition-protected. Recognition SHALL prevent an evaluated definition or
 method that structurally names that TCB from replacing it. A rejected
 replacement SHALL leave the next handler call fail-closed, and the next clean
@@ -1881,8 +1883,9 @@ Attempt direct sequential replacements of the agent accessor, dispatch
 membership helpers, pipeline stages, and lift and reasoner helpers. Repeat for
 proof recognizers, the evaluator, mailbox paths, and audit paths. Cover provider
 request builders, response recognizers, frame producers, and JSON parser seams.
-Cover provider endpoint, authentication, and configuration readers. Cover
-credential erasers, clean-image entry points, runtime lifecycle/MOP generics,
+Cover provider endpoint, authentication, and configuration readers. Attempt
+direct environment reads and named child-process launchers. Cover credential
+erasers, clean-image entry points, runtime lifecycle/MOP generics,
 class/structure targets, and the installer. Each form structurally names its
 target. Test delayed provider/build methods and a response-to-frame replacement
 capable of synthesizing an authorized call. After each rejection, submit a
@@ -1895,9 +1898,9 @@ safety set. Finally, verify a direct call outside agent evaluation succeeds.
 Append reader-evaluation syntax, an unknown symbol token, and a record whose
 union-vocabulary key substitutes for a required schema key. Verify inspection,
 query, and sequence recovery fail closed without evaluation or interning. Cover
-receipt node/string boundaries, writer-reader closure for cyclic/foreign
-evidence, UTF-8 result truncation, and sequence publication only after a
-successful durable write.
+receipt node/string boundaries, including escaped string characters. Cover
+writer-reader closure for cyclic/foreign evidence and UTF-8 result truncation.
+Verify sequence publication occurs only after a successful durable write.
 
 ### TEST-066 — Evaluation requires a prior freeze
 

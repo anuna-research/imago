@@ -210,6 +210,18 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     (sb-ext:without-package-locks    . :without-package-locks)
     (sb-ext:unlock-package           . :unlock-package)
     (sb-sys:without-interrupts       . :interrupt-suppression)
+    ;; Direct environment and child-process access can disclose provider
+    ;; credentials before the provider's protected request path runs.
+    (uiop:getenv                     . :environment-access)
+    (uiop:getenvp                    . :environment-access)
+    (uiop:getenv-pathname            . :environment-access)
+    (uiop:getenv-pathnames           . :environment-access)
+    (uiop:getenv-absolute-directory  . :environment-access)
+    (uiop:getenv-absolute-directories . :environment-access)
+    (sb-ext:posix-getenv             . :environment-access)
+    (uiop:run-program                . :process-launch)
+    (uiop:launch-program             . :process-launch)
+    (sb-ext:run-program              . :process-launch)
     ;; ADR-012 §A1 — eval/load/read primitives at top level
     (eval                            . :eval-bypass)
     (compile                         . :compile-bypass)
@@ -508,6 +520,16 @@ into *SAFETY-LAYER-SYMBOLS*, so burying an operator cannot bypass this gate.")
     openrouter-site-url
     openrouter-app-name
     openrouter-clear-credentials!
+    uiop:getenv
+    uiop:getenvp
+    uiop:getenv-pathname
+    uiop:getenv-pathnames
+    uiop:getenv-absolute-directory
+    uiop:getenv-absolute-directories
+    sb-ext:posix-getenv
+    uiop:run-program
+    uiop:launch-program
+    sb-ext:run-program
     *clean-checklist*
     pre-save-clean!
     save-image!

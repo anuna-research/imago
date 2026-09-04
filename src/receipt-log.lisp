@@ -137,22 +137,22 @@ oversized tokens, invalid Unicode, and excessive nesting fail closed."
                  (when (> token-characters +receipt-maximum-token-characters+)
                    (error "Receipt token exceeds the length bound."))
                  (vector-push-extend character token))
+               (charge-string-character ()
+                 (when (> (incf string-characters)
+                          +receipt-maximum-string-characters+)
+                   (error "Receipt string exceeds the length bound.")))
                (process (character)
                  (emit character)
                  (cond
                    (escaped
                     (setf escaped nil)
                     (when in-string
-                      (incf string-characters)))
+                      (charge-string-character)))
                    (in-string
                     (cond
                       ((char= character #\\) (setf escaped t))
                       ((char= character #\") (setf in-string nil))
-                      (t
-                       (incf string-characters)
-                       (when (> string-characters
-                                +receipt-maximum-string-characters+)
-                         (error "Receipt string exceeds the length bound.")))))
+                      (t (charge-string-character))))
                    (in-bar-symbol
                     (error "Escaped symbol syntax is forbidden in receipts."))
                    (t

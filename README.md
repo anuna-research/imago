@@ -653,8 +653,9 @@ tool-registry or handler access. Named TCB definitions are rejected, and the
 computed authority-state cases tested by SPEC-014 are defense in depth. The
 named TCB covers the reasoner and dispatch chain as well as worker mailbox
 transport, receipt recording, provider request advertisement, argument
-conversion, endpoint/auth/config accessors, credential erasure, clean-image
-entry points, and frame production. CLOS lifecycle/MOP extension points are
+conversion, endpoint/auth/config accessors, direct environment readers, named
+process launchers, credential erasure, clean-image entry points, and frame
+production. CLOS lifecycle/MOP extension points are
 definition-protected across evaluations. OpenRouter additionally uses the bounded,
 closed response recognizer described above; this version does not retrofit
 that language-theoretic boundary onto the Anthropic provider.
@@ -1094,7 +1095,8 @@ schemas through a finite-token data grammar. It disables reader evaluation,
 rejects sharp/quote/escaped-symbol syntax before `read`, never interns unknown
 tokens, and fails closed on a malformed suffix. Entries are limited to
 4 Mi characters, 320 levels, 20,000 pre-read/validated nodes, and 65,536
-characters per string; a log is limited to 64 MiB. `read-receipts` retains at
+decoded characters per string. Escaped characters consume that pre-read string
+budget. A log is limited to 64 MiB. `read-receipts` retains at
 most the requested final 0–1,000 records, while public query tools narrow that
 limit to 0–100.
 

@@ -90,6 +90,8 @@
       (case
        '(("(progn (unintern 'x))" unintern)
          ("(let () (delete-package :m12-absent))" delete-package)
+         ("(progn (uiop:getenv \"OPENROUTER_API_KEY\"))" uiop:getenv)
+         ("(let () (uiop:run-program '(\"env\")))" uiop:run-program)
          ("(progn (sb-ext:exit))" sb-ext:exit)
          ("(progn (sb-ext:quit))" sb-ext:quit)
          ("(progn (sb-ext:save-lisp-and-die \"/tmp/never\"))"
@@ -298,6 +300,21 @@
                  (progn (anuna-imago::%read-receipt-source stream) nil)
                (error () t))
              "one-over pre-read node budget rejects before READ")))
+  (flet ((escaped-string-source (characters)
+           (with-output-to-string (stream)
+             (write-string "(\"" stream)
+             (dotimes (index characters)
+               (write-string "\\a" stream))
+             (write-string "\")" stream))))
+    (let ((maximum anuna-imago::+receipt-maximum-string-characters+))
+      (with-input-from-string (stream (escaped-string-source maximum))
+        (check (stringp (anuna-imago::%read-receipt-source stream))
+               "exact escaped-string bound passes before READ"))
+      (with-input-from-string (stream (escaped-string-source (1+ maximum)))
+        (check (handler-case
+                   (progn (anuna-imago::%read-receipt-source stream) nil)
+                 (error () t))
+               "escaped string rejects at the pre-reader bound"))))
   (let* ((path (format nil "/tmp/imago-m12-hostile-receipt-~D.log"
                        (random 100000)))
          (log (open-receipt-log path)))
@@ -605,6 +622,14 @@ Tests bind this to make the reasoner veto specific forms.")
                          (list :form source))))
             (check (member (getf result :status) '(:rejected :vetoed))
                    (format nil "provider/cleanup TCB mutation is denied: ~A"
+                           source)))))
+      (with-m12-handler-fixture ()
+        (dolist (source '("(uiop:getenv \"OPENROUTER_API_KEY\")"
+                          "(sb-ext:posix-getenv \"ANTHROPIC_API_KEY\")"))
+          (let ((result (anuna-imago::%harness-eval-handler
+                         (list :form source))))
+            (check (member (getf result :status) '(:rejected :vetoed))
+                   (format nil "environment credential access is denied: ~A"
                            source)))))
       (check (string= endpoint (anthropic-base-url provider))
              "endpoint reader remains unchanged for the next request")
@@ -1723,6 +1748,16 @@ Tests bind this to make the reasoner veto specific forms.")
                       anuna-imago:openrouter-site-url
                       anuna-imago:openrouter-app-name
                       anuna-imago::openrouter-clear-credentials!
+                      uiop:getenv
+                      uiop:getenvp
+                      uiop:getenv-pathname
+                      uiop:getenv-pathnames
+                      uiop:getenv-absolute-directory
+                      uiop:getenv-absolute-directories
+                      sb-ext:posix-getenv
+                      uiop:run-program
+                      uiop:launch-program
+                      sb-ext:run-program
                       anuna-imago:*clean-checklist*
                       anuna-imago:pre-save-clean!
                       anuna-imago:save-image!
