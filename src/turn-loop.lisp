@@ -158,7 +158,8 @@ history. For each iteration:
 
 Returns a reply plist. Bounded by *MAX-TOOL-USE-ITERATIONS* to prevent
 runaway spend."
-  (let ((provider (agent-provider agent)))
+  (let ((*current-agent* agent)
+        (provider (agent-provider agent)))
     (when (null provider)
       (return-from drive-stream
         (make-reply "" :tool-results (list (list :error :no-provider)))))

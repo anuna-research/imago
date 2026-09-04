@@ -26,6 +26,141 @@
 ;; sb-mop is always loaded in SBCL (no require needed); accessed via the
 ;; sb-mop: package below.
 
+;; Harness evaluation keeps dispatch authority outside named dynamic state.
+;; The active ceiling is keyed by the VM's actual thread address, while a weak
+;; per-agent map pins the first canonical registry-symbol allowlist.  These
+;; closure-owned tables are deliberately not exposed as mutable Lisp objects.
+(defun %tool-name-equal-p (left right)
+  "Compare provider tool-name designators without trusting package identity."
+  (let ((left-name (typecase left (symbol (symbol-name left)) (string left)))
+        (right-name (typecase right (symbol (symbol-name right)) (string right))))
+    (and left-name right-name (string-equal left-name right-name))))
+
+(defun %canonical-evaluation-tool-names (tool-names)
+  "Resolve TOOL-NAMES to immutable registry symbol identities.
+Unknown designators are omitted. Dotted, cyclic, or overlong allowlists fail
+closed.  The 256-cell bound exceeds the finite supported tool surface."
+  (let ((seen (make-hash-table :test #'eq))
+        (cursor tool-names)
+        (canonical nil))
+    (loop for count from 0
+          do (cond
+               ((null cursor)
+                (return (remove-duplicates (nreverse canonical) :test #'eq)))
+               ((or (>= count 256)
+                    (atom cursor)
+                    (gethash cursor seen))
+                (return nil))
+               (t
+                (setf (gethash cursor seen) t)
+                (let ((tool (find-tool (car cursor))))
+                  (when tool (push (tool-name tool) canonical)))
+                (setf cursor (cdr cursor)))))))
+
+(defun %evaluation-authority-thread-key ()
+  "Return the actual VM thread identity, independent of special bindings."
+  (sb-sys:sap-int (sb-thread:current-thread-sap)))
+
+(let ((evaluation-authority-by-thread (make-hash-table :test #'eql))
+      (initial-authority-by-agent
+        (make-hash-table :test #'eq :weakness :key))
+      (evaluation-authority-lock
+        (sb-thread:make-mutex :name "evaluation-tool-authority")))
+  (defun %call-with-evaluation-tool-authority (agent tool-names thunk)
+    "Call THUNK below AGENT's immutable first-evaluation dispatch ceiling.
+The current canonical allowlist may shrink that ceiling.  An already-active
+ceiling wins over every nested request on the actual VM thread."
+    (let ((thread-key (%evaluation-authority-thread-key)))
+      (multiple-value-bind (existing present-p)
+          (sb-thread:with-mutex (evaluation-authority-lock)
+            (gethash thread-key evaluation-authority-by-thread))
+        (declare (ignore existing))
+        (if present-p
+            (funcall thunk)
+            (let* ((current (%canonical-evaluation-tool-names tool-names))
+                   (initial
+                     (sb-thread:with-mutex (evaluation-authority-lock)
+                       (multiple-value-bind (saved saved-p)
+                           (gethash agent initial-authority-by-agent)
+                         (if saved-p
+                             saved
+                             (setf (gethash agent initial-authority-by-agent)
+                                   (copy-list current))))))
+                   (effective
+                     (remove-if-not
+                      (lambda (name) (member name initial :test #'eq))
+                      current))
+                   (record (list effective agent)))
+              (sb-thread:with-mutex (evaluation-authority-lock)
+                (setf (gethash thread-key evaluation-authority-by-thread)
+                      record))
+              (unwind-protect
+                   (funcall thunk)
+                (unwind-protect
+                     ;; The visible slot feeds provider advertisement and
+                     ;; ordinary dispatch. Preserve reductions, but erase
+                     ;; additions before publishing the worker result.
+                     (when agent
+                       (handler-case
+                           (let* ((post
+                                    (%canonical-evaluation-tool-names
+                                     (agent-tools agent)))
+                                  (sanitized
+                                    (remove-if-not
+                                     (lambda (name)
+                                       (member name initial :test #'eq))
+                                     post)))
+                             (setf (agent-tools agent)
+                                   (copy-list sanitized)))
+                         (error ()
+                           (ignore-errors (setf (agent-tools agent) nil)))))
+                  ;; Record removal runs even if malformed agent state makes
+                  ;; slot sanitization signal unexpectedly.
+                  (sb-thread:with-mutex (evaluation-authority-lock)
+                    (when (eq record
+                              (gethash thread-key
+                                       evaluation-authority-by-thread))
+                      (remhash thread-key
+                               evaluation-authority-by-thread))))))))))
+
+  (defun %evaluation-tool-permitted-p (tool-name)
+    "Return PERMITTED-P, ACTIVE-P, and the matched allowlist designator.
+When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
+    (let ((thread-key (%evaluation-authority-thread-key)))
+      (multiple-value-bind (record active-p)
+          (sb-thread:with-mutex (evaluation-authority-lock)
+            (gethash thread-key evaluation-authority-by-thread))
+        (let ((allowed (and active-p
+                            (find tool-name (first record)
+                                  :test #'%tool-name-equal-p))))
+          (values (not (null allowed)) active-p (or allowed tool-name))))))
+
+  (defun %effective-agent-tool-names
+      (agent &optional (current (slot-value agent 'tools)))
+    "Apply AGENT's pinned evaluation ceiling to its current visible tools."
+    (multiple-value-bind (initial pinned-p)
+        (sb-thread:with-mutex (evaluation-authority-lock)
+          (gethash agent initial-authority-by-agent))
+      (if pinned-p
+          (let ((canonical (%canonical-evaluation-tool-names current)))
+            (remove-if-not
+             (lambda (name) (member name initial :test #'eq))
+             canonical))
+          current))))
+
+(defmethod agent-tools :around ((agent agent))
+  "Expose at most the immutable ceiling pinned by AGENT's first evaluation."
+  (%effective-agent-tool-names agent (call-next-method)))
+
+(defun %ensure-jzon-package-locked! ()
+  "Lock Jzon's implementation package before exposing HARNESS-EVAL."
+  (let ((package (or (find-package :com.inuoe.jzon)
+                     (error "The Jzon package is unavailable."))))
+    (sb-ext:lock-package package)
+    (unless (sb-ext:package-locked-p package)
+      (error "The Jzon package could not be locked."))
+    t))
+
 ;; =========================================================================
 ;; CON-003 / ADR-012 §A1 — safety-layer symbol set
 ;; =========================================================================
@@ -48,32 +183,238 @@
 ;; assignment slipped past %prefilter-setf (which only inspected cons
 ;; places) and past the lift (which only saw head-of-cons symbols).
 
-(defparameter *safety-layer-symbols*
-  '(;; SPEC-012 CON-003 originals
+(defparameter *authorization-tcb-symbols*
+  '(;; The recognizer, fact seam, proof gate, evaluator, and audit/rollback
+    ;; pipeline.  Every named link is protected across sequential calls.
+    *authorization-tcb-symbols*
+    *safety-layer-symbols*
+    *safety-layer-categories*
+    safety-layer-symbol-p
+    %symbol-category
+    %category-rationale
+    %derivation-trigger-symbol
+    %vetoed-hint
+    *prefilter-denylist*
+    %prefilter-denylist-rule
+    %harness-eval-prefilter
+    %prefilter-setf
+    %prefilter-setf-place
+    %prefilter-setq
+    %prefilter-symbol-mutator
+    %symbol-eq
+    %defmethod-target-and-spec
+    %spec-name-of-arg
+    %lift-form
+    *harness-eval-audit-log*
+    %form-fingerprint
+    %tool-receipt!
+    *redefine-history*
+    *redefine-history-verbatim-cap*
+    redefine-history
+    last-redefinition
+    all-redefined-symbols
+    %record-definition!
+    *rollback-register*
+    rollback-records
+    find-rollback-records-for
+    %method-set
+    %push-method-rollback!
+    %push-function-rollback!
+    %audit-rollback!
+    %record-rollback-event!
+    %rollback-method-record!
+    %rollback-function-record!
+    rollback!
+    *harness-eval-result-truncate-bytes*
+    *harness-eval-default-timeout-ms*
+    *harness-eval-max-timeout-ms*
+    *harness-eval-default-package*
+    *form-counter*
+    *form-counter-lock*
+    %next-form-id
+    %bounded-prin1
+    %parse-form-locked
+    %lift-facts
+    %assert-lift-facts!
+    %retract-lift-facts!
+    %assert-safety-layer-facts!
+    %query-forbidden
+    %eval-form-with-timeout
+    %elapsed-ms
+    %form-rollback-prep
+    %form-rollback-record
+    %form-record-definition
+    %harness-eval-handler
+    %emit-receipt!
+    %after-parse-pipeline
+    %after-prefilter-pipeline
+    %after-reasoner-pipeline
+    ;; Reasoner proof production and validation used by the safety gate.
+    *reasoner-ipc-call*
+    load-theory
+    query
+    assert-fact!
+    retract-fact!
+    %proper-list-p
+    *active-theory-handle*
+    %proof-result-valid-p
+    proof-result-positive-p
     invariant-filter-hook
+    *invariant-filter-handle*
     install-invariant-filter!
     uninstall-invariant-filter!
-    %harness-eval-prefilter
-    %harness-eval-handler
-    tool-call
-    dispatch-tool!
-    register-tool!
-    unregister-tool!
-    %tool-receipt!
-    ;; ADR-012 §A1 — registry / struct mutation surface
-    *tool-registry*
-    *tool-registry-lock*
+    ;; Sync hook routing is part of the invariant-filter path.
+    *hook-keys*
+    *excluded-hook-keys*
+    *hook-semantics*
+    *hook-registry*
+    *hook-registry-lock*
+    register-hook
+    remove-hook
+    list-hooks
+    clear-all-hooks
+    run-hook
+    ;; Registry normalization and the closure-owned dispatch ceiling.
     *valid-permissions*
     *valid-param-types*
+    *tool-registry*
+    *tool-registry-lock*
+    *operator-tool-dispatch-p*
+    %validate-tool-spec
+    register-tool!
+    unregister-tool!
+    %normalize-tool-name
     find-tool
     list-tools
     clear-all-tools
+    define-tool
+    tool
     make-tool
     tool-name
     tool-description
     tool-permission
     tool-schema
     tool-handler
+    %tool-name-equal-p
+    %canonical-evaluation-tool-names
+    %evaluation-authority-thread-key
+    %call-with-evaluation-tool-authority
+    %evaluation-tool-permitted-p
+    %effective-agent-tool-names
+    %authorized-agent-tool-name
+    dispatch-tool!
+    with-operator-tool-dispatch
+    *current-agent*
+    agent
+    agent-tools
+    sb-thread:*current-thread*
+    sb-thread:current-thread-sap
+    sb-sys:sap-int
+    ;; Every same-thread entry and helper that can reach dispatch.
+    process-turn
+    *max-tool-use-iterations*
+    *invalid-tool-arguments-marker*
+    %invalid-tool-arguments-p
+    %consume-stream
+    %dispatch-tool-use
+    drive-stream
+    handle-tool-frame
+    provider-stream!
+    stream-next-frame!
+    tool-results-message-content
+    agent-provider
+    agent-message-history
+    build-request
+    %ht
+    %param-key
+    %type-string
+    schema->json-schema
+    json-schema->schema
+    tool->anthropic-descriptor
+    %schema-properties->ht
+    %tool->anthropic-ht
+    %tool->openai-ht
+    %hash->plist
+    %tool-describe-agent
+    ;; Provider response ingress must stay coupled to its recognizer before a
+    ;; frame can reach dispatch.  Protect both the built-in Anthropic chain and
+    ;; the opt-in OpenRouter recognizer, including every mutable resource bound.
+    *anthropic-http-post*
+    %anthropic-stop-reason-keyword
+    %anthropic-response->frames
+    %fetch-and-parse
+    *openrouter-http-post*
+    +openrouter-maximum-response-octets+
+    +openrouter-maximum-argument-octets+
+    +openrouter-maximum-json-depth+
+    +openrouter-maximum-json-nodes+
+    +openrouter-maximum-object-keys+
+    +openrouter-maximum-array-elements+
+    +openrouter-maximum-string-characters+
+    +openrouter-maximum-tool-calls+
+    +openrouter-maximum-identifier-characters+
+    +openrouter-maximum-tool-name-characters+
+    %openrouter-json-octet-length
+    %openrouter-scan-json!
+    %openrouter-parse-json
+    %openrouter-hash-shape!
+    %openrouter-token-string-p
+    %openrouter-registered-tool
+    %openrouter-argument-type-p
+    %openrouter-recognize-tool-arguments
+    %openai-args->plist
+    %openrouter-finish-reason
+    %openrouter-validate-token-details!
+    %openrouter-validate-usage!
+    %openrouter-validate-root-metadata!
+    %openrouter-error-frames
+    %openrouter-error-envelope-frames
+    %openrouter-tool-call->frame
+    %openrouter-response->frames
+    %openrouter-bounded-response-string
+    %openrouter-fetch-and-parse
+    ;; Jzon is an unlocked dependency. Its public parser/writer cells and the
+    ;; constructor/closer emitted by WITH-PARSER are part of the same ingress
+    ;; TCB as our wrappers.
+    com.inuoe.jzon:parse
+    com.inuoe.jzon:parse-next
+    com.inuoe.jzon:with-parser
+    com.inuoe.jzon:make-parser
+    com.inuoe.jzon:close-parser
+    com.inuoe.jzon:stringify
+    %ensure-jzon-package-locked!
+    sb-ext:lock-package
+    sb-ext:package-locked-p
+    sb-ext:unlock-package
+    sb-ext:without-package-locks
+    ;; Worker result transport is part of the cleanup-before-publication gate.
+    mailbox
+    make-mailbox
+    mailbox-head
+    mailbox-tail
+    mailbox-count
+    mailbox-closed
+    mailbox-lock
+    mailbox-cv
+    send!
+    receive!
+    peek-mailbox
+    mailbox-depth
+    close-mailbox!
+    sb-thread:with-mutex
+    sb-thread:make-mutex
+    sb-thread:make-waitqueue
+    sb-thread:condition-wait
+    sb-thread:condition-notify
+    sb-thread:condition-broadcast
+    print-object
+    ;; Audit resources and the opt-in self-modification installer.
+    receipt-log
+    receipt-log-path
+    %receipt-log-stream
+    %receipt-log-seqs
+    %receipt-log-lock
+    iso-8601-now
     *open-receipt-logs*
     *credential-erasers*
     register-receipt-log-for-clean!
@@ -81,35 +422,44 @@
     append-receipt!
     open-receipt-log
     close-receipt-log!
-    *active-theory-handle*
-    *invariant-filter-handle*
-    *reasoner-ipc-call*          ; SELF-MOD-REVIEW BLOCKER-1 — the live
-                                 ; reasoner indirection every query funcalls
-    *redefine-history*
-    *rollback-register*
-    *safety-layer-symbols*
-    *prefilter-denylist*
-    *harness-eval-audit-log*
+    *self-modification-tool-names*
+    *harness-eval-audit-log-path*
+    *harness-eval-description*
+    %ensure-anuna-imago-user-package
+    %fmt-symbol-with-package
+    %tool-list-safety-layer
+    %tool-redefine-history
+    %rollback-record-summary
+    %tool-list-rollbacks
+    %tool-rollback
+    %tool-query-self-mod-receipts
+    %register-self-mod-introspection-tools!
     install-self-modification-tools!
     uninstall-self-modification-tools!
-    harness-eval
-    ;; ADR-012 §A1 — eval/load/read primitives
-    eval compile compile-file load read read-from-string
-    read-preserving-whitespace
-    ;; reader-macro primitives
-    set-macro-character set-dispatch-macro-character set-syntax-from-char
-    *readtable* copy-readtable make-dispatch-macro-character
-    ;; SELF-MOD-REVIEW BLOCKER-1 — special-variable mutators. No legitimate
-    ;; harness-eval use; here so the reasoner mentions/2 path vetoes them
-    ;; even when the target symbol is computed at runtime (which the
-    ;; structural pre-filter cannot resolve).
-    set makunbound
-    ;; thread primitives that bypass eval-thread isolation
-    sb-thread:interrupt-thread sb-thread:terminate-thread
-    sb-thread:make-thread sb-thread:join-thread
-    ;; method/class introspection / mutation
-    add-method remove-method find-method ensure-generic-function
-    sb-mop:generic-function-methods sb-mop:intern-eql-specializer)
+    harness-eval)
+  "Named trusted-computing-base surface protected from harness evaluation.")
+
+(defparameter *safety-layer-symbols*
+  (remove-duplicates
+   (append
+    *authorization-tcb-symbols*
+    '(;; Legacy generic retained by the SPEC-012 floor theory.
+      tool-call
+      ;; ADR-012 §A1 — eval/load/read primitives
+      eval compile compile-file load read read-from-string
+      read-preserving-whitespace
+      ;; reader-macro primitives
+      set-macro-character set-dispatch-macro-character set-syntax-from-char
+      *readtable* copy-readtable make-dispatch-macro-character
+      ;; Special-variable mutators and binding machinery.
+      set makunbound progv
+      ;; Thread primitives that bypass eval-thread isolation.
+      sb-thread:interrupt-thread sb-thread:terminate-thread
+      sb-thread:make-thread sb-thread:join-thread
+      ;; Method/class introspection and mutation.
+      add-method remove-method find-method ensure-generic-function
+      sb-mop:generic-function-methods sb-mop:intern-eql-specializer))
+   :test #'eq)
   "Symbols treated as untouchable by the floor invariants. Mention any of
 these in a form's free-symbols and the reasoner returns +Δ via the
 generalised mentions/2 rule. ADR-012 §A1.")
@@ -120,7 +470,7 @@ generalised mentions/2 rule. ADR-012 §A1.")
 
 ;; ---------------------------------------------------------------- categories
 ;;
-;; Symbols in *safety-layer-symbols* are partitioned into categories so the
+;; Symbols in *safety-layer-symbols* are grouped into categories so the
 ;; reasoner-veto handler can emit a teaching :hint instead of just naming
 ;; the offending symbol. Without categorisation, the agent treats each
 ;; veto as "this specific symbol is bad" and cycles through alternatives
@@ -129,7 +479,10 @@ generalised mentions/2 rule. ADR-012 §A1.")
 ;; forbidden; here's an alternative class of tools".
 
 (defparameter *safety-layer-categories*
-  '((:eval-class
+  `((:authorization-tcb
+     ,*authorization-tcb-symbols*
+     "Named enforcement and dispatch functions, variables, accessors, and entry points form one trusted computing base. Redefining any named link could weaken a later harness-eval call, so the entire group is operator-only.")
+    (:eval-class
      (eval compile compile-file load read read-from-string
       read-preserving-whitespace)
      "Reader/evaluator primitives. Forbidden because they bypass the form-level safety filter — an agent could embed any defmethod in quoted data and run it via EVAL/READ/LOAD (ADR-012 §F2). Alternative for serialisation: line-oriented I/O with WITH-OPEN-FILE + WRITE-LINE/FORMAT to write, READ-LINE + SUBSEQ / PARSE-INTEGER / STRING= for manual parsing. Do NOT try to read s-expressions back; design your on-disk format as plain text records.")
@@ -147,9 +500,15 @@ generalised mentions/2 rule. ADR-012 §A1.")
      "Method-table mutation/introspection primitives. Use (defmethod NAME …) — the lift function sees the target through that path. For introspection of methods on a generic, this access is denied in v0.1; you can still call the generic and observe its behaviour.")
     (:safety-layer-target
      (invariant-filter-hook install-invariant-filter! uninstall-invariant-filter!
-      %harness-eval-prefilter %harness-eval-handler tool-call dispatch-tool!
+      %harness-eval-prefilter %harness-eval-handler tool-call handle-tool-frame
+      dispatch-tool! %authorized-agent-tool-name
+      %call-with-evaluation-tool-authority %evaluation-tool-permitted-p
       register-tool! unregister-tool! %tool-receipt!)
      "Safety-stack functions and generics themselves. Redefining them would defeat the safety stack. Cannot be added to or replaced from inside harness-eval — operator action at the REPL is the only path.")
+    (:dispatch-authority-state
+     (*current-agent* *operator-tool-dispatch-p* with-operator-tool-dispatch
+      progv)
+     "Dispatch authority state. Evaluated code retains its calling agent and cannot create operator scope or dynamically replace either authority binding.")
     (:tool-struct
      (tool-handler tool-permission tool-name tool-description tool-schema
       find-tool list-tools clear-all-tools make-tool)
@@ -172,7 +531,8 @@ generalised mentions/2 rule. ADR-012 §A1.")
     (:harness-eval-install-fn
      (install-self-modification-tools! uninstall-self-modification-tools! harness-eval)
      "Install-fn pair and the harness-eval tool symbol itself. Cannot reinstall or uninstall the port from inside harness-eval — operator action."))
-  "Partitions *safety-layer-symbols* into ten categories. Each entry is
+  "Groups *safety-layer-symbols* into twelve categories. Entries may overlap.
+Each entry is
   (category-keyword (symbol …) \"why string\")
 The veto handler looks up a symbol's category to emit a teaching
 hint; harness-list-safety-layer renders the categorised view when
@@ -233,6 +593,7 @@ depth :no-active-theory case)."
     (sb-ext:exit                     . :exit)
     (sb-ext:quit                     . :quit)
     (sb-ext:without-package-locks    . :without-package-locks)
+    (sb-ext:unlock-package           . :unlock-package)
     ;; ADR-012 §A1 — eval/load/read primitives at top level
     (eval                            . :eval-bypass)
     (compile                         . :compile-bypass)
@@ -401,6 +762,10 @@ added to *safety-layer-symbols* so the reasoner mentions/2 path also fires."
 ;;   - the top-level operator and target (per CON-003)
 ;;   - every symbol in functional position (head of a cons cell), including
 ;;     deeply nested ones — this catches body-buried calls per ADR-012 §A1
+;;   - every safety-layer symbol in any position.  This deliberately
+;;     conservative rule catches special-variable bindings in LET, lambda
+;;     lists, destructuring forms, and future binding macros without having
+;;     to enumerate every Common Lisp binding construct.
 ;;   - every symbol that is the target of a buried defmethod/defgeneric/defun —
 ;;     so `(progn (defmethod tool-call …))` produces
 ;;       (:defmethod-targets (tool-call))
@@ -470,6 +835,12 @@ return the specialiser identifier (class symbol or eql object)."
     ;; deep walk for free-symbols + buried definition targets
     (labels ((walk (x)
                (cond
+                 ;; Safety authority/state names are significant even in
+                 ;; value position.  In particular, a special variable in a
+                 ;; lambda list or binding pattern is not a functional head.
+                 ((symbolp x)
+                  (when (safety-layer-symbol-p x)
+                    (setf (gethash x free) t)))
                  ((not (consp x)) nil)
                  (t
                   (let ((head (car x)))
@@ -496,6 +867,18 @@ return the specialiser identifier (class symbol or eql object)."
                        (loop for (var val) on (cdr x) by #'cddr
                              when (symbolp var)
                                do (setf (gethash var free) t)))
+                      ((let let*)
+                       ;; Binding a safety special is authority mutation just
+                       ;; as surely as SETQ. Record every binding variable so
+                       ;; the mentions/2 floor can distinguish safe locals.
+                       (let ((bindings (and (consp (cdr x)) (second x))))
+                         (when (listp bindings)
+                           (dolist (binding bindings)
+                             (let ((var (if (consp binding)
+                                            (first binding)
+                                            binding)))
+                               (when (symbolp var)
+                                 (setf (gethash var free) t)))))))
                       ((set makunbound)
                        (let ((a (and (consp (cdr x)) (second x))))
                          (cond
@@ -810,53 +1193,63 @@ Returns (values form parse-error-or-nil)."
         (values (read-from-string form-string) nil))
     (error (c) (values nil c))))
 
+(defun %lift-facts (form-id lift)
+  "Return every per-call reasoner fact for FORM-ID in stable assertion order."
+  (append
+   (list (list 'operator-of form-id (getf lift :operator)))
+   (when (getf lift :target)
+     (list (list 'operator-target form-id (getf lift :target))))
+   (mapcar (lambda (target) (list 'defmethod-targets form-id target))
+           (getf lift :defmethod-targets))
+   (mapcar (lambda (target) (list 'defgeneric-targets form-id target))
+           (getf lift :defgeneric-targets))
+   (mapcar (lambda (target) (list 'defun-targets form-id target))
+           (getf lift :defun-targets))
+   (mapcar (lambda (symbol) (list 'mentions form-id symbol))
+           (getf lift :free-symbols))))
+
 (defun %assert-lift-facts! (handle form-id lift)
-  "Assert per-call facts for FORM-ID drawn from LIFT plist. Returns nothing
-useful; %retract-lift-facts! mirrors this."
-  (handler-case (assert-fact! handle (list 'operator-of form-id (getf lift :operator)))
-    (error () nil))
-  (when (getf lift :target)
-    (handler-case (assert-fact! handle (list 'operator-target form-id (getf lift :target)))
-      (error () nil)))
-  (dolist (g (getf lift :defmethod-targets))
-    (handler-case (assert-fact! handle (list 'defmethod-targets form-id g))
-      (error () nil)))
-  (dolist (g (getf lift :defgeneric-targets))
-    (handler-case (assert-fact! handle (list 'defgeneric-targets form-id g))
-      (error () nil)))
-  (dolist (s (getf lift :defun-targets))
-    (handler-case (assert-fact! handle (list 'defun-targets form-id s))
-      (error () nil)))
-  (dolist (s (getf lift :free-symbols))
-    (handler-case (assert-fact! handle (list 'mentions form-id s))
-      (error () nil))))
+  "Assert all per-call facts. Return success and the first condition.
+
+An assertion failure retracts the successfully asserted prefix on a best-effort
+basis.  Callers must treat a false first value as a reasoner veto."
+  (let ((asserted nil))
+    (handler-case
+        (progn
+          (dolist (fact (%lift-facts form-id lift))
+            (assert-fact! handle fact)
+            (push fact asserted))
+          (values t nil))
+      (error (condition)
+        (dolist (fact asserted)
+          (ignore-errors (retract-fact! handle fact)))
+        (values nil condition)))))
 
 (defun %retract-lift-facts! (handle form-id lift)
-  (handler-case (retract-fact! handle (list 'operator-of form-id (getf lift :operator)))
-    (error () nil))
-  (when (getf lift :target)
-    (handler-case (retract-fact! handle (list 'operator-target form-id (getf lift :target)))
-      (error () nil)))
-  (dolist (g (getf lift :defmethod-targets))
-    (handler-case (retract-fact! handle (list 'defmethod-targets form-id g))
-      (error () nil)))
-  (dolist (g (getf lift :defgeneric-targets))
-    (handler-case (retract-fact! handle (list 'defgeneric-targets form-id g))
-      (error () nil)))
-  (dolist (s (getf lift :defun-targets))
-    (handler-case (retract-fact! handle (list 'defun-targets form-id s))
-      (error () nil)))
-  (dolist (s (getf lift :free-symbols))
-    (handler-case (retract-fact! handle (list 'mentions form-id s))
-      (error () nil))))
+  "Retract all per-call facts. Return success and the first condition."
+  (let ((first-error nil))
+    (dolist (fact (%lift-facts form-id lift))
+      (handler-case (retract-fact! handle fact)
+        (error (condition)
+          (unless first-error (setf first-error condition)))))
+    (values (null first-error) first-error)))
 
 (defun %assert-safety-layer-facts! (handle)
   "Install one (safety-layer-symbol S) fact per element of
 *safety-layer-symbols*. Called by INSTALL-SELF-MODIFICATION-TOOLS! after
 load-theory and before the first harness-eval call."
-  (dolist (s *safety-layer-symbols*)
-    (handler-case (assert-fact! handle (list 'safety-layer-symbol s))
-      (error () nil))))
+  (let ((asserted nil))
+    (handler-case
+        (progn
+          (dolist (symbol *safety-layer-symbols*)
+            (let ((fact (list 'safety-layer-symbol symbol)))
+              (assert-fact! handle fact)
+              (push fact asserted)))
+          t)
+      (error (condition)
+        (dolist (fact asserted)
+          (ignore-errors (retract-fact! handle fact)))
+        (error condition)))))
 
 (defun %query-forbidden (handle form-id)
   "Return the proof-result plist, or NIL when the reasoner query fails."
@@ -865,35 +1258,69 @@ load-theory and before the first harness-eval call."
 
 (defun %eval-form-with-timeout (form package-name timeout-ms)
   "Evaluate FORM in PACKAGE-NAME under TIMEOUT-MS. Returns one of:
-  (list :ok <value> <stdout-string> <elapsed-ms>)
-  (list :error <condition> <stdout-string> <elapsed-ms>)
+  (list :ok <bounded-value-string> <stdout-string> <elapsed-ms>)
+  (list :error <condition-type> <message-string> <stdout-string> <elapsed-ms>)
   :timeout"
   (let* ((mb       (make-mailbox))
+         (nonce    (gensym "EVALUATION-RESULT-"))
          (start    (get-internal-real-time))
          (pkg      (or (find-package package-name)
                        (find-package :cl-user)))
+         (originating-agent *current-agent*)
+         (originating-tools
+           (and originating-agent
+                (agent-tools originating-agent)))
          (worker
            (sb-thread:make-thread
             (lambda ()
-              (let ((buf (make-string-output-stream)))
-                (handler-case
-                    (let ((*package* pkg)
-                          (*standard-output* buf))
-                      (let ((value (eval form)))
-                        (send! mb (list :ok value
-                                        (get-output-stream-string buf)
-                                        (%elapsed-ms start)))))
-                  (error (c)
-                    (send! mb (list :error c
+              (let ((result
+                      (handler-case
+                          (%call-with-evaluation-tool-authority
+                           originating-agent
+                           originating-tools
+                           (lambda ()
+                             (let ((buf (make-string-output-stream)))
+                               (handler-case
+                                   (let ((*package* pkg)
+                                         (*standard-output* buf)
+                                         (*current-agent* originating-agent)
+                                         (*operator-tool-dispatch-p* nil))
+                                     (list :ok (%bounded-prin1 (eval form))
+                                           (get-output-stream-string buf)
+                                           (%elapsed-ms start)))
+                                 (error (c)
+                                   (list
+                                    :error
+                                    (type-of c)
+                                    (handler-case (princ-to-string c)
+                                      (error ()
+                                        "Unprintable evaluation condition."))
                                     (get-output-stream-string buf)
                                     (%elapsed-ms start)))))))
+                        (error (c)
+                          (list :error (type-of c)
+                                "Evaluation worker failed closed."
+                                "" (%elapsed-ms start))))))
+                ;; Publish only after the authority cleanup has sanitized the
+                ;; visible agent slot and removed the active thread ceiling.
+                (handler-case (send! mb (cons nonce result))
+                  (error () nil))))
             :name "harness-eval-worker"))
-         (reply (receive! mb :timeout (/ (max 1 timeout-ms) 1000.0))))
+         (wire-reply
+           (receive! mb :timeout (/ (max 1 timeout-ms) 1000.0))))
     (cond
-      ((eq reply :timeout)
+      ((eq wire-reply :timeout)
        (handler-case (sb-thread:terminate-thread worker) (error () nil))
+       (handler-case (sb-thread:join-thread worker) (error () nil))
        :timeout)
-      (t reply))))
+      ((and (consp wire-reply) (eq nonce (first wire-reply)))
+       (rest wire-reply))
+      (t
+       (handler-case (sb-thread:terminate-thread worker) (error () nil))
+       (handler-case (sb-thread:join-thread worker) (error () nil))
+       (list :error 'invalid-worker-transport
+             "Evaluation worker transport failed closed."
+             "" (%elapsed-ms start))))))
 
 (defun %elapsed-ms (start)
   (round (* 1000 (/ (- (get-internal-real-time) start)
@@ -1100,28 +1527,43 @@ Always returns a plist; never raises."
          res))
 
       (t
-       (%assert-lift-facts! handle form-id lift)
-       (let ((veto-result nil))
-         (unwind-protect
-             (let ((proof (%query-forbidden handle form-id)))
-               (cond
-                 ((not (%proof-result-valid-p proof))
-                  (setf veto-result
-                        (list :status :vetoed :phase :reasoner
-                              :goal (list 'forbidden 'eval-call form-id)
-                              :derivation '((invalid-reasoner-evidence))
-                              :hint "Reasoner evidence was missing or malformed."
-                              :time-ms 0)))
-                 ((proof-result-positive-p proof)
-                  (let* ((derivation (getf proof :derivation))
-                         (hint       (%vetoed-hint derivation)))
-                    (setf veto-result
-                          (list :status :vetoed :phase :reasoner
-                                :goal (list 'forbidden 'eval-call form-id)
-                                :derivation derivation
-                                :hint hint
-                                :time-ms (or (getf proof :time-ms) 0)))))))
-           (%retract-lift-facts! handle form-id lift))
+       (multiple-value-bind (asserted-p assertion-error)
+           (%assert-lift-facts! handle form-id lift)
+         (let ((veto-result nil))
+           (if (not asserted-p)
+               (setf veto-result
+                     (list :status :vetoed :phase :reasoner
+                           :goal (list 'forbidden 'eval-call form-id)
+                           :derivation '((reasoner-fact-assertion-failed))
+                           :hint (princ-to-string assertion-error)
+                           :time-ms 0))
+               (let ((proof (%query-forbidden handle form-id)))
+                 (multiple-value-bind (retracted-p retraction-error)
+                     (%retract-lift-facts! handle form-id lift)
+                   (cond
+                     ((not retracted-p)
+                      (setf veto-result
+                            (list :status :vetoed :phase :reasoner
+                                  :goal (list 'forbidden 'eval-call form-id)
+                                  :derivation '((reasoner-fact-retraction-failed))
+                                  :hint (princ-to-string retraction-error)
+                                  :time-ms 0)))
+                     ((not (%proof-result-valid-p proof))
+                      (setf veto-result
+                            (list :status :vetoed :phase :reasoner
+                                  :goal (list 'forbidden 'eval-call form-id)
+                                  :derivation '((invalid-reasoner-evidence))
+                                  :hint "Reasoner evidence was missing or malformed."
+                                  :time-ms 0)))
+                     ((proof-result-positive-p proof)
+                      (let* ((derivation (getf proof :derivation))
+                             (hint (%vetoed-hint derivation)))
+                        (setf veto-result
+                              (list :status :vetoed :phase :reasoner
+                                    :goal (list 'forbidden 'eval-call form-id)
+                                    :derivation derivation
+                                    :hint hint
+                                    :time-ms (or (getf proof :time-ms) 0)))))))))
          (cond
            (veto-result
             (%emit-receipt! 'harness-eval agent-id form-string
@@ -1133,9 +1575,9 @@ Always returns a plist; never raises."
             veto-result)
            (t
             (%after-reasoner-pipeline form form-string lift form-id
-                                       pkg-name timeout-ms agent-id start))))))))
+                                       pkg-name timeout-ms agent-id)))))))))
 
-(defun %after-reasoner-pipeline (form form-string lift form-id pkg-name timeout-ms agent-id start)
+(defun %after-reasoner-pipeline (form form-string lift form-id pkg-name timeout-ms agent-id)
   ;; Step 4 — capture pre-state for every (re)defined target (top-level
   ;; OR buried), eval, capture post-state diffs, push rollback records
   ;; per target, push origin-index events per target.
@@ -1151,28 +1593,29 @@ Always returns a plist; never raises."
                            (list :form-id form-id))
            res))
         ((eq (first reply) :error)
-         (let* ((c (second reply))
-                (stdout (third reply))
-                (elapsed (fourth reply))
+         (let* ((condition-type (second reply))
+                (message (third reply))
+                (stdout (fourth reply))
+                (elapsed (fifth reply))
                 (res (list :status :error :phase :evaluation
-                           :condition-type (type-of c)
-                           :message (princ-to-string c)
+                           :condition-type condition-type
+                           :message message
                            :elapsed-ms elapsed
                            :stdout stdout)))
            (%emit-receipt! 'harness-eval agent-id form-string
                            :evaluation :error elapsed
                            (list :form-id form-id
-                                 :condition-type (type-of c)
-                                 :message (princ-to-string c)))
+                                 :condition-type condition-type
+                                 :message message))
            res))
-        (t   ; (:ok value stdout elapsed)
+        (t   ; (:ok bounded-value-string stdout elapsed)
          (let* ((value (second reply))
                 (stdout (third reply))
                 (elapsed (fourth reply))
                 (rollback-records (%form-rollback-record lift agent-id form-hash
                                                           pre-state))
                 (res (list :status :ok :phase :evaluated
-                           :value (%bounded-prin1 value)
+                           :value value
                            :stdout stdout
                            :elapsed-ms elapsed)))
            (%form-record-definition lift form-string agent-id rollback-records)
@@ -1180,7 +1623,7 @@ Always returns a plist; never raises."
                            :evaluated :ok elapsed
                            (list :form-id form-id
                                  :value-fingerprint
-                                 (%form-fingerprint (%bounded-prin1 value))
+                                 (%form-fingerprint value)
                                  :rollback-indices
                                  (mapcar (lambda (r) (getf r :index))
                                          rollback-records)))

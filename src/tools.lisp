@@ -1,14 +1,4 @@
 ;;;; tools.lisp — tool definition, registry, schema conversion (CON-004)
-;;;;
-;;;; A tool is a named, schema-typed handler that an agent's LLM provider
-;;;; can call. The 2k harness keeps tool registration provider-agnostic:
-;;;; the schema is internal CL data; the JSON-Schema conversion produces
-;;;; CL nested alists (not strings) so we don't pull in a JSON library
-;;;; until M8 (provider drivers) actually needs to serialise.
-;;;;
-;;;; Live redefinition: `define-tool` is a thin wrapper around register-tool!
-;;;; which overwrites by name. Re-defining a tool replaces its handler;
-;;;; the next dispatch sees the new handler (REQ-004 substrate).
 
 (in-package #:anuna-imago)
 
@@ -41,6 +31,14 @@
   (:report (lambda (condition stream)
              (format stream "Tool ~S is not authorized for the current agent."
                      (unauthorized-tool-call-name condition)))))
+
+(defvar *operator-tool-dispatch-p* nil)
+
+(defmacro with-operator-tool-dispatch (&body body)
+  "Establish explicit operator authority outside an agent turn."
+  `(progn
+     (when *current-agent* (error "Operator dispatch inside an agent turn."))
+     (let ((*operator-tool-dispatch-p* t)) ,@body)))
 
 ;; ---------------------------------------------------- validation ---
 
@@ -92,8 +90,7 @@ succeed."
     ((keywordp name)
      (or (find-symbol (symbol-name name) :anuna-imago) name))
     ((stringp name)
-     (or (find-symbol (string-upcase name) :anuna-imago)
-         (intern (string-upcase name) :anuna-imago)))
+     (or (find-symbol (string-upcase name) :anuna-imago) name))
     (t name)))
 
 (defun find-tool (name)
@@ -131,19 +128,20 @@ Accepts symbol, keyword, or string — see %normalize-tool-name."
 
 ;; ---------------------------------------------------- dispatch ---
 
-(defun %tool-name-equal-p (left right)
-  "Compare provider tool-name designators without trusting package identity."
-  (let ((left-name (typecase left (symbol (symbol-name left)) (string left)))
-        (right-name (typecase right (symbol (symbol-name right)) (string right))))
-    (and left-name right-name (string-equal left-name right-name))))
-
 (defun %authorized-agent-tool-name (tool-name)
   "Return the allowlisted registry designator and authorization status."
-  (if (null *current-agent*)
-      (values tool-name t)
-      (let ((allowed (find tool-name (agent-tools *current-agent*)
-                           :test #'%tool-name-equal-p)))
-        (values (or allowed tool-name) (not (null allowed))))))
+  (multiple-value-bind (evaluation-permitted-p evaluation-active-p
+                        evaluation-name)
+      (%evaluation-tool-permitted-p tool-name)
+    (cond
+      (evaluation-active-p
+       (values evaluation-name evaluation-permitted-p))
+      (*current-agent*
+       (let ((allowed (find tool-name (agent-tools *current-agent*)
+                            :test #'%tool-name-equal-p)))
+         (values (or allowed tool-name) (not (null allowed)))))
+      (*operator-tool-dispatch-p* (values tool-name t))
+      (t (values tool-name nil)))))
 
 (defun dispatch-tool! (name args)
   "Invoke tool NAME with plist ARGS; signal when unavailable or unauthorized."

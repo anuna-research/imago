@@ -300,6 +300,86 @@ result would have been incorporated."
              "post-hook rewrite to an unadvertised name is denied")
       (check (zerop hidden-calls) "rewritten hidden handler remains untouched"))))
 
+(defun test-drive-stream-enforces-agent-authority ()
+  "REQ-003: exported DRIVE-STREAM cannot bypass the agent tool allowlist."
+  (format t "~%-- drive-stream-enforces-agent-authority (SPEC-014 TEST-051) --~%")
+  (clear-all-hooks) (clear-all-tools)
+  (let ((hidden-calls 0))
+    (define-tool drive-stream-hidden
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf hidden-calls)
+                 :hidden-ran))
+    (let* ((agent
+             (make-instance
+              'agent
+              :id 'drive-stream-authority-agent
+              :capability "authorization:direct-driver"
+              :tools nil
+              :provider
+              (make-stub-provider
+               :responder
+               (lambda (message)
+                 (declare (ignore message))
+                 (list (list :tool-use "direct-1"
+                             'drive-stream-hidden nil))))))
+           (reply (drive-stream agent "try hidden"))
+           (result (first (getf reply :tool-results))))
+      (check (eq :unauthorized (getf result :status))
+             "direct DRIVE-STREAM dispatch uses the supplied agent allowlist")
+      (check (zerop hidden-calls)
+             "direct DRIVE-STREAM leaves an unadvertised handler untouched"))))
+
+(defun test-cross-thread-nested-dispatch-denied ()
+  "CON-003: losing a dynamic binding in a child thread cannot grant authority."
+  (format t "~%-- cross-thread-nested-dispatch-denied (SPEC-014 TEST-052) --~%")
+  (clear-all-hooks) (clear-all-tools)
+  (let ((hidden-calls 0)
+        (child-agent :not-observed))
+    (define-tool threaded-hidden
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf hidden-calls)
+                 :hidden-ran))
+    (define-tool threaded-entry
+      :schema ()
+      :handler
+      (lambda (args)
+        (declare (ignore args))
+        (sb-thread:join-thread
+         (sb-thread:make-thread
+          (lambda ()
+            (setf child-agent *current-agent*)
+            (handler-case
+                (progn
+                  (dispatch-tool! 'threaded-hidden nil)
+                  :escaped)
+              (error () :denied)))))))
+    (let* ((agent
+             (make-instance
+              'agent
+              :id 'threaded-authority-agent
+              :capability "authorization:threaded"
+              :tools '(threaded-entry)
+              :provider
+              (make-stub-provider
+               :responder
+               (lambda (message)
+                 (declare (ignore message))
+                 (list (list :tool-use "threaded-1"
+                             'threaded-entry nil))))))
+           (reply (process-turn agent (make-ask "threaded")))
+           (result (first (getf reply :tool-results))))
+      (check (null child-agent)
+             "SBCL child thread does not inherit *current-agent*")
+      (check (eq :ok (getf result :status)))
+      (check (eq :denied (getf result :value))
+             "an unscoped child-thread dispatch fails closed")
+      (check (zerop hidden-calls)
+             "child thread cannot reach an unadvertised handler"))))
+
 (defun test-nested-tool-dispatch-retains-agent-authority ()
   "CON-003: a tool cannot escape its caller's allowlist by nested dispatch."
   (format t "~%-- nested-tool-dispatch-retains-agent-authority (SPEC-014 CON-003) --~%")
@@ -343,9 +423,9 @@ result would have been incorporated."
     ;; The same registered function remains callable in explicit operator
     ;; scope, preventing an always-deny implementation from satisfying the
     ;; prohibited-action assertion above.
-    (let ((*current-agent* nil))
+    (with-operator-tool-dispatch
       (check (eq :hidden-ran (dispatch-tool! 'nested-hidden nil))
-             "unbound direct operator dispatch remains available"))
+             "explicit direct operator dispatch remains available"))
     (check (= 1 hidden-calls) "only the explicit operator call reaches hidden tool")))
 
 ;; ----------------------------------------------- live redefinition ---
@@ -402,6 +482,8 @@ result would have been incorporated."
   (test-tool-call-denies-unadvertised-registered-tool)
   (test-tool-call-allows-exactly-advertised-tool)
   (test-tool-call-authorizes-normalized-rewritten-name)
+  (test-drive-stream-enforces-agent-authority)
+  (test-cross-thread-nested-dispatch-denied)
   (test-nested-tool-dispatch-retains-agent-authority)
   (test-process-turn-redefinable)
   (test-run-echo-demo)

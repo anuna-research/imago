@@ -43,6 +43,7 @@
             ("(sb-ext:exit)"                                       :exit)
             ("(sb-ext:quit)"                                       :quit)
             ("(sb-ext:without-package-locks (foo))"                :without-package-locks)
+            ("(sb-ext:unlock-package :com.inuoe.jzon)"             :unlock-package)
             ("(eval '(defmethod tool-call ((a) (b) (c)) :pwn))"    :eval-bypass)
             ("(read-from-string \"(defun f () 1)\")"               :read-from-string-bypass)
             ("(load \"/tmp/rogue.lisp\")"                          :load-bypass)
@@ -395,9 +396,892 @@ Tests bind this to make the reasoner veto specific forms.")
 (defvar *m12-reasoner-protected-calls* 0
   "Count executions behind the SPEC-014 fail-closed reasoner gate.")
 
+(defvar *m12-operator-authority-hidden-calls* 0
+  "Count hidden tool executions attempted from inside harness-eval.")
+
+(defvar *m12-authority-decoy-thread* nil
+  "Live thread used to test that evaluation authority keys cannot be spoofed.")
+
+(defvar *m12-authority-print-agent* nil
+  "Agent whose raw tool slot a trusted PRINT-OBJECT test callback mutates.")
+
+(defvar *m12-authority-print-calls* 0
+  "Count trusted PRINT-OBJECT callbacks during worker serialization.")
+
+(defclass m12-authority-print-probe () ())
+
+(defmethod print-object ((object m12-authority-print-probe) stream)
+  (declare (ignore object))
+  (incf *m12-authority-print-calls*)
+  (when *m12-authority-print-agent*
+    (setf (agent-tools *m12-authority-print-agent*)
+          '(m12-operator-authority-hidden)))
+  (write-string "#<M12-AUTHORITY-PRINT-PROBE>" stream))
+
 (defun m12-reasoner-protected-probe ()
   (incf *m12-reasoner-protected-calls*)
   :protected-action-ran)
+
+(defun %m12-operator-authority-frame (id)
+  (format nil
+          "(anuna-imago::handle-tool-frame nil (list :tool-use ~S 'anuna-imago.test::m12-operator-authority-hidden nil))"
+          id))
+
+(defun test-m12-handler-denies-manufactured-operator-authority ()
+  "SPEC-014 TEST-065: harness-eval cannot manufacture operator authority."
+  (format t "~%-- m12-handler-denies-manufactured-operator-authority (SPEC-014 TEST-065) --~%")
+  (let* ((name 'm12-operator-authority-hidden)
+         (prior (find-tool name))
+         (alias-allowed-name 'anuna-imago::m12-alias-allowed)
+         (alias-hidden-name 'anuna-imago::m12-alias-deniedx)
+         (alias-allowed-prior (find-tool alias-allowed-name))
+         (alias-hidden-prior (find-tool alias-hidden-name))
+         (escape-macro 'm12-operator-authority-escape)
+         (thread-escape-macro 'm12-operator-authority-thread-escape)
+         (decoy-stop (sb-thread:make-semaphore :count 0))
+         (decoy-thread nil)
+         (agent (make-instance 'agent
+                               :id 'm12-authority-agent
+                               :capability "self-modification:authority-test"
+                               :tools (list alias-allowed-name))))
+    (setf *m12-operator-authority-hidden-calls* 0)
+    (when (macro-function escape-macro)
+      (fmakunbound escape-macro))
+    (when (macro-function thread-escape-macro)
+      (fmakunbound thread-escape-macro))
+    (unwind-protect
+         (progn
+           (setf decoy-thread
+                 (sb-thread:make-thread
+                  (lambda () (sb-thread:wait-on-semaphore decoy-stop))
+                  :name "m12-authority-decoy")
+                 *m12-authority-decoy-thread* decoy-thread)
+           (register-tool!
+            (make-tool
+             :name name
+             :description "Must remain unreachable from the evaluated form."
+             :handler
+             (lambda (args)
+               (declare (ignore args))
+               (incf *m12-operator-authority-hidden-calls*)
+               :hidden-ran)))
+           (register-tool!
+            (make-tool :name alias-allowed-name
+                       :description "Mutable-string snapshot control."
+                       :handler (lambda (args)
+                                  (declare (ignore args))
+                                  :alias-allowed-ran)))
+           (register-tool!
+            (make-tool :name alias-hidden-name
+                       :description "Must not become allowed by aliasing."
+                       :handler
+                       (lambda (args)
+                         (declare (ignore args))
+                         (incf *m12-operator-authority-hidden-calls*)
+                         :alias-hidden-ran)))
+           ;; Even a valid negative proof cannot erase the originating agent
+           ;; binding from the evaluation worker. Direct flag binding must
+           ;; therefore take the agent branch and return :UNAUTHORIZED.
+           (let ((anuna-imago::*reasoner-ipc-call* #'%m12-stub-reasoner)
+                 (anuna-imago::*active-theory-handle* :m12-authority-worker)
+                 (anuna-imago::*harness-eval-audit-log* nil)
+                 (*current-agent* agent))
+             (let* ((frame (%m12-operator-authority-frame "state-escape"))
+                    (form (format nil
+                                  "(let ((anuna-imago::*operator-tool-dispatch-p* t)) ~A)"
+                                  frame))
+                    (result (anuna-imago::%harness-eval-handler
+                             (list :form form))))
+               (check (eq :ok (getf result :status))
+                      "authority-state attempt completes as an evaluated denial")
+               (check (search "UNAUTHORIZED" (getf result :value)
+                              :test #'char-equal)
+                      "originating agent allowlist denies the hidden frame"))
+             (let* ((frame (%m12-operator-authority-frame "macro-escape"))
+                    (form (format nil
+                                  "(anuna-imago:with-operator-tool-dispatch ~A)"
+                                  frame))
+                    (result (anuna-imago::%harness-eval-handler
+                             (list :form form))))
+               (check (eq :error (getf result :status))
+                      "operator-scope macro rejects the retained agent context")))
+
+           ;; The reasoner fact seam must also catch attempts that bind away
+           ;; both the agent and operator-authority state before dispatch.
+           (let ((unsafe (make-hash-table :test 'eq)))
+             (labels ((fact-aware-reasoner (op &rest args)
+                        (case op
+                          (:assert-fact
+                           (let ((fact (second args)))
+                             (when (and (consp fact)
+                                        (eq 'anuna-imago::mentions
+                                            (first fact))
+                                        (anuna-imago::safety-layer-symbol-p
+                                         (third fact)))
+                               (setf (gethash (second fact) unsafe)
+                                     (third fact))))
+                           :ok)
+                          (:retract-fact :ok)
+                          (:query
+                           (let* ((goal (second args))
+                                  (form-id (third goal))
+                                  (trigger (gethash form-id unsafe)))
+                             (if trigger
+                                 (list :tag :+delta
+                                       :derivation
+                                       (list
+                                        (list 'anuna-imago::forbidden
+                                              'anuna-imago::eval-call form-id)
+                                        (list 'anuna-imago::mentions
+                                              form-id trigger)
+                                        (list 'anuna-imago::safety-layer-symbol
+                                              trigger))
+                                       :time-ms 1)
+                                 '(:tag :-delta :derivation nil :time-ms 1))))
+                          (otherwise :ok))))
+               (let ((anuna-imago::*reasoner-ipc-call* #'fact-aware-reasoner)
+                     (anuna-imago::*active-theory-handle* :m12-authority-facts)
+                     (anuna-imago::*harness-eval-audit-log* nil)
+                     (*current-agent* agent))
+                 (dolist (form
+                          (list
+                           (format nil
+                                   "(let ((anuna-imago:*current-agent* nil) (anuna-imago::*operator-tool-dispatch-p* t)) ~A)"
+                                   (%m12-operator-authority-frame "dual-escape"))
+                           (format nil
+                                   "(progv '(anuna-imago:*current-agent* anuna-imago::*operator-tool-dispatch-p*) '(nil t) ~A)"
+                                   (%m12-operator-authority-frame "progv-escape"))
+                           ;; Put both specials after an innocuous lambda-list
+                           ;; variable.  This verifies the lift catches safety
+                           ;; symbols in value position, not only the first
+                           ;; cons head or a hard-coded LET shape.
+                           (format nil
+                                   "(multiple-value-bind (ignored anuna-imago:*current-agent* anuna-imago::*operator-tool-dispatch-p*) (values nil nil t) (declare (ignore ignored)) ~A)"
+                                   (%m12-operator-authority-frame
+                                    "binding-pattern-escape"))))
+                   (let ((result (anuna-imago::%harness-eval-handler
+                                  (list :form form))))
+                     (check (eq :vetoed (getf result :status))
+                            "authority binding reaches the safety fact seam")))
+
+                 ;; The same state can be reached without spelling a
+                 ;; protected symbol: resolve SET and both authority names
+                 ;; from strings, then resolve and invoke DISPATCH-TOOL!.
+                 ;; Runtime resolution primitives must reach the fact seam.
+                 (let* ((form
+                          "(progn (funcall (symbol-function (find-symbol \"SET\" \"COMMON-LISP\")) (find-symbol \"*CURRENT-AGENT*\" \"ANUNA-IMAGO\") nil) (funcall (symbol-function (find-symbol \"SET\" \"COMMON-LISP\")) (find-symbol \"*OPERATOR-TOOL-DISPATCH-P*\" \"ANUNA-IMAGO\") t) (funcall (symbol-function (find-symbol \"DISPATCH-TOOL!\" \"ANUNA-IMAGO\")) (find-symbol \"M12-OPERATOR-AUTHORITY-HIDDEN\" \"ANUNA-IMAGO.TEST\") nil))")
+                        (result (anuna-imago::%harness-eval-handler
+                                 (list :form form))))
+                   (check (eq :error (getf result :status))
+                          "computed symbol/function escape is denied")
+                   (check (search "not authorized" (getf result :message)
+                                  :test #'char-equal)
+                          "computed dispatch observes the frozen allowlist"))
+
+                 ;; A macro can synthesize the protected bindings from
+                 ;; strings, leaving neither authority symbol in its source
+                 ;; or later call form.  Macro definitions must therefore be
+                 ;; denied at the fact seam; macroexpanding untrusted code to
+                 ;; inspect it would itself execute the macro function.
+                 (let* ((definition
+                          "(defmacro anuna-imago.test::m12-operator-authority-escape () (let ((agent (find-symbol \"*CURRENT-AGENT*\" \"ANUNA-IMAGO\")) (scope (find-symbol \"*OPERATOR-TOOL-DISPATCH-P*\" \"ANUNA-IMAGO\")) (dispatch (find-symbol \"DISPATCH-TOOL!\" \"ANUNA-IMAGO\")) (hidden (find-symbol \"M12-OPERATOR-AUTHORITY-HIDDEN\" \"ANUNA-IMAGO.TEST\"))) (list 'let (list (list agent nil) (list scope t)) (list dispatch (list 'quote hidden) nil))))")
+                        (result (anuna-imago::%harness-eval-handler
+                                 (list :form definition))))
+                   (check (eq :ok (getf result :status))
+                          "benign macro definition remains supported"))
+                 (let ((result
+                         (anuna-imago::%harness-eval-handler
+                          (list :form
+                                "(anuna-imago.test::m12-operator-authority-escape)"))))
+                   (check (eq :error (getf result :status))
+                          "generated authority bindings cannot widen dispatch")
+                   (check (search "not authorized" (getf result :message)
+                                  :test #'char-equal)
+                          "generated dispatch observes the frozen allowlist"))
+
+                 ;; SB-THREAD:*CURRENT-THREAD* is dynamically bindable.  A
+                 ;; generated binding to another live THREAD must not change
+                 ;; the authority lookup key for the actual evaluation worker.
+                 (let* ((definition
+                          "(defmacro anuna-imago.test::m12-operator-authority-thread-escape () (let ((thread (find-symbol \"*CURRENT-THREAD*\" \"SB-THREAD\")) (decoy (find-symbol \"*M12-AUTHORITY-DECOY-THREAD*\" \"ANUNA-IMAGO.TEST\")) (agent (find-symbol \"*CURRENT-AGENT*\" \"ANUNA-IMAGO\")) (scope (find-symbol \"*OPERATOR-TOOL-DISPATCH-P*\" \"ANUNA-IMAGO\")) (dispatch (find-symbol \"DISPATCH-TOOL!\" \"ANUNA-IMAGO\")) (hidden (find-symbol \"M12-OPERATOR-AUTHORITY-HIDDEN\" \"ANUNA-IMAGO.TEST\"))) (list 'let (list (list thread decoy) (list agent nil) (list scope t)) (list dispatch (list 'quote hidden) nil))))")
+                        (result (anuna-imago::%harness-eval-handler
+                                 (list :form definition))))
+                   (check (eq :ok (getf result :status))
+                          "computed thread-spoof macro definition is accepted"))
+                 (let ((result
+                         (anuna-imago::%harness-eval-handler
+                          (list :form
+                                "(anuna-imago.test::m12-operator-authority-thread-escape)"))))
+                   (check (eq :error (getf result :status))
+                          "dynamic current-thread spoof cannot evade the ceiling")
+                   (check (search "not authorized" (getf result :message)
+                                  :test #'char-equal)
+                          "VM-thread identity preserves the frozen allowlist"))
+
+                 ;; DRIVE-STREAM is exported and binds the agent supplied by
+                 ;; its caller.  A fake agent that advertises the hidden tool
+                 ;; must still remain below the evaluation snapshot ceiling.
+                 (let* ((form
+                          "(let* ((fake (make-instance 'anuna-imago:agent :id 'fake-authority-agent :capability \"fake\" :tools '(anuna-imago.test::m12-operator-authority-hidden) :provider (anuna-imago:make-stub-provider :responder (lambda (message) (declare (ignore message)) (list (list :tool-use \"fake-drive\" 'anuna-imago.test::m12-operator-authority-hidden nil)))))) (drive (symbol-function (find-symbol \"DRIVE-STREAM\" \"ANUNA-IMAGO\"))) (reply (funcall drive fake \"escape\"))) (getf (first (getf reply :tool-results)) :status))")
+                        (result (anuna-imago::%harness-eval-handler
+                                 (list :form form))))
+                   (check (eq :ok (getf result :status))
+                          "fake-agent drive-stream attempt returns normally")
+                   (check (search "UNAUTHORIZED" (getf result :value)
+                                  :test #'char-equal)
+                          "nested drive-stream cannot widen the frozen allowlist"))
+
+                 ;; The originating allowlist may contain a mutable string.
+                 ;; Mutating the agent slot must not mutate the closure-owned
+                 ;; snapshot or authorize a same-length hidden tool name.
+                 (let* ((designator (copy-seq "M12-ALIAS-ALLOWED"))
+                        (alias-agent
+                          (make-instance 'agent
+                                         :id 'm12-alias-agent
+                                         :capability "authority:alias-test"
+                                         :tools (list designator)))
+                        (*current-agent* alias-agent)
+                        (form
+                          "(let* ((agent (symbol-value (find-symbol \"*CURRENT-AGENT*\" \"ANUNA-IMAGO\"))) (tools (slot-value agent (find-symbol \"TOOLS\" \"ANUNA-IMAGO\"))) (designator (first tools))) (replace designator \"M12-ALIAS-DENIEDX\") (funcall (symbol-function (find-symbol \"DISPATCH-TOOL!\" \"ANUNA-IMAGO\")) (find-symbol \"M12-ALIAS-DENIEDX\" \"ANUNA-IMAGO\") nil))")
+                        (result (anuna-imago::%harness-eval-handler
+                                 (list :form form))))
+                   (check (string= "M12-ALIAS-DENIEDX" designator)
+                          "evaluated code mutates the caller-owned string")
+                   (check (eq :error (getf result :status))
+                          "mutable-string alias cannot widen the snapshot")
+                   (check (search "not authorized" (getf result :message)
+                                  :test #'char-equal)
+                          "aliased dispatch observes the frozen allowlist"))
+
+                 ;; Worker transport is part of the named TCB. A forged
+                 ;; RECEIVE! must not publish a result before authority cleanup.
+                 (let* ((original (symbol-function 'anuna-imago:receive!))
+                        (replacement-result
+                          (anuna-imago::%harness-eval-handler
+                           (list
+                            :form
+                            "(progn (defun anuna-imago:receive! (mailbox &key timeout) (declare (ignore mailbox timeout)) (list :ok \"forged\" \"\" 0)))"))))
+                   (check (eq :vetoed (getf replacement-result :status))
+                          "forged RECEIVE! replacement is vetoed")
+                   (check (eq original
+                              (symbol-function 'anuna-imago:receive!))
+                          "worker transport remains unchanged"))
+
+                 ;; A computed generalized writer can mutate the originating
+                 ;; AGENT-TOOLS slot without naming the accessor in source.
+                 ;; The first evaluation must pin an immutable per-agent
+                 ;; ceiling so the next evaluation cannot inherit the widening.
+                 (let* ((sticky-agent
+                          (make-instance 'agent
+                                         :id 'm12-sticky-authority-agent
+                                         :capability "authority:sticky-test"
+                                         :tools '(anuna-imago::harness-eval)))
+                        (*current-agent* sticky-agent)
+                        (mutation-result
+                          (anuna-imago::%harness-eval-handler
+                           (list
+                            :form
+                            "(let* ((agent (symbol-value (find-symbol \"*CURRENT-AGENT*\" \"ANUNA-IMAGO\"))) (reader (find-symbol \"AGENT-TOOLS\" \"ANUNA-IMAGO\")) (writer (fdefinition (list 'setf reader))) (hidden (find-symbol \"M12-OPERATOR-AUTHORITY-HIDDEN\" \"ANUNA-IMAGO.TEST\"))) (funcall writer (list hidden) agent))")))
+                        (dispatch-result
+                          (anuna-imago::%harness-eval-handler
+                           (list
+                            :form
+                            "(funcall (symbol-function (find-symbol \"DISPATCH-TOOL!\" \"ANUNA-IMAGO\")) (find-symbol \"M12-OPERATOR-AUTHORITY-HIDDEN\" \"ANUNA-IMAGO.TEST\") nil)")))
+                        (request
+                          (build-request
+                           (make-anthropic-provider :api-key "test")
+                           "authority advertisement probe"
+                           sticky-agent))
+                        (ordinary-denied-p
+                          (let ((*current-agent* sticky-agent))
+                            (handler-case
+                                (progn (dispatch-tool! name nil) nil)
+                              (anuna-imago::unauthorized-tool-call () t)))))
+                   (check (eq :ok (getf mutation-result :status))
+                          "computed AGENT-TOOLS writer executes inside evaluation")
+                   (check (search "M12-OPERATOR-AUTHORITY-HIDDEN"
+                                  (getf mutation-result :value)
+                                  :test #'char-equal)
+                          "computed writer mutates the slot before cleanup")
+                   (check (null (agent-tools sticky-agent))
+                          "worker cleanup removes the unauthorized addition")
+                   (check (null (gethash "tools" request))
+                          "provider request advertises no widened tool")
+                   (check ordinary-denied-p
+                          "ordinary post-eval dispatch denies the hidden tool")
+                   (check (eq :error (getf dispatch-result :status))
+                          "later evaluation cannot widen its first-eval ceiling")
+                   (check (search "not authorized" (getf dispatch-result :message)
+                                  :test #'char-equal)
+                          "sticky per-agent ceiling denies the widened tool"))
+
+                 ;; Dotted and cyclic slot values are invalid allowlists. The
+                 ;; worker must publish deterministically, clear the raw slot,
+                 ;; and leave later evaluation and dispatch fail-closed.
+                 (dolist (case
+                          (list
+                           (list
+                            :dotted
+                            "(let* ((agent (symbol-value (find-symbol \"*CURRENT-AGENT*\" \"ANUNA-IMAGO\"))) (reader (find-symbol \"AGENT-TOOLS\" \"ANUNA-IMAGO\")) (writer (fdefinition (list 'setf reader))) (hidden (find-symbol \"M12-OPERATOR-AUTHORITY-HIDDEN\" \"ANUNA-IMAGO.TEST\"))) (funcall writer (cons hidden :dotted-tail) agent) :dotted-installed)")
+                           (list
+                            :cyclic
+                            "(let* ((agent (symbol-value (find-symbol \"*CURRENT-AGENT*\" \"ANUNA-IMAGO\"))) (reader (find-symbol \"AGENT-TOOLS\" \"ANUNA-IMAGO\")) (writer (fdefinition (list 'setf reader))) (hidden (find-symbol \"M12-OPERATOR-AUTHORITY-HIDDEN\" \"ANUNA-IMAGO.TEST\")) (cycle (list hidden))) (setf (cdr cycle) cycle) (funcall writer cycle agent) :cyclic-installed)")))
+                   (destructuring-bind (kind form) case
+                     (let* ((malformed-agent
+                              (make-instance
+                               'agent
+                               :id (intern (format nil "M12-~A-ALLOWLIST" kind)
+                                           :keyword)
+                               :capability "authority:malformed-allowlist"
+                               :tools (list alias-allowed-name)))
+                            (*current-agent* malformed-agent)
+                            (result
+                              (anuna-imago::%harness-eval-handler
+                               (list :form form :timeout 500)))
+                            (later
+                              (anuna-imago::%harness-eval-handler
+                               (list :form "(+ 3 4)" :timeout 500)))
+                            (ordinary-denied-p
+                              (handler-case
+                                  (progn (dispatch-tool! name nil) nil)
+                                (anuna-imago::unauthorized-tool-call () t))))
+                       (check (eq :ok (getf result :status))
+                              (format nil "~A allowlist still publishes result"
+                                      kind))
+                       (check (null (slot-value malformed-agent
+                                                'anuna-imago::tools))
+                              (format nil "~A raw allowlist is cleared" kind))
+                       (check (eq :ok (getf later :status))
+                              (format nil "~A cleanup leaves evaluation usable"
+                                      kind))
+                       (check ordinary-denied-p
+                              (format nil "~A cleanup keeps dispatch closed"
+                                      kind)))))
+
+                 ;; User printers run while the worker ceiling remains active.
+                 ;; Only the inert bounded string crosses the nonce-bound
+                 ;; mailbox, and cleanup follows the callback before return.
+                 (let* ((print-agent
+                          (make-instance 'agent
+                                         :id 'm12-print-authority-agent
+                                         :capability "authority:print-test"
+                                         :tools (list alias-allowed-name)))
+                        (*current-agent* print-agent)
+                        (result nil))
+                   (setf *m12-authority-print-calls* 0
+                         *m12-authority-print-agent* print-agent)
+                   (unwind-protect
+                        (setf result
+                              (anuna-imago::%harness-eval-handler
+                               (list
+                                :form
+                                "(make-instance 'anuna-imago.test::m12-authority-print-probe)")))
+                     (setf *m12-authority-print-agent* nil))
+                   (check (eq :ok (getf result :status))
+                          "PRINT-OBJECT callback result is published")
+                   (check (plusp *m12-authority-print-calls*)
+                          "value serialization invokes the callback in the worker")
+                   (check (search "M12-AUTHORITY-PRINT-PROBE"
+                                  (getf result :value)
+                                  :test #'char-equal)
+                          "mailbox carries the inert bounded representation")
+                   (check (null (slot-value print-agent
+                                            'anuna-imago::tools))
+                          "print callback mutation is sanitized before return")
+                   (check (null
+                           (gethash
+                            "tools"
+                            (build-request
+                             (make-anthropic-provider :api-key "test")
+                             "print callback advertisement probe"
+                             print-agent)))
+                          "print callback cannot alter later advertisement")
+                   (check
+                    (let ((*current-agent* print-agent))
+                      (handler-case
+                          (progn (dispatch-tool! name nil) nil)
+                        (anuna-imago::unauthorized-tool-call () t)))
+                    "print callback cannot alter ordinary dispatch"))
+
+                 ;; Trusted reductions remain reductions after subsequent
+                 ;; evaluations; cleanup does not restore removed authority.
+                 (let* ((shrink-agent
+                          (make-instance 'agent
+                                         :id 'm12-shrinking-authority-agent
+                                         :capability "authority:shrink-test"
+                                         :tools (list alias-allowed-name name)))
+                        (*current-agent* shrink-agent)
+                        (pin-result
+                          (anuna-imago::%harness-eval-handler
+                           (list :form "(+ 1 1)"))))
+                   (check (eq :ok (getf pin-result :status))
+                          "first evaluation pins the initial ceiling")
+                   (setf (agent-tools shrink-agent)
+                         (list alias-allowed-name))
+                   (let ((later-result
+                           (anuna-imago::%harness-eval-handler
+                            (list :form "(+ 2 2)"))))
+                     (check (eq :ok (getf later-result :status))
+                            "evaluation remains usable after a trusted shrink"))
+                   (check (equal (list alias-allowed-name)
+                                 (agent-tools shrink-agent))
+                          "legitimate authority reduction persists"))
+
+                 ;; Delayed provider and request-builder methods are named TCB
+                 ;; links. Even if the raw slot changes after evaluation, its
+                 ;; persistent reader ceiling governs advertisement and drive.
+                 (let* ((provider-gf (fdefinition 'provider-stream!))
+                        (provider-specializers
+                          (list (find-class 'provider)
+                                (find-class 'agent)
+                                (find-class t)))
+                        (provider-original
+                          (find-method provider-gf '(:around)
+                                       provider-specializers nil))
+                        (build-gf (fdefinition 'build-request))
+                        (build-specializers
+                          (list (find-class 'provider)
+                                (find-class t)
+                                (find-class 'agent)))
+                        (build-original
+                          (find-method build-gf '(:around)
+                                       build-specializers nil))
+                        (delayed-agent
+                          (make-instance
+                           'agent
+                           :id 'm12-delayed-provider-agent
+                           :capability "authority:delayed-provider"
+                           :tools (list alias-allowed-name)
+                           :provider
+                           (make-stub-provider
+                            :responder
+                            (lambda (message)
+                              (declare (ignore message))
+                              (list (list :tool-use "delayed-provider"
+                                          name nil))))))
+                        (*current-agent* delayed-agent)
+                        (pin-result
+                          (anuna-imago::%harness-eval-handler
+                           (list :form "(+ 8 9)")))
+                        (provider-method-result nil)
+                        (build-method-result nil)
+                        (request nil)
+                        (reply nil))
+                   (unwind-protect
+                        (progn
+                          (setf provider-method-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  "(progn (defmethod anuna-imago:provider-stream! :around ((provider anuna-imago:provider) (agent anuna-imago:agent) message) (declare (ignore message)) (setf (anuna-imago:agent-tools agent) '(anuna-imago.test::m12-operator-authority-hidden)) (call-next-method)))")))
+                          (setf build-method-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  "(progn (defmethod anuna-imago:build-request :around ((provider anuna-imago:provider) message (agent anuna-imago:agent)) (declare (ignore provider message agent)) (let ((request (make-hash-table :test 'equal))) (setf (gethash \"tools\" request) (vector \"forged-hidden\")) request)))")))
+                          ;; Model a delayed callback changing the physical slot.
+                          (setf (slot-value delayed-agent 'anuna-imago::tools)
+                                (list name))
+                          (setf request
+                                (build-request
+                                 (make-anthropic-provider :api-key "test")
+                                 "delayed advertisement probe"
+                                 delayed-agent)
+                                reply (drive-stream delayed-agent "delayed")))
+                     (let ((current
+                             (find-method provider-gf '(:around)
+                                          provider-specializers nil)))
+                       (unless (eq current provider-original)
+                         (when current (remove-method provider-gf current))
+                         (when provider-original
+                           (add-method provider-gf provider-original))))
+                     (let ((current
+                             (find-method build-gf '(:around)
+                                          build-specializers nil)))
+                       (unless (eq current build-original)
+                         (when current (remove-method build-gf current))
+                         (when build-original
+                           (add-method build-gf build-original)))))
+                   (check (eq :ok (getf pin-result :status))
+                          "delayed-provider agent pins its first ceiling")
+                   (check (eq :vetoed (getf provider-method-result :status))
+                          "delayed PROVIDER-STREAM! method is vetoed")
+                   (check (eq :vetoed (getf build-method-result :status))
+                          "direct BUILD-REQUEST method is vetoed")
+                   (check (null (gethash "tools" request))
+                          "persistent ceiling omits delayed advertisement")
+                   (check
+                    (eq :unauthorized
+                        (getf (first (getf reply :tool-results)) :status))
+                    "ordinary delayed provider dispatch remains unauthorized"))
+
+                 ;; Enforcement helpers are themselves part of the TCB.  If
+                 ;; the first form can redefine this predicate, the second
+                 ;; forbidden form disappears from the fact-aware reasoner.
+                 (let ((target 'anuna-imago::safety-layer-symbol-p)
+                       (original
+                         (symbol-function
+                          'anuna-imago::safety-layer-symbol-p))
+                       (redefinition-result nil)
+                       (followup-result nil))
+                   (unwind-protect
+                        (progn
+                          (setf redefinition-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  "(progn (defun anuna-imago::safety-layer-symbol-p (symbol) (declare (ignore symbol)) nil))")))
+                          (setf followup-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  (format nil
+                                          "(let ((anuna-imago:*current-agent* nil) (anuna-imago::*operator-tool-dispatch-p* t)) ~A)"
+                                          (%m12-operator-authority-frame
+                                           "post-tcb-redefinition")))))
+                     (setf (symbol-function target) original))
+                   (check (eq :vetoed (getf redefinition-result :status))
+                          "enforcement-helper redefinition is vetoed")
+                   (check (eq :vetoed (getf followup-result :status))
+                          "subsequent forbidden form remains denied")))
+
+                 ;; Structural SETF protection covers named TCB function
+                 ;; cells, and a later computed dispatch observes the original.
+                 (let* ((target 'anuna-imago::%authorized-agent-tool-name)
+                        (original (symbol-function target))
+                        (replacement-result nil)
+                        (followup-result nil))
+                   (unwind-protect
+                        (progn
+                          (setf replacement-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  "(setf (symbol-function 'anuna-imago::%authorized-agent-tool-name) (lambda (name) (values name t)))")))
+                          (setf followup-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  "(funcall (symbol-function (find-symbol \"DISPATCH-TOOL!\" \"ANUNA-IMAGO\")) (find-symbol \"M12-OPERATOR-AUTHORITY-HIDDEN\" \"ANUNA-IMAGO.TEST\") nil)"))))
+                     (setf (symbol-function target) original))
+                   (check (eq :rejected (getf replacement-result :status))
+                          "SETF cannot replace a named authorization-TCB cell")
+                   (check (eq :error (getf followup-result :status))
+                          "authorization remains restrictive after rejected SETF"))
+
+                 ;; Exercise one named link from every authorization-TCB
+                 ;; responsibility.  Each rejected replacement is followed by
+                 ;; a fresh malformed-proof probe to establish sequential
+                 ;; fail-closed behavior, not merely set membership.
+                 (dolist (target
+                          '(anuna-imago::%authorized-agent-tool-name
+                            anuna-imago::%effective-agent-tool-names
+                            anuna-imago::%after-prefilter-pipeline
+                            anuna-imago::%lift-form
+                            anuna-imago::query
+                            anuna-imago::%proof-result-valid-p
+                            anuna-imago::%eval-form-with-timeout
+                            anuna-imago::%tool-receipt!
+                            anuna-imago::receive!
+                            anuna-imago::%ht
+                            anuna-imago::%hash->plist
+                            anuna-imago::%anthropic-response->frames
+                            anuna-imago::%openrouter-response->frames
+                            com.inuoe.jzon:parse
+                            print-object
+                            anuna-imago::provider-stream!
+                            anuna-imago::build-request
+                            anuna-imago::install-self-modification-tools!))
+                   (setf *m12-reasoner-protected-calls* 0)
+                   (let* ((replacement-result
+                            (anuna-imago::%harness-eval-handler
+                             (list
+                              :form
+                              (format nil
+                                      "(progn (defun ~S (&rest args) (declare (ignore args)) nil))"
+                                      target))))
+                          (probe-result
+                            (let ((anuna-imago::*reasoner-ipc-call*
+                                    (lambda (op &rest args)
+                                      (declare (ignore args))
+                                      (case op
+                                        ((:assert-fact :retract-fact) :ok)
+                                        (:query
+                                         '(:tag :-delta :derivation nil))
+                                        (otherwise :ok))))
+                                  (anuna-imago::*active-theory-handle*
+                                    :m12-malformed-proof-after-tcb))
+                              (anuna-imago::%harness-eval-handler
+                               (list
+                                :form
+                                "(anuna-imago.test::m12-reasoner-protected-probe)")))))
+                     (check (eq :vetoed (getf replacement-result :status))
+                            (format nil "named TCB replacement is vetoed: ~S"
+                                    target))
+                     (check (some (lambda (clause)
+                                    (and (consp clause)
+                                         (member target clause :test #'eq)))
+                                  (getf replacement-result :derivation))
+                            (format nil "TCB veto identifies target: ~S" target))
+                     (check (eq :vetoed (getf probe-result :status))
+                            (format nil
+                                    "malformed proof still denies after ~S"
+                                    target))
+                     (check (zerop *m12-reasoner-protected-calls*)
+                            "sequential malformed-proof probe stays inert")))
+
+                 (dolist (form
+                          '("(progn (defclass anuna-imago:agent () ()))"
+                            "(progn (defstruct anuna-imago:tool))"))
+                   (let ((result
+                           (anuna-imago::%harness-eval-handler
+                            (list :form form))))
+                     (check (eq :vetoed (getf result :status))
+                            "class/structure regeneration is vetoed")))
+
+                 ;; The audit writer calls the generated RECEIPT-LOG stream
+                 ;; accessor directly. A delayed method replacement could hide
+                 ;; a later receipt while returning a plausible handler result.
+                 (let* ((gf
+                          (fdefinition 'anuna-imago::%receipt-log-stream))
+                        (specializers
+                          (list (find-class 'anuna-imago:receipt-log)))
+                        (original-method
+                          (find-method gf nil specializers nil))
+                        (method-result nil))
+                   (unwind-protect
+                        (setf method-result
+                              (anuna-imago::%harness-eval-handler
+                               (list
+                                :form
+                                "(progn (defmethod anuna-imago::%receipt-log-stream ((log anuna-imago:receipt-log)) (declare (ignore log)) nil))")))
+                     (let ((current (find-method gf nil specializers nil)))
+                       (unless (eq current original-method)
+                         (when current (remove-method gf current))
+                         (when original-method
+                           (add-method gf original-method)))))
+                   (check (eq :vetoed (getf method-result :status))
+                          "RECEIPT-LOG stream method override is vetoed")
+                   (check (some (lambda (clause)
+                                  (and (consp clause)
+                                       (member
+                                        'anuna-imago::%receipt-log-stream
+                                        clause :test #'eq)))
+                                (getf method-result :derivation))
+                          "receipt stream veto carries safety derivation"))
+
+                 ;; The generated AGENT-TOOLS reader is a generic function.
+                 ;; Replacing its AGENT method would poison the next worker's
+                 ;; snapshot before EVAL begins, so protect it across calls.
+                 (let* ((gf (fdefinition 'anuna-imago:agent-tools))
+                        (specializers (list (find-class 'anuna-imago:agent)))
+                        (original-method
+                          (find-method gf nil specializers nil))
+                        (control-result
+                          (anuna-imago::%harness-eval-handler
+                           (list :form "(+ 20 22)")))
+                        (method-result nil)
+                        (dispatch-result nil)
+                        (observed-tools nil))
+                   (unwind-protect
+                        (progn
+                          (setf method-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  "(progn (defmethod anuna-imago:agent-tools ((agent anuna-imago:agent)) (declare (ignore agent)) '(anuna-imago.test::m12-operator-authority-hidden)))")))
+                          (setf observed-tools (agent-tools agent))
+                          (setf dispatch-result
+                                (anuna-imago::%harness-eval-handler
+                                 (list
+                                  :form
+                                  "(funcall (symbol-function (find-symbol \"DISPATCH-TOOL!\" \"ANUNA-IMAGO\")) (find-symbol \"M12-OPERATOR-AUTHORITY-HIDDEN\" \"ANUNA-IMAGO.TEST\") nil)")))
+                     (let ((current (find-method gf nil specializers nil)))
+                       (unless (eq current original-method)
+                         (when current (remove-method gf current))
+                         (when original-method (add-method gf original-method)))))
+                   (check (eq :ok (getf control-result :status))
+                          "fact-aware authority context accepts a harmless control")
+                   (check (eq :vetoed (getf method-result :status))
+                          "AGENT-TOOLS method override is vetoed")
+                   (check (some (lambda (clause)
+                                  (and (consp clause)
+                                       (member 'anuna-imago:agent-tools clause
+                                               :test #'eq)))
+                                (getf method-result :derivation))
+                          "AGENT-TOOLS veto carries explicit safety derivation")
+                   (check (equal (list alias-allowed-name) observed-tools)
+                          "originating agent keeps its original allowlist")
+                   (check (eq :error (getf dispatch-result :status))
+                          "next evaluation snapshot remains restrictive"))
+             ))))
+
+           ;; A nested installer cannot widen an already active ceiling.
+           (anuna-imago::%call-with-evaluation-tool-authority
+            agent
+            (list alias-allowed-name)
+            (lambda ()
+              (anuna-imago::%call-with-evaluation-tool-authority
+               agent
+               (list name)
+               (lambda ()
+                 (multiple-value-bind (permitted-p active-p)
+                     (anuna-imago::%evaluation-tool-permitted-p name)
+                   (check active-p "evaluation authority ceiling stays active")
+                   (check (not permitted-p)
+                          "nested installer cannot widen the ceiling"))))))
+
+           (let* ((required
+                    '(anuna-imago::*authorization-tcb-symbols*
+                      anuna-imago::*safety-layer-symbols*
+                      anuna-imago::*safety-layer-categories*
+                      anuna-imago::safety-layer-symbol-p
+                      anuna-imago::%harness-eval-prefilter
+                      anuna-imago::%prefilter-setf
+                      anuna-imago::%lift-form
+                      anuna-imago::%lift-facts
+                      anuna-imago::%assert-lift-facts!
+                      anuna-imago::%retract-lift-facts!
+                      anuna-imago::%query-forbidden
+                      anuna-imago::%proof-result-valid-p
+                      anuna-imago::proof-result-positive-p
+                      anuna-imago::query
+                      anuna-imago::assert-fact!
+                      anuna-imago::retract-fact!
+                      anuna-imago::%proper-list-p
+                      anuna-imago::%eval-form-with-timeout
+                      anuna-imago::%harness-eval-handler
+                      anuna-imago::%after-parse-pipeline
+                      anuna-imago::%after-prefilter-pipeline
+                      anuna-imago::%after-reasoner-pipeline
+                      anuna-imago::%normalize-tool-name
+                      anuna-imago::%tool-name-equal-p
+                      anuna-imago::%canonical-evaluation-tool-names
+                      anuna-imago::%evaluation-authority-thread-key
+                      anuna-imago::%call-with-evaluation-tool-authority
+                      anuna-imago::%evaluation-tool-permitted-p
+                      anuna-imago::%effective-agent-tool-names
+                      anuna-imago::%authorized-agent-tool-name
+                      anuna-imago:agent
+                      anuna-imago:agent-tools
+                      anuna-imago:tool
+                      sb-thread:*current-thread*
+                      anuna-imago:dispatch-tool!
+                      anuna-imago:process-turn
+                      anuna-imago::%dispatch-tool-use
+                      anuna-imago:drive-stream
+                      anuna-imago::handle-tool-frame
+                      anuna-imago:provider-stream!
+                      anuna-imago:stream-next-frame!
+                      anuna-imago:tool-results-message-content
+                      anuna-imago:build-request
+                      anuna-imago::%ht
+                      anuna-imago::%hash->plist
+                      anuna-imago::%tool->anthropic-ht
+                      anuna-imago::%tool->openai-ht
+                      anuna-imago:tool->anthropic-descriptor
+                      anuna-imago::*anthropic-http-post*
+                      anuna-imago::%anthropic-stop-reason-keyword
+                      anuna-imago::%anthropic-response->frames
+                      anuna-imago::%fetch-and-parse
+                      anuna-imago::*openrouter-http-post*
+                      anuna-imago::+openrouter-maximum-response-octets+
+                      anuna-imago::+openrouter-maximum-argument-octets+
+                      anuna-imago::+openrouter-maximum-json-depth+
+                      anuna-imago::+openrouter-maximum-json-nodes+
+                      anuna-imago::+openrouter-maximum-object-keys+
+                      anuna-imago::+openrouter-maximum-array-elements+
+                      anuna-imago::+openrouter-maximum-string-characters+
+                      anuna-imago::+openrouter-maximum-tool-calls+
+                      anuna-imago::+openrouter-maximum-identifier-characters+
+                      anuna-imago::+openrouter-maximum-tool-name-characters+
+                      anuna-imago::%openrouter-json-octet-length
+                      anuna-imago::%openrouter-scan-json!
+                      anuna-imago::%openrouter-parse-json
+                      anuna-imago::%openrouter-hash-shape!
+                      anuna-imago::%openrouter-token-string-p
+                      anuna-imago::%openrouter-registered-tool
+                      anuna-imago::%openrouter-argument-type-p
+                      anuna-imago::%openrouter-recognize-tool-arguments
+                      anuna-imago::%openai-args->plist
+                      anuna-imago::%openrouter-finish-reason
+                      anuna-imago::%openrouter-validate-token-details!
+                      anuna-imago::%openrouter-validate-usage!
+                      anuna-imago::%openrouter-validate-root-metadata!
+                      anuna-imago::%openrouter-error-frames
+                      anuna-imago::%openrouter-error-envelope-frames
+                      anuna-imago::%openrouter-tool-call->frame
+                      anuna-imago::%openrouter-response->frames
+                      anuna-imago::%openrouter-bounded-response-string
+                      anuna-imago::%openrouter-fetch-and-parse
+                      com.inuoe.jzon:parse
+                      com.inuoe.jzon:parse-next
+                      com.inuoe.jzon:with-parser
+                      com.inuoe.jzon:make-parser
+                      com.inuoe.jzon:close-parser
+                      com.inuoe.jzon:stringify
+                      anuna-imago::%ensure-jzon-package-locked!
+                      sb-ext:lock-package
+                      sb-ext:package-locked-p
+                      sb-ext:unlock-package
+                      sb-ext:without-package-locks
+                      anuna-imago:receipt-log
+                      anuna-imago:receipt-log-path
+                      anuna-imago::%receipt-log-stream
+                      anuna-imago::%receipt-log-seqs
+                      anuna-imago::%receipt-log-lock
+                      anuna-imago:iso-8601-now
+                      anuna-imago:mailbox
+                      anuna-imago:make-mailbox
+                      anuna-imago:send!
+                      anuna-imago:receive!
+                      anuna-imago::mailbox-head
+                      anuna-imago::mailbox-tail
+                      anuna-imago::mailbox-count
+                      anuna-imago::mailbox-closed
+                      anuna-imago::mailbox-lock
+                      anuna-imago::mailbox-cv
+                      print-object))
+                  (missing
+                    (remove-if #'anuna-imago::safety-layer-symbol-p required))
+                  (category
+                    (assoc :authorization-tcb
+                           anuna-imago::*safety-layer-categories*)))
+             (check (null missing)
+                    (format nil "named authorization TCB is complete; missing ~S"
+                            missing))
+             (check (null (set-difference
+                           anuna-imago::*authorization-tcb-symbols*
+                           (second category)
+                           :test #'eq))
+                    "the authorization-TCB category covers its full set"))
+
+           (check (zerop *m12-operator-authority-hidden-calls*)
+                  "no evaluated authority attempt reaches the hidden handler")
+           (let ((*current-agent* nil))
+             (check (eq :hidden-ran
+                        (with-operator-tool-dispatch
+                          (dispatch-tool! name nil)))
+                    "the explicit external operator scope remains usable"))
+           (check (= 1 *m12-operator-authority-hidden-calls*)
+                  "only the external operator call reaches the hidden handler"))
+      (when (macro-function escape-macro)
+        (fmakunbound escape-macro))
+      (when (macro-function thread-escape-macro)
+        (fmakunbound thread-escape-macro))
+      (setf *m12-authority-decoy-thread* nil)
+      (when decoy-thread
+        (sb-thread:signal-semaphore decoy-stop)
+        (sb-thread:join-thread decoy-thread))
+      (if alias-allowed-prior
+          (register-tool! alias-allowed-prior)
+          (unregister-tool! alias-allowed-name))
+      (if alias-hidden-prior
+          (register-tool! alias-hidden-prior)
+          (unregister-tool! alias-hidden-name))
+      (if prior
+          (register-tool! prior)
+          (unregister-tool! name)))))
 
 (defun %exercise-m12-reasoner-failure (query-result-thunk test-id)
   "Run harness-eval with a failing or malformed reasoner response."
@@ -427,6 +1311,33 @@ Tests bind this to make the reasoner veto specific forms.")
   (%exercise-m12-reasoner-failure
    (lambda () (error "simulated reasoner outage"))
    "query error"))
+
+(defun test-m12-handler-fails-closed-on-fact-seam-errors ()
+  "SPEC-014 TEST-054: assertion and retraction failures cannot reach EVAL."
+  (format t "~%-- m12-handler-fails-closed-on-fact-seam-errors (SPEC-014 TEST-054) --~%")
+  (dolist (failing-op '(:assert-fact :retract-fact))
+    (setf *m12-reasoner-protected-calls* 0)
+    (let ((anuna-imago::*reasoner-ipc-call*
+            (lambda (op &rest args)
+              (declare (ignore args))
+              (cond
+                ((eq op failing-op)
+                 (error "simulated ~S failure" failing-op))
+                ((eq op :query)
+                 '(:tag :-delta :derivation nil :time-ms 1))
+                (t :ok))))
+          (anuna-imago::*active-theory-handle* :spec-014-fact-red-gate)
+          (anuna-imago::*harness-eval-audit-log* nil))
+      (let ((res
+              (anuna-imago::%harness-eval-handler
+               '(:form
+                 "(anuna-imago.test::m12-reasoner-protected-probe)"))))
+        (check (eq :vetoed (getf res :status))
+               (format nil "~S failure vetoes harness-eval" failing-op))
+        (check (eq :reasoner (getf res :phase))
+               (format nil "~S failure is attributed to reasoner" failing-op))
+        (check (zerop *m12-reasoner-protected-calls*)
+               (format nil "~S failure cannot execute the form" failing-op))))))
 
 (defun test-m12-handler-fails-closed-on-malformed-reasoner-evidence ()
   "SPEC-014 TEST-025: every malformed proof-result class cannot reach EVAL."
@@ -524,6 +1435,8 @@ Tests bind this to make the reasoner veto specific forms.")
         (path (format nil "/tmp/imago-m12-install-~D.log" (random 100000))))
     (check (eq :ok (anuna-imago::install-self-modification-tools!
                     :audit-log-path path)))
+    (check (sb-ext:package-locked-p (find-package :com.inuoe.jzon))
+           "install locks the transitive Jzon parser implementation")
     (check (find-tool 'anuna-imago::harness-eval) "harness-eval registered")
     (check (eq :eval (tool-permission (find-tool 'anuna-imago::harness-eval))))
     (check (member :eval *valid-permissions*))
@@ -543,6 +1456,39 @@ Tests bind this to make the reasoner veto specific forms.")
     (check (null (find-tool 'anuna-imago::harness-eval)))
     (check (null (find-tool 'anuna-imago::harness-list-safety-layer)))
     (check (null (find-tool 'anuna-imago::harness-rollback)))))
+
+(defun test-m12-install-fails-closed-on-safety-fact-error ()
+  "SPEC-014 TEST-055: failed safety-fact setup cannot expose harness-eval."
+  (format t "~%-- m12-install-fails-closed-on-safety-fact-error (SPEC-014 TEST-055) --~%")
+  (unless (fboundp 'anuna-imago::install-self-modification-tools!)
+    (load (merge-pathnames "examples/self-modifying.lisp"
+                           (asdf:system-source-directory :imago))))
+  (when (find-tool 'anuna-imago::harness-eval)
+    (anuna-imago::uninstall-self-modification-tools!))
+  (let ((anuna-imago::*active-theory-handle* :failed-safety-setup)
+        (anuna-imago::*reasoner-ipc-call*
+          (lambda (op &rest args)
+            (declare (ignore args))
+            (if (eq op :assert-fact)
+                (error "simulated safety-fact assertion failure")
+                :ok)))
+        (path (format nil "/tmp/imago-m12-failed-install-~D.log"
+                      (random 100000))))
+    (unwind-protect
+         (progn
+           (check (handler-case
+                      (progn
+                        (anuna-imago::install-self-modification-tools!
+                         :audit-log-path path)
+                        nil)
+                    (error () t))
+                  "safety-fact assertion failure aborts installation")
+           (check (null (find-tool 'anuna-imago::harness-eval))
+                  "failed safety setup does not register harness-eval")
+           (check (not (member :eval *valid-permissions*))
+                  "failed safety setup does not enable eval permission"))
+      (when (find-tool 'anuna-imago::harness-eval)
+        (anuna-imago::uninstall-self-modification-tools!)))))
 
 ;; =========================================================================
 ;; Introspection tools
@@ -964,10 +1910,13 @@ a muffle-warning handler-bind because the eval thread would otherwise print
     (test-m12-handler-rejects-prefilter-bypass)
     (test-m12-handler-vetoes-via-reasoner)
     (test-m12-handler-fails-closed-on-reasoner-error)
+    (test-m12-handler-fails-closed-on-fact-seam-errors)
     (test-m12-handler-fails-closed-on-malformed-reasoner-evidence)
+    (test-m12-handler-denies-manufactured-operator-authority)
     (test-m12-handler-error-during-eval)
     (test-m12-handler-receipt-on-every-phase)
     ;; t09 / REQ-001
+    (test-m12-install-fails-closed-on-safety-fact-error)
     (test-m12-install-fn-registers-tool)
     ;; t10 / REQ-011
     (test-m12-persistence-across-save)

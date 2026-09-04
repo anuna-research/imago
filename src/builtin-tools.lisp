@@ -66,7 +66,7 @@ or a test, set *CURRENT-AGENT* manually."
              :capability    (agent-capability a)
              :system-prompt (agent-system-prompt a)
              :tools         (mapcar (lambda (s) (string-downcase (symbol-name s)))
-                                    (agent-tools a))
+                                    (%effective-agent-tool-names a))
              :state         (agent-state a))))))
 
 (defun %tool-query-receipts (args)

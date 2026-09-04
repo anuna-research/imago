@@ -96,7 +96,7 @@ unregister-tool! at the REPL.")
                         same forbidden class.
   :prefix \"FOO\"     → flat alphabetical list, filtered to symbols
                         whose name starts with FOO (case-insensitive).
-  no args             → flat alphabetical list of all 38+ symbols."
+  no args             → flat alphabetical list of all protected symbols."
   (let ((by-cat (getf args :by-category))
         (prefix (getf args :prefix)))
     (cond
@@ -195,7 +195,7 @@ harness-query-receipts (which reads the SPEC-011 ASK/reply log)."
 (defun %register-self-mod-introspection-tools! ()
   (register-tool!
    (make-tool :name 'harness-list-safety-layer
-              :description "Return the safety-layer symbol set — any form mentioning these will be rejected by the pre-filter or vetoed by the reasoner. Pass :by-category t (RECOMMENDED FIRST CALL) to get a categorised view with rationale per category — eval-class, reader-macro-class, thread-class, method-mutate-class, safety-layer-target, tool-struct, registry-table, audit-state, theory-state, harness-eval-state, harness-eval-install-fn. Without :by-category, returns a flat alphabetical list. Optional :prefix filters the flat list."
+              :description "Return the safety-layer symbol set — any form mentioning these will be rejected by the pre-filter or vetoed by the reasoner. Pass :by-category t (RECOMMENDED FIRST CALL) to get a categorised view with rationale per category — authorization-tcb, eval-class, reader-macro-class, thread-class, method-mutate-class, safety-layer-target, tool-struct, registry-table, audit-state, theory-state, harness-eval-state, harness-eval-install-fn. Without :by-category, returns a flat alphabetical list. Optional :prefix filters the flat list."
               :permission :read
               :schema '((:by-category :type :boolean :required-p nil
                          :description "Return categorised view with per-category rationale instead of flat list. Recommended for first call.")
@@ -255,6 +255,14 @@ Returns:
      :no-active-theory)
 
     (t
+     ;; Establish the safety facts before exposing any eval permission, audit
+     ;; resource, or tool.  A reasoner failure aborts installation unchanged.
+     (%assert-safety-layer-facts! *active-theory-handle*)
+
+     ;; Jzon is unlocked by its distribution. Seal its transitive parser
+     ;; helpers before evaluated code becomes reachable.
+     (%ensure-jzon-package-locked!)
+
      ;; 1. Permission keyword
      (pushnew :eval *valid-permissions*)
 
@@ -267,10 +275,7 @@ Returns:
          (setf *harness-eval-audit-log* log)
          (register-receipt-log-for-clean! log)))
 
-     ;; 4. Assert (safety-layer-symbol S) facts into the active theory
-     (%assert-safety-layer-facts! *active-theory-handle*)
-
-     ;; 5. Register harness-eval itself
+     ;; 4. Register harness-eval itself
      (register-tool!
       (make-tool :name 'harness-eval
                  :description *harness-eval-description*
@@ -283,7 +288,7 @@ Returns:
                             :description "Evaluation timeout in milliseconds (1..30000); default 1000."))
                  :handler #'%harness-eval-handler))
 
-     ;; 6. Register the five introspection siblings
+     ;; 5. Register the five introspection siblings
      (%register-self-mod-introspection-tools!)
      :ok)))
 

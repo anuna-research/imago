@@ -163,7 +163,7 @@ env var if :api-key is omitted. :model accepts any OpenRouter model slug.
             (remove nil
                     (mapcar (lambda (n) (let ((tool (find-tool n)))
                                           (when tool (%tool->openai-ht tool))))
-                            (agent-tools agent)))))
+                            (%effective-agent-tool-names agent)))))
       (when tool-specs
         (setf (gethash "tools" req) (coerce tool-specs 'vector))))
     req))

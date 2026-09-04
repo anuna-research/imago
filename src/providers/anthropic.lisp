@@ -150,7 +150,7 @@ The shape is detected by %messages-list-p."
             (remove nil
                     (mapcar (lambda (n) (let ((tool (find-tool n)))
                                           (when tool (%tool->anthropic-ht tool))))
-                            (agent-tools agent)))))
+                            (%effective-agent-tool-names agent)))))
       (when tool-specs
         (setf (gethash "tools" req) (coerce tool-specs 'vector))))
     req))

@@ -78,6 +78,7 @@
    #:list-tools
    #:clear-all-tools
    #:dispatch-tool!
+   #:with-operator-tool-dispatch
    #:schema->json-schema
    #:json-schema->schema
    #:tool->anthropic-descriptor
