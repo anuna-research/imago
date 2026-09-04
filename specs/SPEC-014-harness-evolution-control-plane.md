@@ -499,8 +499,8 @@ Trace: [[SPEC-014-harness-evolution-control-plane#TEST-019]],
 The default `imago` system SHALL gain no evolution runtime dependency. Core
 changes SHALL remain limited to repaired execution seams and exported contracts.
 The CI-counted core SHALL remain below 3,700 physical lines. This reviewed
-ceiling includes the closed receipt recognizer required to make persisted audit
-evidence safe to inspect; the optional evolution subsystem contributes no core
+ceiling includes the closed receipt recognizer required for safe inspection of
+persisted audit evidence. The optional evolution subsystem contributes no core
 runtime dependency. Capability/security and compactness are recorded as
 separate gates, following HarnessDev's separation of capability and efficiency.
 
@@ -773,11 +773,11 @@ cell that decides parsing, prefiltering, lifting, fact installation, or queries.
 It also includes proof recognition, dispatch membership, evaluation reachability,
 mailbox result transport, audit recording, and safety-tool installation. The
 named provider TCB includes request advertisement, response ingress, JSON
-recognition and argument conversion, frame production, dispatch-loop helpers,
-endpoint/authentication/configuration readers, credential accessors and erasers,
-clean-image entry points, and their mutable bounds. Runtime lifecycle and MOP
-generics that can intercept object construction or slot access are
-definition-protected. Recognition SHALL prevent an evaluated definition or
+recognition, argument conversion, frame production, and dispatch-loop helpers.
+It also includes endpoint, authentication, and configuration readers. It covers
+credential accessors, credential erasers, clean-image entry points, and their
+mutable bounds. Runtime lifecycle and MOP generics that can intercept object
+construction or slot access are definition-protected. Recognition SHALL prevent an evaluated definition or
 method that structurally names that TCB from replacing it. A rejected
 replacement SHALL leave the next handler call fail-closed, and the next clean
 pass SHALL still erase provider and signing credentials.
@@ -1879,11 +1879,11 @@ the final visible allowlist is sanitized before return.
 
 Attempt direct sequential replacements of the agent accessor, dispatch
 membership helpers, pipeline stages, and lift and reasoner helpers. Repeat for
-proof recognizers, the evaluator, mailbox and audit paths, provider request
-builders, response recognizers, frame producers, JSON parser seams,
-provider endpoint/auth/config readers, credential erasers, clean-image entry
-points, runtime lifecycle/MOP generics, class/structure targets, and the
-installer. Each form structurally names its
+proof recognizers, the evaluator, mailbox paths, and audit paths. Cover provider
+request builders, response recognizers, frame producers, and JSON parser seams.
+Cover provider endpoint, authentication, and configuration readers. Cover
+credential erasers, clean-image entry points, runtime lifecycle/MOP generics,
+class/structure targets, and the installer. Each form structurally names its
 target. Test delayed provider/build methods and a response-to-frame replacement
 capable of synthesizing an authorized call. After each rejection, submit a
 protected probe with a failed or malformed reasoner response. Verify no side
