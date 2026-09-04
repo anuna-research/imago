@@ -1,0 +1,234 @@
+; SPEC-014 — Harness Evolution Control Plane
+; Elephant theory snapshot for theory alias `spec-014`.
+;
+; This file records the task graph and its evidence gates. The live Elephant
+; corpus carries signed promises, discoveries, and acceptance evidence. That
+; evidence is intentionally absent here. The author attribution remains as
+; state because it enforces the distinct-reviewer gate.
+
+(meta theory
+  (name "spec-014")
+  (description "Coordinate Red Gates, implementation, methodology hardening, integration, documentation, independent review, and final verification for SPEC-014."))
+
+; The live theory defines task-description/2 and task-acceptance/2 as state.
+; It defines red-gate-observed/1, tests-green/1, and review-approved/2 as
+; evidence. It defines authored/2 as state. Declarations stay in Elephant's
+; signed vocabulary because Spindle 0.3.0 does not recognise that wire form.
+
+; Tasks and TEST-derived acceptance text.
+
+(given (task core-red-gate))
+(given (task-description core-red-gate
+  "Write core seam regressions before production changes"))
+(given (task-acceptance core-red-gate
+  "TEST-001 through TEST-004 and TEST-022 through TEST-025 fail on the unchanged baseline"))
+(given (no-deps core-red-gate))
+
+(given (task evolution-red-gate))
+(given (task-description evolution-red-gate
+  "Write evolution control-plane tests before its implementation"))
+(given (task-acceptance evolution-red-gate
+  "TEST-005 through TEST-021 and TEST-026 through TEST-035 fail because imago/evolution is absent"))
+(given (no-deps evolution-red-gate))
+
+(given (task core-implementation))
+(given (task-description core-implementation
+  "Repair factory entrypoints OpenRouter tool loops agent allowlists and reasoner failure handling"))
+(given (task-acceptance core-implementation
+  "Core seam regressions pass after their recorded Red Gate"))
+
+(given (task evolution-implementation))
+(given (task-description evolution-implementation
+  "Implement the optional signed immutable harness evolution control plane"))
+(given (task-acceptance evolution-implementation
+  "All evolution subsystem tests pass after their recorded Red Gate"))
+
+(given (task methodology-hardening))
+(given (task-description methodology-hardening
+  "Bind paired trials noise activation transfer and efficiency evidence"))
+(given (task-acceptance methodology-hardening
+  "Adversarial methodology tests and full evolution suite pass"))
+
+(given (task integration))
+(given (task-description integration
+  "Run core plugin scaffold and evolution integration gates"))
+(given (task-acceptance integration
+  "Targeted suites and the full available suite pass with no diff errors"))
+
+(given (task documentation))
+(given (task-description documentation
+  "Document the optional evolution workflow and testing entrypoints"))
+(given (task-acceptance documentation
+  "README and ASDF surfaces match the implemented contracts"))
+
+(given (task adversarial-review))
+(given (task-description adversarial-review
+  "Run a fresh-context implementation and security review"))
+(given (task-acceptance adversarial-review
+  "A distinct subagent reports no unresolved blocker against SPEC-014"))
+
+(given (task final-verification))
+(given (task-description final-verification
+  "Re-run gates record evidence and close the specification"))
+(given (task-acceptance final-verification
+  "Lint reference tests theory closure and worktree evidence are recorded"))
+
+; The producing session cannot satisfy the independent-review gate.
+
+(given (authored spec-014 root-session))
+
+; Readiness graph.
+
+(normally r-ready-core-red-gate
+  (and (task core-red-gate) (no-deps core-red-gate))
+  (ready core-red-gate))
+(meta r-ready-core-red-gate
+  (description "Makes the core Red Gate ready")
+  (source "SPEC-014-harness-evolution-control-plane#REQ-001"))
+
+(normally r-ready-evolution-red-gate
+  (and (task evolution-red-gate) (no-deps evolution-red-gate))
+  (ready evolution-red-gate))
+(meta r-ready-evolution-red-gate
+  (description "Makes the evolution Red Gate ready")
+  (source "SPEC-014-harness-evolution-control-plane#REQ-007"))
+
+(normally r-ready-core-implementation
+  (and (task core-implementation)
+       (completed core-red-gate)
+       (red-gate-observed core-red-gate))
+  (ready core-implementation))
+(meta r-ready-core-implementation
+  (description "Makes core implementation ready after its Red Gate")
+  (source "SPEC-014-harness-evolution-control-plane#REQ-004"))
+
+(normally r-ready-evolution-implementation
+  (and (task evolution-implementation)
+       (completed evolution-red-gate)
+       (red-gate-observed evolution-red-gate))
+  (ready evolution-implementation))
+(meta r-ready-evolution-implementation
+  (description "Makes evolution implementation ready after its Red Gate")
+  (source "SPEC-014-harness-evolution-control-plane#REQ-015"))
+
+(normally r-ready-methodology-hardening
+  (and (task methodology-hardening)
+       (ready evolution-implementation))
+  (ready methodology-hardening))
+(meta r-ready-methodology-hardening
+  (description "Makes methodology hardening ready after the evolution implementation gate opens")
+  (source "SPEC-014-harness-evolution-control-plane#REQ-019"))
+
+(normally r-ready-integration
+  (and (task integration)
+       (completed core-implementation)
+       (completed evolution-implementation))
+  (ready integration))
+(meta r-ready-integration
+  (description "Makes integration ready after both implementations")
+  (source "SPEC-014-harness-evolution-control-plane#TEST-002"))
+
+(normally r-ready-documentation
+  (and (task documentation)
+       (completed core-implementation)
+       (completed evolution-implementation))
+  (ready documentation))
+(meta r-ready-documentation
+  (description "Makes documentation ready after both implementations")
+  (source "SPEC-014-harness-evolution-control-plane#NFR-002"))
+
+(normally r-ready-adversarial-review
+  (and (task adversarial-review)
+       (completed integration)
+       (completed documentation))
+  (ready adversarial-review))
+(meta r-ready-adversarial-review
+  (description "Makes independent review ready after integration and documentation")
+  (source "SPEC-014-harness-evolution-control-plane#TEST-027"))
+
+(normally r-ready-final-verification
+  (and (task final-verification) (completed adversarial-review))
+  (ready final-verification))
+(meta r-ready-final-verification
+  (description "Makes final closure ready after independent review")
+  (source "SPEC-014-harness-evolution-control-plane#NFR-003"))
+
+; Completion gates. No task completes from readiness or narration alone.
+
+(always r-complete-core-red-gate
+  (red-gate-observed core-red-gate)
+  (completed core-red-gate))
+(meta r-complete-core-red-gate
+  (description "Completes core Red Gate from observed baseline failure")
+  (source "SPEC-014-harness-evolution-control-plane#TEST-004"))
+
+(always r-complete-evolution-red-gate
+  (red-gate-observed evolution-red-gate)
+  (completed evolution-red-gate))
+(meta r-complete-evolution-red-gate
+  (description "Completes evolution Red Gate from observed baseline failure")
+  (source "SPEC-014-harness-evolution-control-plane#TEST-021"))
+
+(always r-complete-core-implementation
+  (tests-green core-implementation)
+  (completed core-implementation))
+(meta r-complete-core-implementation
+  (description "Completes core implementation from green targeted tests")
+  (source "SPEC-014-harness-evolution-control-plane#TEST-024"))
+
+(always r-complete-evolution-implementation
+  (tests-green evolution-implementation)
+  (completed evolution-implementation))
+(meta r-complete-evolution-implementation
+  (description "Completes evolution implementation from green subsystem tests")
+  (source "SPEC-014-harness-evolution-control-plane#TEST-035"))
+
+(always r-complete-methodology-hardening
+  (tests-green methodology-hardening)
+  (completed methodology-hardening))
+(meta r-complete-methodology-hardening
+  (description "Completes methodology hardening from green adversarial methodology tests")
+  (source "SPEC-014-harness-evolution-control-plane#Gate-evidence-record"))
+
+(always r-complete-integration
+  (tests-green integration)
+  (completed integration))
+(meta r-complete-integration
+  (description "Completes integration from green combined tests")
+  (source "SPEC-014-harness-evolution-control-plane#TEST-002"))
+
+(always r-complete-documentation
+  (tests-green documentation)
+  (completed documentation))
+(meta r-complete-documentation
+  (description "Completes documentation from verified public surfaces")
+  (source "SPEC-014-harness-evolution-control-plane#NFR-002"))
+
+(normally r-complete-adversarial-review
+  (review-approved spec-014 ?reviewer)
+  (completed adversarial-review))
+(meta r-complete-adversarial-review
+  (description "Completes adversarial review from a reviewer approval")
+  (source "SPEC-014-harness-evolution-control-plane#TEST-027"))
+
+(except d-self-review
+  (and (review-approved spec-014 ?reviewer)
+       (authored spec-014 ?reviewer))
+  (not (completed adversarial-review)))
+(meta d-self-review
+  (description "Prevents the specification author from approving its own implementation")
+  (source "SPEC-014-harness-evolution-control-plane#TEST-035"))
+
+(always r-complete-final-verification
+  (tests-green final-verification)
+  (completed final-verification))
+(meta r-complete-final-verification
+  (description "Completes final verification from all recorded gates")
+  (source "SPEC-014-harness-evolution-control-plane#Gate-evidence-record"))
+
+(normally r-spec-014-verified
+  (completed final-verification)
+  (verified spec-014))
+(meta r-spec-014-verified
+  (description "Concludes SPEC-014 verification from final accepted evidence")
+  (source "SPEC-014-harness-evolution-control-plane#Gate-evidence-record"))

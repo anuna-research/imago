@@ -56,6 +56,7 @@
         <li><a href="#redefine-in-flight">Redefine in flight</a></li>
         <li><a href="#mental-model">Mental model</a></li>
         <li><a href="#built-in-tools">Built-in tools</a></li>
+        <li><a href="#harness-evolution-control-plane">Harness evolution control plane</a></li>
         <li><a href="#build-your-own-agent">Build your own agent</a></li>
       </ul>
     </li>
@@ -82,9 +83,9 @@ routing, image distribution, runtime safety invariants. If a layer turns
 out to encode an obsolete assumption, you redefine it at the live REPL
 instead of filing a framework migration ticket.
 
-The implementation is constrained to roughly 2000 lines of Common Lisp.
-The runtime is supervised processes. The wire is CBCL. The substrate is
-fully redefinable in flight.
+The core harness is kept behind a soft line budget, while optional subsystems
+load separately. The runtime is supervised processes. The wire is CBCL. The
+substrate is fully redefinable in flight.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -131,7 +132,7 @@ fully redefinable in flight.
 # Clone into anuna-imago/ to match the package name and directory tree below.
 git clone https://codeberg.org/anuna/imago anuna-imago
 cd anuna-imago
-bash bin/run-tests.sh all          # 17 suites, 290+ checks, ~30s
+bash bin/run-tests.sh all          # 19 isolated targets; one fresh SBCL process each
 bash bin/build-echo-image.sh       # produces ./echo-agent (~63 MB full-agent profile)
 ```
 
@@ -285,10 +286,9 @@ Six seams to know about:
 
 ### Built-in tools
 
-Ten tools auto-register when `imago` loads. They cover introspection on
-the harness itself plus a few mundane utilities. Agents that don't list
-them in `:tools` don't expose them to the LLM, so registration is
-harmless.
+Ten tools auto-register when `imago` loads. They cover harness introspection
+and a few utilities. A bound agent can dispatch only names in its `:tools`.
+Direct operator dispatch remains available when `*current-agent*` is unbound.
 
 | Name | Returns |
 |---|---|
@@ -341,6 +341,7 @@ plugins under [`plugins/`](./plugins). Load with
 |---|---|---|
 | `imago/openrouter` | `(ql:quickload :imago/openrouter)` | OpenAI-compatible driver for any [OpenRouter](https://openrouter.ai)-served model. Pass the slug as `:model`, e.g. `"z-ai/glm-5.1"`, `"openai/gpt-4o"`, `"anthropic/claude-opus-4-7"` |
 | `imago/zai` | `(ql:quickload :imago/zai)` | Z.ai GLM Coding Plan provider (Anthropic-compatible). Thin wrapper over the existing Anthropic driver pointed at `api.z.ai/api/anthropic`. Optional opencode `auth.json` key reader |
+| `imago/evolution` | `(ql:quickload :imago/evolution)` | External control plane for immutable candidates, signed evaluations, eligibility decisions, promotion, and rollback |
 
 ```lisp
 ;; --- Example A: any model via OpenRouter ----------------------------
@@ -367,9 +368,130 @@ plugins under [`plugins/`](./plugins). Load with
                  :tools '(anuna-imago:harness-list-tools)))
 ```
 
-Both plugins reuse the existing `provider-stream!` contract — the same
+Both provider plugins reuse the existing `provider-stream!` contract. The same
 agent definition, supervision, hook chain, and self-modification port
 work unchanged with any served model.
+
+##### Harness evolution control plane
+
+[HarnessDev](https://arxiv.org/abs/2609.01437) motivates a strict distinction
+between producing a harness mutation and establishing an improvement. The
+optional `imago/evolution` system turns that distinction into operator-side
+governance and evidence infrastructure.
+
+```lisp
+(ql:quickload :imago/evolution)
+```
+
+Loading `imago` alone does not load this package, create a store, or register
+tools. Candidate processes do not receive the control-plane package, store
+path, or private identities.
+
+```text
+active image -> freeze candidate -> evaluate repeated held-out runs
+                                      |
+baseline <------------------------- decide
+                                      |
+                      authorize -> canary/active -> rollback
+```
+
+The operator workflow has five stages:
+
+1. `freeze-candidate!` copies an image and writes a signed, content-addressed
+   manifest. The manifest records lineage, surface digests, changes, budgets,
+   and activation evidence.
+2. `record-evaluation!` appends signed runs from trusted executors and
+   evaluators. Each record binds its campaign, benchmark, replicate,
+   evaluation plan, executor configuration, scorer configuration, completion
+   attestation, and structured activation evidence.
+3. `make-decision!` consumes every current held-out event for one campaign and
+   the compared candidates. It requires exact paired cells, complete matching
+   replicate templates, a single evaluation plan, and transfer across every
+   executor-and-configuration cohort. It reports every satisfied or failed
+   gate.
+4. `promote-candidate!` atomically changes `:canary` or `:active` after a
+   trusted external authorizer signs an eligible, current decision.
+5. `rollback-pointer!` restores the recorded prior candidate and appends a
+   signed rollback event.
+
+A comparison cell binds the benchmark, task, replicate, executor, evaluator,
+evaluation plan, executor configuration, and scorer configuration. Baseline
+and candidate cell multisets must match exactly, and duplicate candidate cells
+are rejected. The ledger also rejects the same
+`(campaign-id, benchmark-id, task-id)` tuple in an exposed split and the
+held-out split.
+
+Every actor uses an Imago `did:key` identity. Store construction fixes the
+executor, evaluator, and authorizer trust rosters.
+
+| Actor | Authority and evidence |
+|---|---|
+| Store authority | Signs each terminal ledger head |
+| Creator | Signs the candidate manifest and freeze event |
+| Executor | Belongs to the trusted executor roster and signs each run |
+| Evaluator | Belongs to the disjoint evaluator roster and countersigns each run |
+| Authorizer | Belongs to a roster disjoint from executors and evaluators, differs from both compared creators, and signs decisions and pointer events |
+
+Store creation rejects overlap among the executor, evaluator, and authorizer
+rosters. A held-out cell also requires its creator, executor, and evaluator to
+be pairwise distinct.
+
+The decision keeps these evidence dimensions separate:
+
+| Dimension | Recorded value | Decision use |
+|---|---|---|
+| Correctness | Boolean for each exact paired cell | Every baseline-correct cell has a correct candidate match |
+| Capability | Integer millionths by cell, replicate, and executor configuration | The minimum replicate delta and every executor cohort meet the configured positive threshold |
+| Activation | Sorted `:runtime-hit` or `:reachable` records | Every changed component has a candidate-image-bound `:runtime-hit`; reachability alone is diagnostic |
+| Execution tokens | Input plus output tokens | Separate totals, per-event means, signed delta, and maximum-increase gate |
+| Runtime cost | Integer micro-US dollars | Separate totals, per-event means, signed delta, and maximum-increase gate |
+
+Duration and candidate development cost remain signed report inputs. A
+capability gain cannot offset a correctness, activation, token, or runtime-cost
+failure.
+
+The default evidence floor is three held-out repetitions for each candidate
+and two distinct executors. The default minimum capability delta is one
+millionth. The maximum execution-token and runtime-cost increases both default
+to zero. Counts below two, a non-positive capability threshold, or negative
+efficiency limits are rejected.
+
+The store uses an append-only hash chain and a separately signed terminal
+head. Creators sign freezes, executors and evaluators sign runs, and
+authorizers sign decisions and pointer changes. Candidate verification
+recomputes image and lineage digests, and freeze never overwrites an existing
+candidate.
+
+Persisted readers accept only the closed canonical grammar. They enforce size
+and depth bounds before semantic effects and never intern input symbols.
+Managed roots reject symlink replacement, while managed files require regular
+filesystem entries.
+
+The external evaluator process and its operator-owned filesystem permissions
+form the control-plane trust boundary. The subsystem detects malformed data,
+broken chains, stale decisions, and candidate-byte changes inside that
+boundary. It does not resist an operator who restores a complete earlier
+ledger and signed head. Operators retain responsibility for private-key
+custody, signer isolation, evaluation plan quality and secrecy, and benchmark
+execution. A signed `:run-complete-p` value is a runner attestation; the
+control plane does not inspect the run. Version 0.2 assumes one writer per
+store, with multi-process coordination and crash recovery supplied externally.
+
+This subsystem is not an optimizer and does not generate mutations. It is not
+an OS sandbox for untrusted Lisp. It governs evidence and promotion around an
+external benchmark runner.
+
+Run its focused and supporting gates with these exact targets:
+
+```sh
+bash bin/run-tests.sh m4          # bound-agent tool authorization
+bash bin/run-tests.sh m10         # strict proof-result recognition
+bash bin/run-tests.sh m12         # fail-closed self-modification path
+bash bin/run-tests.sh openrouter  # multi-turn provider tool feedback
+bash bin/run-tests.sh evolution   # complete SPEC-014 control-plane suite
+bash bin/run-tests.sh all         # all 19 targets in isolated SBCL processes
+bash bin/test-scaffolder.sh       # custom factory entrypoint smoke
+```
 
 ##### Multi-turn experiment runner
 
@@ -635,7 +757,9 @@ anuna-imago/
 ├── theories/
 │   └── self-modification-floor.spl   SPEC-012 floor invariants (Spindle)
 ├── specs/
-│   └── SPEC-012-self-modification-port.md  agent self-modification port
+│   ├── SPEC-012-self-modification-port.md  agent self-modification port
+│   └── SPEC-014-harness-evolution-control-plane.md
+│                                       measured harness evolution
 ├── architecture/
 │   ├── ADR-001-image-runtime.md      why SBCL (not ECL)
 │   ├── ADR-002-identity.md           why did:key (not did:web/plc)
@@ -648,11 +772,15 @@ anuna-imago/
 │   ├── openrouter/                   (ql:quickload :imago/<plugin>)
 │   │   ├── openrouter.lisp           OpenRouter (OpenAI-compatible) driver
 │   │   └── test.lisp                 stubbed-HTTP test suite
-│   └── zai/
-│       ├── zai.lisp                  Z.ai GLM Coding Plan (Anthropic-compat)
-│       └── test.lisp                 stubbed-HTTP test suite
+│   ├── zai/
+│   │   ├── zai.lisp                  Z.ai GLM Coding Plan (Anthropic-compat)
+│   │   └── test.lisp                 stubbed-HTTP test suite
+│   └── evolution/
+│       ├── evolution.lisp            signed evolution control plane
+│       └── test.lisp                 SPEC-014 contract and attack suite
 ├── plan.spl                          SPEC-011 implementation plan (hence)
 ├── plan.spec-012.spl                 SPEC-012 implementation plan (hence)
+├── plan.spec-014.spl                 SPEC-014 Elephant plan snapshot
 └── .github/workflows/ci.yml          matrix CI + LOC-budget gate
 ```
 
@@ -925,6 +1053,66 @@ docstrings live with the definitions in `src/`.
 *harness-eval-audit-log*                         ; receipt-log instance | nil
 ```
 
+### Harness evolution control plane (SPEC-014, opt-in)
+
+Load `imago/evolution` before resolving these symbols. They live in the
+`anuna-imago.evolution` package and do not enter the core package.
+
+```lisp
+;; Store lifecycle and trust rosters. Roster entries are did:key strings.
+(open-evolution-store path
+  &key authority trusted-executors trusted-evaluators trusted-authorizers)
+                                                    → evolution-store
+(close-evolution-store store)                       → t
+
+;; Freeze and verify content-addressed candidates.
+(freeze-candidate! store source-image
+  &key parent-id parent-image-sha256 creator created-at
+       theory-fingerprint prompt-schema-sha256 tool-schema-sha256
+       changed-components budgets activation-evidence) → manifest-plist
+(read-candidate-manifest store candidate-id)        → manifest-plist
+(verify-candidate store candidate-id)                → boolean
+
+;; Append signed runs and derive a baseline-relative decision.
+(record-evaluation! store
+  &key run-id campaign-id benchmark-id split task-id replicate-index
+       evaluation-plan-sha256 executor-config-sha256 scorer-config-sha256
+       candidate-id executor evaluator run-complete-p task-correct-p
+       capability-score-micros activation-evidence duration-ms input-tokens
+       output-tokens estimated-cost-microusd)
+                                                    → evaluation-event
+(make-decision! store baseline-id candidate-id
+  &key campaign-id minimum-held-out-repetitions
+       minimum-distinct-executors minimum-capability-delta-micros
+       maximum-execution-token-increase
+       maximum-runtime-cost-increase-microusd authorizer) → decision-event
+
+;; Each activation entry has this exact closed shape. Lists are sorted and unique.
+(:component "component-name"
+ :kind :runtime-hit                  ; or :reachable for diagnostics only
+ :artifact-sha256 "sha256-digest")
+
+;; Change operator pointers. These calls reject bound agent contexts.
+(promote-candidate! store decision &key pointer authorizer)
+                                                    → promotion-event
+(rollback-pointer! store pointer &key authorizer)   → rollback-event
+(read-pointer store pointer)                        → candidate-id | nil
+
+;; Inspect and verify persisted evidence.
+(read-ledger store)                                 → (event-plist …)
+(read-ledger-head store)                            → head-plist
+(verify-ledger store)                               → boolean
+(canonical-bytes value)                             → utf-8-octet-vector
+
+;; Confined path accessors.
+(candidate-directory store candidate-id)            → pathname
+(candidate-image-path store candidate-id)           → pathname
+(candidate-manifest-path store candidate-id)        → pathname
+(ledger-path store)                                 → pathname
+(ledger-head-path store)                            → pathname
+(pointer-path store pointer)                        → pathname
+```
+
 ### Image distribution
 
 ```lisp
@@ -935,7 +1123,7 @@ docstrings live with the definitions in `src/`.
 (register-credential-eraser! thunk)
 *boot-time*                                      ; universal-time at load
 *version*                                        ; "0.1.0"
-(agent-main)                                     ; toplevel for saved images
+(agent-main &optional factory)                   ; toplevel for saved images
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -970,15 +1158,18 @@ docstrings live with the definitions in `src/`.
       `test/fixtures/`)
 - [x] SPEC-012 t12 — final adversarial review (SELF-MOD-REVIEW.md);
       fixed BLOCKER-1 setf/setq safety-variable bypass (ADR-014)
+- [x] SPEC-014 optional harness evolution implementation and focused tests
 - [ ] R4 frame-level signing on every CBCL message (needs cbcl-rs FFI)
 - [ ] Streaming SSE for the Anthropic provider
 - [ ] CI matrix M6 step (cbcl-rs cdylib build)
 - [ ] Bedrock provider driver
 - [ ] Vertex provider driver
 
-By the numbers: **~4100 LOC** harness, **~3760 LOC** tests, **~63 MB** image
-(full-agent profile incl. provider + WSS + identity), **165 ms** p90 cold
-start, **17 test suites** × **430+ checks**, all green.
+Measured with `wc -l`, top-level `src/*.lisp` contains **4,338 lines** and
+`plugins/evolution/evolution.lisp` contains **2,393 lines**. The combined
+`test/*.lisp` and `plugins/*/test.lisp` scope contains **7,800 lines**. The
+aggregate runner executes **19 targets** in fresh SBCL processes. Its evolution
+target currently runs **33 groups and 566 checks**.
 
 See the [open issues](https://codeberg.org/anuna/imago/issues) for
 proposed features and known issues.
@@ -999,11 +1190,9 @@ flow works fine — no formal RFC process.
 4. Commit your changes (`git commit -m 'feat: …'`)
 5. Push to the branch and open a pull request
 
-The LOC budget gate at 3300 lines (in `.github/workflows/ci.yml`) is a
-soft signal — going over warrants a discussion of whether the addition
-is paying for itself. The cap has been raised four times as features
-landed; each bump comes with a commit message explaining what made it
-necessary.
+The core LOC budget gate at 3300 lines is in `.github/workflows/ci.yml`.
+It excludes identities, self-modification, examples, tests, and opt-in
+plugins. Crossing the soft gate requires a review of the added complexity.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -1038,6 +1227,8 @@ Project Link: <https://codeberg.org/anuna/imago>
 * [ironclad][ironclad-url] — Ed25519 sign/verify behind the did:key identity layer
 * [cbcl-rs][cbcl-url] — Rust parser binding, inherits Lean-verified oracle parity
 * [`hence`](https://codeberg.org/anuna/hence) — the defeasible-logic task planner that drives [`plan.spl`](./plan.spl)
+* [`elephant`](https://elephant.anuna.io/) — signed theory coordination for the SPEC-014 task and evidence graph
+* [HarnessDev](https://arxiv.org/abs/2609.01437) — evidence model behind the optional harness evolution control plane
 * [Best-README-Template](https://github.com/othneildrew/Best-README-Template) — the structural template this README follows
 
 The bitter-lesson stance owes its framing to recent critiques of agent
@@ -1059,6 +1250,9 @@ Further reading, in roughly the order you'd want to read them:
 * [`architecture/EXPERIMENT-LOG.md`](./architecture/EXPERIMENT-LOG.md) — six goal-driven runs that shaped SPEC-012, with each finding mapped to the commit that fixed it
 * [`plan.spec-012.spl`](./plan.spec-012.spl) — SPEC-012 implementation plan
 * [`test/m12-tests.lisp`](./test/m12-tests.lisp) — 22 test functions exercising the safety stack and recursion-safety properties
+* [`specs/SPEC-014-harness-evolution-control-plane.md`](./specs/SPEC-014-harness-evolution-control-plane.md) — frozen-candidate and promotion contracts
+* [`plan.spec-014.spl`](./plan.spec-014.spl) — Elephant task graph and completion gates for SPEC-014
+* [`plugins/evolution/test.lisp`](./plugins/evolution/test.lisp) — evolution control-plane contract and attack suite
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -1071,9 +1265,9 @@ Further reading, in roughly the order you'd want to read them:
 [cl-url]:           https://common-lisp.net/
 [sbcl-shield]:      https://img.shields.io/badge/SBCL-2.6%2B-darkgreen.svg?style=for-the-badge
 [sbcl-url]:         https://www.sbcl.org/
-[tests-shield]:     https://img.shields.io/badge/tests-18_suites_green-success.svg?style=for-the-badge
+[tests-shield]:     https://img.shields.io/badge/tests-19_targets-success.svg?style=for-the-badge
 [tests-url]:        ./test/
-[loc-shield]:       https://img.shields.io/badge/LOC-4094-informational.svg?style=for-the-badge
+[loc-shield]:       https://img.shields.io/badge/src_top--level_LOC-4338-informational.svg?style=for-the-badge
 [loc-url]:          ./src/
 
 [sbcl-tile]:        https://img.shields.io/badge/SBCL-image_runtime-darkgreen?style=flat-square
