@@ -18,6 +18,28 @@
 (defparameter +evolution-sha-a+ (make-string 64 :initial-element #\a))
 (defparameter +evolution-sha-b+ (make-string 64 :initial-element #\b))
 (defparameter +evolution-sha-c+ (make-string 64 :initial-element #\c))
+(defparameter +evolution-decision-gate-keys+
+  '(:candidate-digest-valid
+    :baseline-digest-valid
+    :comparison-cells-match
+    :candidate-cells-unique
+    :single-evaluation-plan-context
+    :replicate-templates-match
+    :minimum-held-out-repetitions-met
+    :minimum-distinct-executors-met
+    :correctness-retained
+    :changed-components-activated
+    :runs-complete
+    :creator-evaluator-separated
+    :roles-pairwise-distinct
+    :trusted-actor-signatures
+    :replicate-capability-delta-met
+    :per-executor-config-capability-delta-met
+    :execution-token-increase-within-limit
+    :runtime-cost-increase-within-limit
+    :authorizer-rosters-disjoint
+    :authorizer-creators-separated
+    :trusted-authorizer-signature))
 
 ;; ------------------------------------------------------------- harness ---
 
@@ -257,11 +279,29 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
 (defun %make-image (directory name &optional (octets #(73 77 65 71 79)))
   (%write-octets (merge-pathnames name directory) octets))
 
+(defun %runtime-activation-evidence (store candidate-id)
+  (let ((digest (getf (%evo-call "READ-CANDIDATE-MANIFEST"
+                                 store candidate-id)
+                      :image-sha256)))
+    (list (list :component "prompt/system"
+                :kind :runtime-hit
+                :artifact-sha256 digest)
+          (list :component "tools/weather"
+                :kind :runtime-hit
+                :artifact-sha256 digest))))
+
 (defun %record-evaluation (store actors candidate-id run-id task-id score
-                           &key (executor :executor-1)
+                           &key (campaign-id "matrix")
+                                (benchmark-id "benchmark-1")
+                                (replicate-index 1)
+                                (evaluation-plan-sha256 +evolution-sha-a+)
+                                (executor-config-sha256 +evolution-sha-b+)
+                                (scorer-config-sha256 +evolution-sha-c+)
+                                (executor :executor-1)
                                 (evaluator :evaluator-1)
+                                (run-complete-p t)
                                 (correct-p t)
-                                (activation-evidence '("tool:dispatch:1"))
+                                (activation-evidence nil activation-evidence-p)
                                 (duration-ms 100)
                                 (input-tokens 20)
                                 (output-tokens 10)
@@ -270,14 +310,24 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
   (%evo-call "RECORD-EVALUATION!"
              store
              :run-id run-id
+             :campaign-id campaign-id
+             :benchmark-id benchmark-id
              :split split
              :task-id task-id
+             :replicate-index replicate-index
+             :evaluation-plan-sha256 evaluation-plan-sha256
+             :executor-config-sha256 executor-config-sha256
+             :scorer-config-sha256 scorer-config-sha256
              :candidate-id candidate-id
              :executor (%actor actors executor)
              :evaluator (%actor actors evaluator)
+             :run-complete-p run-complete-p
              :task-correct-p correct-p
              :capability-score-micros score
-             :activation-evidence activation-evidence
+             :activation-evidence
+             (if activation-evidence-p
+                 activation-evidence
+                 (%runtime-activation-evidence store candidate-id))
              :duration-ms duration-ms
              :input-tokens input-tokens
              :output-tokens output-tokens
@@ -285,27 +335,36 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
 
 (defun %record-comparison-matrix (store actors baseline-id candidate-id
                                   &key (candidate-correct '(t t t))
+                                       (baseline-scores '(500000 600000 700000))
                                        (candidate-scores '(700000 800000 900000))
                                        (order :forward)
-                                       (prefix "matrix"))
-  (let* ((baseline
-           (list
-            (list baseline-id (format nil "~A-b1" prefix) "task-1" 500000
-                  :executor :executor-1 :evaluator :evaluator-1)
-            (list baseline-id (format nil "~A-b2" prefix) "task-2" 600000
-                  :executor :executor-2 :evaluator :evaluator-2)
-            (list baseline-id (format nil "~A-b3" prefix) "task-3" 700000
-                  :executor :executor-1 :evaluator :evaluator-2)))
+                                       (prefix "matrix")
+                                       campaign-id)
+  (let* ((campaign-id (or campaign-id prefix))
+         (baseline
+           (loop for index from 1
+                 for score in baseline-scores
+                 collect
+                 (list baseline-id (format nil "~A-b~D" prefix index)
+                       "task-1" score
+                       :campaign-id campaign-id
+                       :replicate-index index
+                       :executor (if (oddp index) :executor-1 :executor-2)
+                       :evaluator (if (oddp index)
+                                      :evaluator-1 :evaluator-2))))
          (candidate
            (loop for index from 1
                  for score in candidate-scores
                  for correct in candidate-correct
                  collect
                  (list candidate-id (format nil "~A-c~D" prefix index)
-                       (format nil "task-~D" index) score
+                       "task-1" score
+                       :campaign-id campaign-id
+                       :replicate-index index
                        :correct-p correct
                        :executor (if (oddp index) :executor-1 :executor-2)
-                       :evaluator (if (= index 1) :evaluator-1 :evaluator-2))))
+                       :evaluator (if (oddp index)
+                                      :evaluator-1 :evaluator-2))))
          (rows (append baseline candidate)))
     (cond
       ((eq order :reverse)
@@ -318,15 +377,30 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
       (apply #'%record-evaluation store actors row))))
 
 (defun %make-decision (store baseline-id candidate-id authorizer
-                       &key (minimum-repetitions 3)
+                       &key (campaign-id "matrix")
+                            (minimum-repetitions 3)
                             (minimum-executors 2)
-                            (minimum-capability-delta-micros 100000))
+                            (minimum-capability-delta-micros 100000)
+                            (maximum-execution-token-increase 0)
+                            (maximum-runtime-cost-increase-microusd 0))
   (%evo-call "MAKE-DECISION!"
              store baseline-id candidate-id
+             :campaign-id campaign-id
              :minimum-held-out-repetitions minimum-repetitions
              :minimum-distinct-executors minimum-executors
              :minimum-capability-delta-micros minimum-capability-delta-micros
+             :maximum-execution-token-increase
+             maximum-execution-token-increase
+             :maximum-runtime-cost-increase-microusd
+             maximum-runtime-cost-increase-microusd
              :authorizer authorizer))
+
+(defun %resign-decision-for-validation (decision authorizer)
+  (let* ((payload
+           (funcall (%evo-function "%EVENT-ACTOR-PAYLOAD") decision))
+         (signature
+           (funcall (%evo-function "%SIGN-VALUE") authorizer payload)))
+    (%plist-put decision :authorization-signature signature)))
 
 (defun %make-candidate-pair (directory actors &key (candidate-bytes #(67 65 78 68)))
   (let* ((store-path (merge-pathnames "store/" directory))
@@ -339,6 +413,39 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
          (candidate-id (%candidate-id candidate-manifest)))
     (values store store-path baseline-manifest baseline-id
             candidate-manifest candidate-id)))
+
+(defun %plist-overlay (base overrides)
+  (let ((result (copy-list base)))
+    (loop for (key value) on overrides by #'cddr
+          do (setf (getf result key) value))
+    result))
+
+(defun %record-paired-cell (store actors baseline-id candidate-id prefix
+                            replicate-index baseline-score candidate-score
+                            &key (campaign-id "matrix")
+                                 (benchmark-id "benchmark-1")
+                                 (task-id "task-1")
+                                 (executor :executor-1)
+                                 (evaluator :evaluator-1)
+                                 (evaluation-plan-sha256 +evolution-sha-a+)
+                                 (executor-config-sha256 +evolution-sha-b+)
+                                 (scorer-config-sha256 +evolution-sha-c+)
+                                 baseline-options candidate-options)
+  (let ((common
+          (list :campaign-id campaign-id
+                :benchmark-id benchmark-id
+                :replicate-index replicate-index
+                :executor executor
+                :evaluator evaluator
+                :evaluation-plan-sha256 evaluation-plan-sha256
+                :executor-config-sha256 executor-config-sha256
+                :scorer-config-sha256 scorer-config-sha256)))
+    (apply #'%record-evaluation store actors baseline-id
+           (format nil "~A-b" prefix) task-id baseline-score
+           (%plist-overlay common baseline-options))
+    (apply #'%record-evaluation store actors candidate-id
+           (format nil "~A-c" prefix) task-id candidate-score
+           (%plist-overlay common candidate-options))))
 
 (defun %ledger-rejected-p (store)
   (%rejected-p (lambda () (%evo-call "VERIFY-LEDGER" store))))
@@ -747,13 +854,23 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
             :timestamp ,+evolution-fixed-time+
             :candidate-id "c-fixed"
             :run-id "run-1"
+            :campaign-id "campaign-fixed"
+            :benchmark-id "benchmark-fixed"
             :split :held-out
             :task-id "task-1"
+            :replicate-index 1
+            :evaluation-plan-sha256 ,+evolution-sha-a+
+            :executor-config-sha256 ,+evolution-sha-b+
+            :scorer-config-sha256 ,+evolution-sha-c+
             :executor-did ,+evolution-fixture-did+
             :evaluator-did ,+evolution-fixture-did+
+            :run-complete-p t
             :task-correct-p t
             :capability-score-micros 750000
-            :activation-evidence ("tool:dispatch:1")
+            :activation-evidence
+            ((:component "prompt/system"
+              :kind :runtime-hit
+              :artifact-sha256 ,+evolution-sha-a+))
             :duration-ms 123
             :input-tokens 45
             :output-tokens 6
@@ -763,25 +880,74 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
             :timestamp ,+evolution-fixed-time+
             :candidate-id "c-fixed"
             :baseline-id "b-fixed"
+            :campaign-id "campaign-fixed"
             :evidence-head ,+evolution-sha-b+
-            :gates (:candidate-digest-valid t :baseline-digest-valid t)
+            :minimum-held-out-repetitions 3
+            :minimum-distinct-executors 2
+            :minimum-capability-delta-micros 1
+            :maximum-execution-token-increase 0
+            :maximum-runtime-cost-increase-microusd 0
+            :gates (:candidate-digest-valid t
+                    :baseline-digest-valid t
+                    :comparison-cells-match t
+                    :candidate-cells-unique t
+                    :single-evaluation-plan-context t
+                    :replicate-templates-match t
+                    :minimum-held-out-repetitions-met t
+                    :minimum-distinct-executors-met t
+                    :correctness-retained t
+                    :changed-components-activated t
+                    :runs-complete t
+                    :creator-evaluator-separated t
+                    :roles-pairwise-distinct t
+                    :trusted-actor-signatures t
+                    :replicate-capability-delta-met t
+                    :per-executor-config-capability-delta-met t
+                    :execution-token-increase-within-limit t
+                    :runtime-cost-increase-within-limit t
+                    :authorizer-rosters-disjoint t
+                    :authorizer-creators-separated t
+                    :trusted-authorizer-signature t)
+            :failed-gates nil
             :baseline-capability-mean-micros 500000
             :candidate-capability-mean-micros 750000
             :capability-delta-micros 250000
-            :runtime-cost-microusd 78
+            :replicate-capability-deltas
+            ((:replicate-index 1
+              :baseline-capability-mean-micros 500000
+              :candidate-capability-mean-micros 750000
+              :capability-delta-micros 250000))
+            :conservative-capability-delta-micros 250000
+            :executor-capability-deltas
+            ((:executor-did ,+evolution-fixture-did+
+              :executor-config-sha256 ,+evolution-sha-b+
+              :baseline-capability-mean-micros 500000
+              :candidate-capability-mean-micros 750000
+              :capability-delta-micros 250000))
+            :baseline-execution-tokens-total 40
+            :candidate-execution-tokens-total 51
+            :baseline-execution-tokens-mean-per-event 40
+            :candidate-execution-tokens-mean-per-event 51
+            :execution-token-delta 11
+            :baseline-runtime-cost-microusd-total 70
+            :candidate-runtime-cost-microusd-total 78
+            :baseline-runtime-cost-microusd-mean-per-event 70
+            :candidate-runtime-cost-microusd-mean-per-event 78
+            :runtime-cost-delta-microusd 8
             :development-cost-microusd 12
-            :eligible-p t))
+            :eligible-p t
+            :authorizer-did ,+evolution-fixture-did+))
         (head `(:seq 7 :event-hash ,+evolution-sha-c+)))
     (list
      (list :manifest manifest
            "(:version 1 :candidate-id \"c-fixed\" :parent-id nil :parent-image-sha256 nil :image-file \"agent.core\" :image-sha256 \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" :creator-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\" :created-at \"2026-09-04T00:00:00Z\" :theory-fingerprint \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" :prompt-schema-sha256 \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" :tool-schema-sha256 \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\" :changed-components (\"prompt/system\") :budgets (:development-cost-microusd 12 :wall-time-ms 34 :input-tokens 56 :output-tokens 78) :activation-evidence (\"prompt/system:sha256:aa\"))"
            "0077eec6c4bebed589a902542ebf53f43ff1198f0b1705ee008fa351154242af0abe5f3b735251bd37a39d752f45ead393c6b0ac5b717616ce1a2a315c552d0f")
      (list :event event
-           "(:event :evaluation :timestamp \"2026-09-04T00:00:00Z\" :candidate-id \"c-fixed\" :run-id \"run-1\" :split :held-out :task-id \"task-1\" :executor-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\" :evaluator-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\" :task-correct-p t :capability-score-micros 750000 :activation-evidence (\"tool:dispatch:1\") :duration-ms 123 :input-tokens 45 :output-tokens 6 :estimated-cost-microusd 78)"
-           "7276ded67e06cf428a18b563f7d31e0a874f6ad92767f1ab93242427bb179f3f0d546642dcca4f2fe073c014fce6faaa7672d1354d4e7fffc055745e47fa5f06")
+           "(:event :evaluation :timestamp \"2026-09-04T00:00:00Z\" :candidate-id \"c-fixed\" :run-id \"run-1\" :campaign-id \"campaign-fixed\" :benchmark-id \"benchmark-fixed\" :split :held-out :task-id \"task-1\" :replicate-index 1 :evaluation-plan-sha256 \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" :executor-config-sha256 \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" :scorer-config-sha256 \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\" :executor-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\" :evaluator-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\" :run-complete-p t :task-correct-p t :capability-score-micros 750000 :activation-evidence ((:component \"prompt/system\" :kind :runtime-hit :artifact-sha256 \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")) :duration-ms 123 :input-tokens 45 :output-tokens 6 :estimated-cost-microusd 78)"
+           "b150c4c7c5bca293528c7e6f08da2c7ce97a5bfc5d3777728e743b46c38cfcc7dfe84c3a725b57403e6b341e405f3fff02aaa31c9b623b4e0988c9560bb5df02")
      (list :decision decision
-           "(:event :decision :timestamp \"2026-09-04T00:00:00Z\" :candidate-id \"c-fixed\" :baseline-id \"b-fixed\" :evidence-head \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" :gates (:candidate-digest-valid t :baseline-digest-valid t) :baseline-capability-mean-micros 500000 :candidate-capability-mean-micros 750000 :capability-delta-micros 250000 :runtime-cost-microusd 78 :development-cost-microusd 12 :eligible-p t)"
-           "003223ee82545092c1ffa9eff66cd39e643334a6f1501e9f6656b3cf4e4ee7f6393101087c6af66edce51b57e5eb1864e3db23a5b7ea5c23d0d0bf38087e020b")
+           "(:event :decision :timestamp \"2026-09-04T00:00:00Z\" :candidate-id \"c-fixed\" :baseline-id \"b-fixed\" :campaign-id \"campaign-fixed\" :evidence-head \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" :minimum-held-out-repetitions 3 :minimum-distinct-executors 2 :minimum-capability-delta-micros 1 :maximum-execution-token-increase 0 :maximum-runtime-cost-increase-microusd 0 :gates (:candidate-digest-valid t :baseline-digest-valid t :comparison-cells-match t :candidate-cells-unique t :single-evaluation-plan-context t :replicate-templates-match t :minimum-held-out-repetitions-met t :minimum-distinct-executors-met t :correctness-retained t :changed-components-activated t :runs-complete t :creator-evaluator-separated t :roles-pairwise-distinct t :trusted-actor-signatures t :replicate-capability-delta-met t :per-executor-config-capability-delta-met t :execution-token-increase-within-limit t :runtime-cost-increase-within-limit t :authorizer-rosters-disjoint t :authorizer-creators-separated t :trusted-authorizer-signature t) :failed-gates nil :baseline-capability-mean-micros 500000 :candidate-capability-mean-micros 750000 :capability-delta-micros 250000 :replicate-capability-deltas ((:replicate-index 1 :baseline-capability-mean-micros 500000 :candidate-capability-mean-micros 750000 :capability-delta-micros 250000)) :conservative-capability-delta-micros 250000 :executor-capability-deltas ((:executor-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\" :executor-config-sha256 \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" :baseline-capability-mean-micros 500000 :candidate-capability-mean-micros 750000 :capability-delta-micros 250000)) :baseline-execution-tokens-total 40 :candidate-execution-tokens-total 51 :baseline-execution-tokens-mean-per-event 40 :candidate-execution-tokens-mean-per-event 51 :execution-token-delta 11 :baseline-runtime-cost-microusd-total 70 :candidate-runtime-cost-microusd-total 78 :baseline-runtime-cost-microusd-mean-per-event 70 :candidate-runtime-cost-microusd-mean-per-event 78 :runtime-cost-delta-microusd 8 :development-cost-microusd 12 :eligible-p t :authorizer-did \"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\")"
+           "53db45ce660a9f418b4a3fda0d350e0c2fd3741b4acfbfb9058749d0e6c7df0e8e7637e4e78b441c5f4bb18ca27f051ede936ab8479938e54a7731c7f9bac109")
      (list :head head
            "(:seq 7 :event-hash \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\")"
            "4b48f4958fe2da0dadab2db37f7eb6bc8128b0c2c1a485f59d02fe2920a9aaf4183b286b864f0412a0f215c6262de92e9974bfa81885436c92750d3daa0cbc08"))))
@@ -982,6 +1148,923 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
            (check (%valid-signature-hex-p (getf event :evaluator-signature))))
          (%close-test-store store))))))
 
+;; ------------------------------------------ TEST-036 / protocol envelope ---
+
+(defun test-evolution-signed-protocol-envelope ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let* ((actors (%make-actors))
+            (store (%open-test-store (merge-pathnames "store/" directory) actors))
+            (image (%make-image directory "envelope.core" #(36 36 36)))
+            (manifest (%freeze store image (%actor actors :creator)))
+            (candidate-id (%candidate-id manifest))
+            (arguments
+              (list store
+                    :run-id "envelope-1"
+                    :campaign-id "campaign-envelope"
+                    :benchmark-id "benchmark-envelope"
+                    :split :held-out
+                    :task-id "task-envelope"
+                    :replicate-index 7
+                    :evaluation-plan-sha256 +evolution-sha-a+
+                    :executor-config-sha256 +evolution-sha-b+
+                    :scorer-config-sha256 +evolution-sha-c+
+                    :candidate-id candidate-id
+                    :executor (%actor actors :executor-1)
+                    :evaluator (%actor actors :evaluator-1)
+                    :run-complete-p t
+                    :task-correct-p t
+                    :capability-score-micros 765432
+                    :activation-evidence
+                    (%runtime-activation-evidence store candidate-id)
+                    :duration-ms 321
+                    :input-tokens 45
+                    :output-tokens 6
+                    :estimated-cost-microusd 78)))
+       (%evo-apply "RECORD-EVALUATION!" arguments)
+       (let* ((events (%evo-call "READ-LEDGER" store))
+              (event (%event-of-kind events :evaluation))
+              (expected-keys
+                '(:event :timestamp :candidate-id :run-id :campaign-id
+                  :benchmark-id :split :task-id :replicate-index
+                  :evaluation-plan-sha256 :executor-config-sha256
+                  :scorer-config-sha256 :executor-did :evaluator-did
+                  :run-complete-p :task-correct-p :capability-score-micros
+                  :activation-evidence :duration-ms :input-tokens
+                  :output-tokens :estimated-cost-microusd
+                  :executor-signature :evaluator-signature
+                  :seq :previous-hash :event-hash)))
+         (check (equal expected-keys
+                       (loop for key in event by #'cddr collect key))
+                "the persisted event uses the exact closed field order")
+         (check (string= "campaign-envelope" (getf event :campaign-id)))
+         (check (string= "benchmark-envelope" (getf event :benchmark-id)))
+         (check (= 7 (getf event :replicate-index)))
+         (check (getf event :run-complete-p))
+         (check (equal (%runtime-activation-evidence store candidate-id)
+                       (getf event :activation-evidence)))
+         (check (%valid-signature-hex-p (getf event :executor-signature)))
+         (check (%valid-signature-hex-p (getf event :evaluator-signature)))
+         (let ((verify-actors (%evo-function "%VERIFY-EVENT-ACTORS")))
+           (dolist (mutation
+                     `((:campaign-id "campaign-altered")
+                       (:benchmark-id "benchmark-altered")
+                       (:replicate-index 8)
+                       (:evaluation-plan-sha256 ,+evolution-sha-b+)
+                       (:executor-config-sha256 ,+evolution-sha-c+)
+                       (:scorer-config-sha256 ,+evolution-sha-a+)
+                       (:run-complete-p nil)))
+             (check (not (funcall verify-actors
+                                  store
+                                  (%plist-put event (first mutation)
+                                              (second mutation))))
+                    (format nil "both signatures bind added field ~S"
+                            (first mutation))))
+           (let* ((signature (getf event :executor-signature))
+                  (altered (copy-seq signature)))
+             (setf (char altered 0)
+                   (if (char= (char altered 0) #\0) #\1 #\0))
+             (check (not (funcall verify-actors
+                                  store
+                                  (%plist-put event :executor-signature
+                                              altered)))
+                    "an altered actor signature is rejected"))))
+       (let ((ledger-count (length (%evo-call "READ-LEDGER" store))))
+         (dolist (missing '(:campaign-id :benchmark-id :replicate-index
+                            :evaluation-plan-sha256
+                            :executor-config-sha256 :scorer-config-sha256
+                            :run-complete-p))
+           (let ((without
+                   (cons store (%plist-without (cdr arguments) missing))))
+             (check (%signals-error-p
+                     (lambda () (%evo-apply "RECORD-EVALUATION!" without)))
+                    (format nil "omitted envelope field ~S is rejected"
+                            missing))
+             (check (= ledger-count
+                       (length (%evo-call "READ-LEDGER" store))))))
+         (dolist (invalid
+                   `((:campaign-id "")
+                     (:benchmark-id "")
+                     (:replicate-index 0)
+                     (:evaluation-plan-sha256 "bad")
+                     (:executor-config-sha256 "bad")
+                     (:scorer-config-sha256 "bad")
+                     (:run-complete-p :yes)))
+           (let ((changed (copy-list (cdr arguments))))
+             (setf (getf changed (first invalid)) (second invalid))
+             (check (%signals-error-p
+                     (lambda ()
+                       (%evo-apply "RECORD-EVALUATION!"
+                                   (cons store changed))))
+                    (format nil "invalid envelope field ~S is rejected"
+                            (first invalid)))
+             (check (= ledger-count
+                       (length (%evo-call "READ-LEDGER" store)))))))
+       (%record-evaluation store actors candidate-id
+                           "NIL" "task-nil-string" 765432
+                           :campaign-id "campaign-envelope"
+                           :benchmark-id "benchmark-envelope"
+                           :replicate-index 8)
+       (check (find "NIL" (%evo-call "READ-LEDGER" store)
+                    :key (lambda (event) (getf event :run-id))
+                    :test #'equal)
+              "a valid run identifier cannot collide with missing plist keys")
+       (%close-test-store store)))))
+
+;; ------------------------------- TEST-037/038/039 / comparison isolation ---
+
+(defun test-evolution-unmatched-comparison-cells ()
+  (dolist (variant
+            `((:benchmark-id "benchmark-other")
+              (:task-id "task-other")
+              (:replicate-index 9)
+              (:executor :executor-2)
+              (:evaluator :evaluator-2)
+              (:evaluation-plan-sha256 ,+evolution-sha-b+)
+              (:executor-config-sha256 ,+evolution-sha-a+)
+              (:scorer-config-sha256 ,+evolution-sha-a+)))
+    (%call-with-evolution-directory
+     (lambda (directory)
+       (let ((actors (%make-actors)))
+         (multiple-value-bind (store store-path baseline baseline-id
+                               candidate candidate-id)
+             (%make-candidate-pair directory actors)
+           (declare (ignore store-path baseline candidate))
+           (dotimes (offset 3)
+             (let* ((index (1+ offset))
+                    (executor (if (oddp index) :executor-1 :executor-2))
+                    (evaluator (if (oddp index) :evaluator-1 :evaluator-2))
+                    (common (list :replicate-index index
+                                  :executor executor :evaluator evaluator))
+                    (candidate-options (copy-list common))
+                    (baseline-task "task-1")
+                    (candidate-task "task-1"))
+               (when (zerop offset)
+                 (if (eq (first variant) :task-id)
+                     (setf candidate-task (second variant))
+                     (setf (getf candidate-options (first variant))
+                           (second variant))))
+               (apply #'%record-evaluation store actors baseline-id
+                      (format nil "cell-~(~A~)-b~D" (first variant) index)
+                      baseline-task 500000 common)
+               (apply #'%record-evaluation store actors candidate-id
+                      (format nil "cell-~(~A~)-c~D" (first variant) index)
+                      candidate-task 800000 candidate-options)))
+           (let ((decision (%make-decision store baseline-id candidate-id
+                                           (%actor actors :authorizer))))
+             (check (not (getf (getf decision :gates)
+                               :comparison-cells-match))
+                    (format nil "cell dimension ~S is comparison-bound"
+                            (first variant)))
+             (check (member :comparison-cells-match
+                            (getf decision :failed-gates))))
+           (%close-test-store store)))))))
+
+(defun test-evolution-duplicate-candidate-cells ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline baseline-id candidate))
+         (%record-evaluation store actors candidate-id
+                             "duplicate-cell-a" "task-1" 800000
+                             :replicate-index 1)
+         (let ((before (length (%evo-call "READ-LEDGER" store))))
+           (check (%signals-error-p
+                   (lambda ()
+                     (%record-evaluation store actors candidate-id
+                                         "duplicate-cell-b" "task-1" 900000
+                                         :replicate-index 1)))
+                  "a unique run id cannot duplicate a candidate cell")
+           (check (= before (length (%evo-call "READ-LEDGER" store)))
+                  "duplicate-cell rejection has no ledger effect"))
+         (%close-test-store store)))
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair (merge-pathnames "valid/" directory) actors)
+         (declare (ignore store-path baseline candidate))
+         (%record-comparison-matrix store actors baseline-id candidate-id)
+         (let ((decision (%make-decision store baseline-id candidate-id
+                                         (%actor actors :authorizer))))
+           (check (getf (getf decision :gates) :candidate-cells-unique)
+                  "a valid comparison reports unique candidate cells"))
+         (%close-test-store store))))))
+
+(defun test-evolution-campaign-split-isolation ()
+  (dolist (exposed '(:feedback :development :selection))
+    (dolist (direction '(:exposed-first :held-out-first))
+      (%call-with-evolution-directory
+       (lambda (directory)
+         (let ((actors (%make-actors)))
+           (multiple-value-bind (store store-path baseline baseline-id
+                                 candidate candidate-id)
+               (%make-candidate-pair directory actors)
+             (declare (ignore store-path baseline candidate))
+             (flet ((record-exposed ()
+                      (%record-evaluation
+                       store actors baseline-id
+                       (format nil "split-~(~A~)-~(~A~)-exposed"
+                               exposed direction)
+                       "task-shared" 500000 :split exposed
+                       :campaign-id "campaign-split"
+                       :benchmark-id "benchmark-split"
+                       :replicate-index 1))
+                    (record-held-out ()
+                      (%record-evaluation
+                       store actors candidate-id
+                       (format nil "split-~(~A~)-~(~A~)-held"
+                               exposed direction)
+                       "task-shared" 800000 :split :held-out
+                       :campaign-id "campaign-split"
+                       :benchmark-id "benchmark-split"
+                       :replicate-index 2)))
+               (if (eq direction :exposed-first)
+                   (record-exposed)
+                   (record-held-out))
+               (let ((before (length (%evo-call "READ-LEDGER" store))))
+                 (check (%signals-error-p
+                         (lambda ()
+                           (if (eq direction :exposed-first)
+                               (record-held-out)
+                               (record-exposed))))
+                        (format nil "~S contamination is rejected ~S"
+                                exposed direction))
+                 (check (= before (length (%evo-call "READ-LEDGER" store)))
+                        "split contamination never appends")
+                 (if (eq direction :exposed-first)
+                     (%record-evaluation
+                      store actors candidate-id
+                      (format nil "split-~(~A~)-other-held" exposed)
+                      "task-shared" 800000 :split :held-out
+                      :campaign-id "campaign-split"
+                      :benchmark-id "benchmark-other"
+                      :replicate-index 2)
+                     (%record-evaluation
+                      store actors baseline-id
+                      (format nil "split-~(~A~)-other-exposed" exposed)
+                      "task-shared" 500000 :split exposed
+                      :campaign-id "campaign-split"
+                      :benchmark-id "benchmark-other"
+                      :replicate-index 1))
+                 (check (= (1+ before)
+                           (length (%evo-call "READ-LEDGER" store)))
+                        "the same task under another benchmark remains valid")))
+             (%close-test-store store))))))))
+
+;; ----------------------------- TEST-040/041 / replicate methodology ---
+
+(defun test-evolution-complete-replicate-counting ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         ;; Two event rows on each side still represent only one replicate.
+         (%record-paired-cell store actors baseline-id candidate-id
+                              "rows-r1-a" 1 500000 800000
+                              :task-id "task-a"
+                              :executor :executor-1 :evaluator :evaluator-1)
+         (%record-paired-cell store actors baseline-id candidate-id
+                              "rows-r1-b" 1 500000 800000
+                              :task-id "task-b"
+                              :executor :executor-2 :evaluator :evaluator-2)
+         (let ((decision (%make-decision store baseline-id candidate-id
+                                         (%actor actors :authorizer)
+                                         :minimum-repetitions 2)))
+           (check (getf (getf decision :gates) :replicate-templates-match))
+           (check (not (getf (getf decision :gates)
+                             :minimum-held-out-repetitions-met))
+                  "event rows cannot substitute for distinct replicates"))
+         (%close-test-store store)))
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair (merge-pathnames "mismatch/" directory)
+                                 actors)
+         (declare (ignore store-path baseline candidate))
+         (dotimes (offset 3)
+           (let* ((index (1+ offset))
+                  (task (if (= index 3) "task-other" "task-1"))
+                  (executor (if (oddp index) :executor-1 :executor-2))
+                  (evaluator (if (oddp index) :evaluator-1 :evaluator-2)))
+             (%record-paired-cell store actors baseline-id candidate-id
+                                  (format nil "template-r~D" index)
+                                  index 500000 800000
+                                  :task-id task
+                                  :executor executor :evaluator evaluator)))
+         (let ((decision (%make-decision store baseline-id candidate-id
+                                         (%actor actors :authorizer))))
+           (check (getf (getf decision :gates) :comparison-cells-match))
+           (check (not (getf (getf decision :gates)
+                             :replicate-templates-match)))
+           (check (not (getf (getf decision :gates)
+                             :minimum-held-out-repetitions-met))
+                  "mismatched templates do not count as true replicates"))
+         (%close-test-store store)))
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair (merge-pathnames "actor-mismatch/" directory)
+                                 actors)
+         (declare (ignore store-path baseline candidate))
+         (loop for index from 1 to 3
+               for baseline-executor = (if (oddp index)
+                                           :executor-1 :executor-2)
+               for baseline-evaluator = (if (oddp index)
+                                            :evaluator-1 :evaluator-2)
+               for candidate-executor = (if (oddp index)
+                                            :executor-2 :executor-1)
+               for candidate-evaluator = (if (oddp index)
+                                             :evaluator-2 :evaluator-1)
+               do (%record-evaluation
+                   store actors baseline-id
+                   (format nil "actor-mismatch-b~D" index)
+                   "task-1" 500000
+                   :campaign-id "actor-mismatch"
+                   :replicate-index index
+                   :executor baseline-executor
+                   :evaluator baseline-evaluator)
+                  (%record-evaluation
+                   store actors candidate-id
+                   (format nil "actor-mismatch-c~D" index)
+                   "task-1" 800000
+                   :campaign-id "actor-mismatch"
+                   :replicate-index index
+                   :executor candidate-executor
+                   :evaluator candidate-evaluator))
+         (let ((decision
+                 (%make-decision store baseline-id candidate-id
+                                 (%actor actors :authorizer)
+                                 :campaign-id "actor-mismatch")))
+           (check (getf (getf decision :gates) :replicate-templates-match)
+                  "actor identities are outside the protocol template")
+           (check (not (getf (getf decision :gates)
+                             :comparison-cells-match)))
+           (check (not (getf (getf decision :gates)
+                             :minimum-held-out-repetitions-met))
+                  "actor-mismatched cells are not complete replicates")
+           (check (not (getf (getf decision :gates)
+                             :minimum-distinct-executors-met))
+                  "executor minimum is counted only in the common cells"))
+         (%close-test-store store)))
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair (merge-pathnames "valid/" directory) actors)
+         (declare (ignore store-path baseline candidate))
+         (%record-comparison-matrix store actors baseline-id candidate-id)
+         (let ((decision (%make-decision store baseline-id candidate-id
+                                         (%actor actors :authorizer))))
+           (check (getf (getf decision :gates) :replicate-templates-match))
+           (check (getf (getf decision :gates)
+                        :minimum-held-out-repetitions-met)
+                  "three matched protocol replicates meet the default"))
+         (%close-test-store store))))))
+
+(defun test-evolution-conservative-replicate-noise-gate ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         (%record-comparison-matrix
+          store actors baseline-id candidate-id
+          :baseline-scores '(500000 500000 500000)
+          :candidate-scores '(1000000 750000 750000))
+         (let ((decision (%make-decision
+                          store baseline-id candidate-id
+                          (%actor actors :authorizer)
+                          :minimum-capability-delta-micros 300000)))
+           (check (>= (getf decision :capability-delta-micros) 300000)
+                  "the pooled mean is a tempting false positive")
+           (check (= 250000
+                     (getf decision :conservative-capability-delta-micros)))
+           (check (not (getf (getf decision :gates)
+                             :replicate-capability-delta-met))
+                  "one lucky replicate cannot hide weaker replicates")
+           (check (not (getf decision :eligible-p))))
+         (%close-test-store store)))
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair (merge-pathnames "equality/" directory) actors)
+         (declare (ignore store-path baseline candidate))
+         (%record-comparison-matrix
+          store actors baseline-id candidate-id
+          :baseline-scores '(500000 500000 500000)
+          :candidate-scores '(800000 800000 800000))
+         (let ((decision (%make-decision
+                          store baseline-id candidate-id
+                          (%actor actors :authorizer)
+                          :minimum-capability-delta-micros 300000)))
+           (check (= 300000
+                     (getf decision :conservative-capability-delta-micros)))
+           (check (getf (getf decision :gates)
+                        :replicate-capability-delta-met)
+                  "equality at the positive threshold passes"))
+         (%close-test-store store))))))
+
+;; ------------------------------ TEST-042/043/044 / efficiency budgets ---
+
+(defun test-evolution-separated-efficiency-report ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         (loop for index from 1 to 3
+               for baseline-input in '(10 20 30)
+               for baseline-output in '(1 2 3)
+               for candidate-input in '(12 24 36)
+               for candidate-output in '(2 4 6)
+               for baseline-cost in '(5 10 15)
+               for candidate-cost in '(7 14 21)
+               for executor = (if (oddp index) :executor-1 :executor-2)
+               for evaluator = (if (oddp index) :evaluator-1 :evaluator-2)
+               do (%record-paired-cell
+                   store actors baseline-id candidate-id
+                   (format nil "efficiency-r~D" index) index 500000 700000
+                   :executor executor :evaluator evaluator
+                   :baseline-options
+                   (list :input-tokens baseline-input
+                         :output-tokens baseline-output
+                         :cost baseline-cost)
+                   :candidate-options
+                   (list :input-tokens candidate-input
+                         :output-tokens candidate-output
+                         :cost candidate-cost)))
+         (let ((decision (%make-decision
+                          store baseline-id candidate-id
+                          (%actor actors :authorizer)
+                          :maximum-execution-token-increase 18
+                          :maximum-runtime-cost-increase-microusd 12)))
+           (check (= 66 (getf decision :baseline-execution-tokens-total)))
+           (check (= 84 (getf decision :candidate-execution-tokens-total)))
+           (check (= 22 (getf decision
+                              :baseline-execution-tokens-mean-per-event)))
+           (check (= 28 (getf decision
+                              :candidate-execution-tokens-mean-per-event)))
+           (check (= 18 (getf decision :execution-token-delta)))
+           (check (= 30
+                     (getf decision :baseline-runtime-cost-microusd-total)))
+           (check (= 42
+                     (getf decision :candidate-runtime-cost-microusd-total)))
+           (check (= 10
+                     (getf decision
+                           :baseline-runtime-cost-microusd-mean-per-event)))
+           (check (= 14
+                     (getf decision
+                           :candidate-runtime-cost-microusd-mean-per-event)))
+           (check (= 12 (getf decision :runtime-cost-delta-microusd)))
+           (check (= 1200 (getf decision :development-cost-microusd)))
+           (check (getf (getf decision :gates)
+                        :execution-token-increase-within-limit))
+           (check (getf (getf decision :gates)
+                        :runtime-cost-increase-within-limit)))
+         (%close-test-store store))))))
+
+(defun %resource-gate-decision (directory actors token-increase cost-increase
+                                maximum-token-increase maximum-cost-increase)
+  (multiple-value-bind (store store-path baseline baseline-id
+                        candidate candidate-id)
+      (%make-candidate-pair directory actors)
+    (declare (ignore store-path baseline candidate))
+    (loop for index from 1 to 3
+          for executor = (if (oddp index) :executor-1 :executor-2)
+          for evaluator = (if (oddp index) :evaluator-1 :evaluator-2)
+          do (%record-paired-cell
+              store actors baseline-id candidate-id
+              (format nil "budget-r~D" index) index 500000 700000
+              :executor executor :evaluator evaluator
+              :baseline-options '(:input-tokens 9 :output-tokens 1 :cost 10)
+              :candidate-options
+              (list :input-tokens (+ 9 (if (= index 1) token-increase 0))
+                    :output-tokens 1
+                    :cost (+ 10 (if (= index 1) cost-increase 0)))))
+    (values store
+            (%make-decision
+             store baseline-id candidate-id (%actor actors :authorizer)
+             :maximum-execution-token-increase maximum-token-increase
+             :maximum-runtime-cost-increase-microusd maximum-cost-increase))))
+
+(defun test-evolution-execution-token-increase-ceiling ()
+  (dolist (case '((2 3 t) (3 3 t) (4 3 nil)))
+    (%call-with-evolution-directory
+     (lambda (directory)
+       (let ((actors (%make-actors)))
+         (multiple-value-bind (store decision)
+             (%resource-gate-decision directory actors
+                                      (first case) 0 (second case) 0)
+           (check (= (first case) (getf decision :execution-token-delta)))
+           (check (eq (third case)
+                      (getf (getf decision :gates)
+                            :execution-token-increase-within-limit))
+                  (format nil "token increase ~D against ceiling ~D"
+                          (first case) (second case)))
+           (check (getf (getf decision :gates)
+                        :runtime-cost-increase-within-limit))
+           (%close-test-store store)))))))
+
+(defun test-evolution-runtime-cost-increase-ceiling ()
+  (dolist (case '((2 3 t) (3 3 t) (4 3 nil)))
+    (%call-with-evolution-directory
+     (lambda (directory)
+       (let ((actors (%make-actors)))
+         (multiple-value-bind (store decision)
+             (%resource-gate-decision directory actors
+                                      0 (first case) 0 (second case))
+           (check (= (first case)
+                     (getf decision :runtime-cost-delta-microusd)))
+           (check (eq (third case)
+                      (getf (getf decision :gates)
+                            :runtime-cost-increase-within-limit))
+                  (format nil "runtime cost increase ~D against ceiling ~D"
+                          (first case) (second case)))
+           (check (getf (getf decision :gates)
+                        :execution-token-increase-within-limit))
+           (%close-test-store store)))))))
+
+;; ------------------------------- TEST-045 / executor-config transfer ---
+
+(defun test-evolution-per-executor-config-transfer-gate ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors))
+           (baseline-image (%make-image directory "cohort-b.core" #(45 1)))
+           (candidate-image (%make-image directory "cohort-c.core" #(45 2))))
+       (labels ((one-store (name reverse-p)
+                  (let* ((store (%open-test-store
+                                 (merge-pathnames (format nil "~A/" name)
+                                                  directory)
+                                 actors))
+                         (baseline (%freeze store baseline-image
+                                            (%actor actors :creator)))
+                         (candidate (%freeze store candidate-image
+                                             (%actor actors :creator-2)))
+                         (baseline-id (%candidate-id baseline))
+                         (candidate-id (%candidate-id candidate))
+                         (rows
+                           (loop for index from 1 to 3 append
+                             (list
+                              (list baseline-id
+                                    (format nil "cohort-b~D-a" index)
+                                    "task-a" 500000 index
+                                    :executor-1 :evaluator-1)
+                              (list candidate-id
+                                    (format nil "cohort-c~D-a" index)
+                                    "task-a" 900000 index
+                                    :executor-1 :evaluator-1)
+                              (list baseline-id
+                                    (format nil "cohort-b~D-b" index)
+                                    "task-b" 500000 index
+                                    :executor-2 :evaluator-2)
+                              (list candidate-id
+                                    (format nil "cohort-c~D-b" index)
+                                    "task-b" 400000 index
+                                    :executor-2 :evaluator-2)))))
+                    (when reverse-p (setf rows (reverse rows)))
+                    (dolist (row rows)
+                      (destructuring-bind
+                          (id run task score index executor evaluator) row
+                        (%record-evaluation
+                         store actors id run task score
+                         :campaign-id "cohort"
+                         :replicate-index index
+                         :executor executor :evaluator evaluator)))
+                    (values
+                     store
+                     (%make-decision
+                      store baseline-id candidate-id
+                      (%actor actors :authorizer)
+                      :campaign-id "cohort"
+                      :minimum-capability-delta-micros 100000)))))
+         (multiple-value-bind (store-a decision-a)
+             (one-store "forward" nil)
+           (multiple-value-bind (store-b decision-b)
+               (one-store "reverse" t)
+             (check (= 150000 (getf decision-a :capability-delta-micros)))
+             (check (= 150000
+                       (getf decision-a
+                             :conservative-capability-delta-micros)))
+             (check (getf (getf decision-a :gates)
+                          :replicate-capability-delta-met))
+             (check (not (getf (getf decision-a :gates)
+                               :per-executor-config-capability-delta-met))
+                    "pooled gains cannot hide one executor/config regression")
+             (check (some (lambda (record)
+                            (minusp (getf record :capability-delta-micros)))
+                          (getf decision-a :executor-capability-deltas)))
+             (check (equal (getf decision-a :executor-capability-deltas)
+                           (getf decision-b :executor-capability-deltas))
+                    "executor/config cohort order is deterministic")
+             (%close-test-store store-b))
+           (%close-test-store store-a)))))))
+
+;; ---------------------------- TEST-046 / activation coverage and grammar ---
+
+(defun test-evolution-changed-component-activation-coverage ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline baseline-id candidate))
+         (let* ((digest
+                  (getf (%evo-call "READ-CANDIDATE-MANIFEST"
+                                   store candidate-id)
+                        :image-sha256))
+                (prompt
+                  (list :component "prompt/system" :kind :runtime-hit
+                        :artifact-sha256 digest))
+                (tools
+                  (list :component "tools/weather" :kind :runtime-hit
+                        :artifact-sha256 digest))
+                (invalid-evidence
+                  (list
+                   (list tools prompt)
+                   (list prompt prompt)
+                   (list (list :component "prompt/system"
+                               :kind :unknown-kind
+                               :artifact-sha256 digest))
+                   (list (append prompt (list :detail "extra"))))))
+           (loop for evidence in invalid-evidence
+                 for label in '("unsorted" "duplicate" "unknown-kind"
+                                "extra-key")
+                 for index from 1
+                 for before = (length (%evo-call "READ-LEDGER" store))
+                 do (check
+                     (%signals-error-p
+                      (lambda ()
+                        (%record-evaluation
+                         store actors candidate-id
+                         (format nil "activation-invalid-~D" index)
+                         "task-invalid" 800000
+                         :campaign-id "activation-invalid"
+                         :replicate-index index
+                         :activation-evidence evidence)))
+                     (format nil "~A activation evidence is rejected" label))
+                    (check (= before
+                              (length (%evo-call "READ-LEDGER" store)))
+                           "invalid activation evidence has no ledger effect")))
+         (%close-test-store store)))
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair (merge-pathnames "negative/" directory)
+                                 actors)
+         (declare (ignore store-path baseline candidate))
+         (let* ((digest
+                  (getf (%evo-call "READ-CANDIDATE-MANIFEST"
+                                   store candidate-id)
+                        :image-sha256))
+                (prompt-hit
+                  (list :component "prompt/system" :kind :runtime-hit
+                        :artifact-sha256 digest))
+                (tools-reachable
+                  (list :component "tools/weather" :kind :reachable
+                        :artifact-sha256 digest))
+                (tools-wrong-digest
+                  (list :component "tools/weather" :kind :runtime-hit
+                        :artifact-sha256 +evolution-sha-a+)))
+           (loop for index from 1 to 3
+                 for executor = (if (oddp index) :executor-1 :executor-2)
+                 for evaluator = (if (oddp index) :evaluator-1 :evaluator-2)
+                 for evidence in (list (list prompt-hit tools-reachable)
+                                       (list tools-wrong-digest)
+                                       nil)
+                 do (%record-paired-cell
+                     store actors baseline-id candidate-id
+                     (format nil "activation-negative-r~D" index)
+                     index 500000 700000
+                     :campaign-id "activation-negative"
+                     :executor executor :evaluator evaluator
+                     :baseline-options '(:activation-evidence nil)
+                     :candidate-options
+                     (list :activation-evidence evidence))))
+         (let ((decision
+                 (%make-decision store baseline-id candidate-id
+                                 (%actor actors :authorizer)
+                                 :campaign-id "activation-negative")))
+           (check (not (getf (getf decision :gates)
+                             :changed-components-activated))
+                  "reachable and wrong-digest observations do not activate")
+           (check (equal '(:changed-components-activated)
+                         (getf decision :failed-gates))
+                  "omitting one changed component isolates activation failure"))
+         (%close-test-store store)))
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair (merge-pathnames "union/" directory) actors)
+         (declare (ignore store-path baseline candidate))
+         (let ((coverage (%runtime-activation-evidence store candidate-id)))
+           (loop for index from 1 to 3
+                 for executor = (if (oddp index) :executor-1 :executor-2)
+                 for evaluator = (if (oddp index) :evaluator-1 :evaluator-2)
+                 do (%record-paired-cell
+                     store actors baseline-id candidate-id
+                     (format nil "activation-union-r~D" index)
+                     index 500000 700000
+                     :campaign-id "activation-union"
+                     :executor executor :evaluator evaluator
+                     :baseline-options '(:activation-evidence nil)
+                     :candidate-options
+                     (list :activation-evidence
+                           (if (= index 2) coverage nil)))))
+         (let ((decision
+                 (%make-decision store baseline-id candidate-id
+                                 (%actor actors :authorizer)
+                                 :campaign-id "activation-union")))
+           (check (getf (getf decision :gates)
+                        :changed-components-activated)
+                  "candidate evidence union covers changed components")
+           (check (getf decision :eligible-p)
+                  "empty individual evidence lists do not fail union coverage"))
+         (%close-test-store store))))))
+
+;; ------------------------------- TEST-047 / complete-run attestation ---
+
+(defun test-evolution-complete-run-attestation ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         (loop for index from 1 to 3
+               for executor = (if (oddp index) :executor-1 :executor-2)
+               for evaluator = (if (oddp index) :evaluator-1 :evaluator-2)
+               do (%record-paired-cell
+                   store actors baseline-id candidate-id
+                   (format nil "complete-r~D" index)
+                   index 500000 700000
+                   :campaign-id "complete-run"
+                   :executor executor :evaluator evaluator
+                   :candidate-options
+                   (list :run-complete-p (not (= index 2)))))
+         (let ((decision
+                 (%make-decision store baseline-id candidate-id
+                                 (%actor actors :authorizer)
+                                 :campaign-id "complete-run")))
+           (check (getf (getf decision :gates)
+                        :comparison-cells-match))
+           (check (getf (getf decision :gates)
+                        :replicate-capability-delta-met))
+           (check (getf (getf decision :gates)
+                        :per-executor-config-capability-delta-met))
+           (check (getf (getf decision :gates)
+                        :execution-token-increase-within-limit))
+           (check (getf (getf decision :gates)
+                        :runtime-cost-increase-within-limit))
+           (check (not (getf (getf decision :gates) :runs-complete))
+                  "one incomplete matched event fails the completion gate")
+           (check (not (getf (getf decision :gates)
+                             :minimum-held-out-repetitions-met))
+                  "an incomplete protocol replicate does not count")
+           (check (not (getf decision :eligible-p)))
+           (let ((before (length (%evo-call "READ-LEDGER" store))))
+             (check (%signals-error-p
+                     (lambda ()
+                       (%evo-call "PROMOTE-CANDIDATE!" store decision
+                                  :pointer :canary
+                                  :authorizer (%actor actors :authorizer))))
+                    "an incomplete formal run cannot be promoted")
+             (check (= before (length (%evo-call "READ-LEDGER" store)))
+                    "rejected incomplete-run promotion has no ledger effect")
+             (check (null (%evo-call "READ-POINTER" store :canary))
+                    "rejected incomplete-run promotion cannot change pointer")))
+         (%close-test-store store))))))
+
+;; --------------------------- TEST-048/049 / authorizer role separation ---
+
+(defun test-evolution-authorizer-roster-separation ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (dolist (case `(("executor-overlap/" ,(%did actors :executor-1))
+                       ("evaluator-overlap/" ,(%did actors :evaluator-1))))
+         (let ((path (merge-pathnames (first case) directory)))
+           (check (%signals-error-p
+                   (lambda ()
+                     (%open-test-store
+                      path actors :authorizer-dids (list (second case)))))
+                  (format nil "authorizer overlap is rejected for ~A"
+                          (first case)))
+           (check (not (probe-file path))
+                  "roster overlap is rejected before creating store files")))
+       (let* ((path (merge-pathnames "disjoint/" directory))
+              (store (%open-test-store path actors)))
+         (check (probe-file path)
+                "three pairwise-disjoint trust rosters are accepted")
+         (%close-test-store store))))))
+
+(defun test-evolution-creator-authorizer-separation ()
+  (dolist (authorizer-key '(:creator :creator-2))
+    (%call-with-evolution-directory
+     (lambda (directory)
+       (let* ((actors (%make-actors))
+              (store
+                (%open-test-store
+                 (merge-pathnames "store/" directory) actors
+                 :authorizer-dids (list (%did actors authorizer-key))))
+              (baseline-image
+                (%make-image directory "creator-baseline.core" #(49 1)))
+              (candidate-image
+                (%make-image directory "creator-candidate.core" #(49 2)))
+              (baseline
+                (%freeze store baseline-image (%actor actors :creator)))
+              (candidate
+                (%freeze store candidate-image (%actor actors :creator-2)))
+              (baseline-id (%candidate-id baseline))
+              (candidate-id (%candidate-id candidate)))
+         (%record-comparison-matrix
+          store actors baseline-id candidate-id
+          :campaign-id "creator-authorizer"
+          :prefix "creator-authorizer")
+         (let ((decision
+                 (%make-decision store baseline-id candidate-id
+                                 (%actor actors authorizer-key)
+                                 :campaign-id "creator-authorizer")))
+           (check (getf (getf decision :gates)
+                        :trusted-authorizer-signature))
+           (check (not (getf (getf decision :gates)
+                             :authorizer-creators-separated))
+                  (format nil "authorizer ~S differs from neither own creation"
+                          authorizer-key))
+           (check (not (getf decision :eligible-p)))
+           (let ((before (length (%evo-call "READ-LEDGER" store))))
+             (check (%signals-error-p
+                     (lambda ()
+                       (%evo-call "PROMOTE-CANDIDATE!" store decision
+                                  :pointer :canary
+                                  :authorizer (%actor actors authorizer-key))))
+                    "a compared creator cannot authorize promotion")
+             (check (= before (length (%evo-call "READ-LEDGER" store)))
+                    "creator-authorizer rejection has no ledger effect")
+             (check (null (%evo-call "READ-POINTER" store :canary))
+                    "creator-authorizer rejection cannot change pointer")))
+         (%close-test-store store))))))
+
+;; ---------------------------- TEST-050 / single evaluation-plan context ---
+
+(defun test-evolution-single-evaluation-plan-context ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         ;; Every replicate has the same two-row protocol template.  The only
+         ;; invalid context is that the template itself contains two plans.
+         (loop for index from 1 to 3
+               do (%record-paired-cell
+                   store actors baseline-id candidate-id
+                   (format nil "mixed-plan-r~D-a" index)
+                   index 500000 700000
+                   :campaign-id "mixed-plan"
+                   :task-id "task-a"
+                   :executor :executor-1 :evaluator :evaluator-1
+                   :evaluation-plan-sha256 +evolution-sha-a+)
+                  (%record-paired-cell
+                   store actors baseline-id candidate-id
+                   (format nil "mixed-plan-r~D-b" index)
+                   index 500000 700000
+                   :campaign-id "mixed-plan"
+                   :task-id "task-b"
+                   :executor :executor-2 :evaluator :evaluator-2
+                   :evaluation-plan-sha256 +evolution-sha-b+))
+         (let ((decision
+                 (%make-decision store baseline-id candidate-id
+                                 (%actor actors :authorizer)
+                                 :campaign-id "mixed-plan")))
+           (check (getf (getf decision :gates) :comparison-cells-match)
+                  "both sides can have exact matched mixed-plan cells")
+           (check (getf (getf decision :gates) :replicate-templates-match)
+                  "identical multi-plan templates still match by replicate")
+           (check (getf (getf decision :gates)
+                        :minimum-held-out-repetitions-met)
+                  "all three multi-plan protocol replicates are complete")
+           (check (not (getf (getf decision :gates)
+                             :single-evaluation-plan-context))
+                  "a comparison cannot mix evaluation-plan digests")
+           (check (equal '(:single-evaluation-plan-context)
+                         (getf decision :failed-gates))
+                  "the single-plan gate is the isolated failure")
+           (check (not (getf decision :eligible-p))))
+         (%close-test-store store))))))
+
 ;; -------------------------------- TEST-012, TEST-014, TEST-020 / metrics ---
 
 (defun test-evolution-held-out-metrics-correctness-and-diagnostics ()
@@ -1004,7 +2087,7 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                                           (%actor actors :authorizer))))
            (check (eq :held-out (getf sample :split)))
            (check (= 900000 (getf sample :capability-score-micros)))
-           (check (equal '("tool:dispatch:1")
+           (check (equal (%runtime-activation-evidence store candidate-id)
                          (getf sample :activation-evidence)))
            (check (= 100 (getf sample :duration-ms)))
            (check (= 20 (getf sample :input-tokens)))
@@ -1034,8 +2117,10 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
            (dolist (gate '(:minimum-held-out-repetitions-met
                            :minimum-distinct-executors-met
                            :correctness-retained
-                           :activation-evidence-present
-                           :capability-delta-met))
+                           :changed-components-activated
+                           :runs-complete
+                           :replicate-capability-delta-met
+                           :per-executor-config-capability-delta-met))
              (check (member gate failed)
                     (format nil "missing evidence reports ~S" gate)))
            (check (%signals-error-p
@@ -1072,12 +2157,14 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
          ;; Two repetitions all from one executor meet only one boundary.
          (dotimes (index 2)
            (%record-evaluation store actors baseline-id
-                               (format nil "boundary-b~D" index)
-                               (format nil "task-~D" index) 500000
+                               (format nil "boundary-b~D" (1+ index))
+                               "task-1" 500000
+                               :replicate-index (1+ index)
                                :executor :executor-1 :evaluator :evaluator-1)
            (%record-evaluation store actors candidate-id
-                               (format nil "boundary-c~D" index)
-                               (format nil "task-~D" index) 800000
+                               (format nil "boundary-c~D" (1+ index))
+                               "task-1" 800000
+                               :replicate-index (1+ index)
                                :executor :executor-1 :evaluator :evaluator-1))
          (let ((decision (%make-decision store baseline-id candidate-id
                                          (%actor actors :authorizer)
@@ -1088,10 +2175,12 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
            (check (not (getf (getf decision :gates)
                              :minimum-distinct-executors-met))))
          ;; One added event for each harness introduces the second executor.
-         (%record-evaluation store actors baseline-id "boundary-b2" "task-2"
-                             500000 :executor :executor-2 :evaluator :evaluator-2)
-         (%record-evaluation store actors candidate-id "boundary-c2" "task-2"
-                             800000 :executor :executor-2 :evaluator :evaluator-2)
+         (%record-evaluation store actors baseline-id "boundary-b3" "task-1"
+                             500000 :replicate-index 3
+                             :executor :executor-2 :evaluator :evaluator-2)
+         (%record-evaluation store actors candidate-id "boundary-c3" "task-1"
+                             800000 :replicate-index 3
+                             :executor :executor-2 :evaluator :evaluator-2)
          (let ((explicit-two (%make-decision store baseline-id candidate-id
                                              (%actor actors :authorizer)
                                              :minimum-repetitions 2
@@ -1109,7 +2198,19 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
             :baseline-capability-mean-micros
             :candidate-capability-mean-micros
             :capability-delta-micros
-            :runtime-cost-microusd
+            :replicate-capability-deltas
+            :conservative-capability-delta-micros
+            :executor-capability-deltas
+            :baseline-execution-tokens-total
+            :candidate-execution-tokens-total
+            :baseline-execution-tokens-mean-per-event
+            :candidate-execution-tokens-mean-per-event
+            :execution-token-delta
+            :baseline-runtime-cost-microusd-total
+            :candidate-runtime-cost-microusd-total
+            :baseline-runtime-cost-microusd-mean-per-event
+            :candidate-runtime-cost-microusd-mean-per-event
+            :runtime-cost-delta-microusd
             :development-cost-microusd)))
 
 (defun test-evolution-decision-all-events-and-order-determinism ()
@@ -1135,24 +2236,32 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                     ;; This fourth valid event is below the threshold.  A
                     ;; selectable-subset implementation would incorrectly pass.
                     (%record-evaluation store actors candidate-id
-                                        "order-c4" "task-4" 0
+                                        "order-c4" "task-1" 0
+                                        :campaign-id "order"
+                                        :replicate-index 4
                                         :executor :executor-2
                                         :evaluator :evaluator-1)
                     (%record-evaluation store actors baseline-id
-                                        "order-b4" "task-4" 600000
+                                        "order-b4" "task-1" 600000
+                                        :campaign-id "order"
+                                        :replicate-index 4
                                         :executor :executor-2
                                         :evaluator :evaluator-1)
                     (values store baseline-id candidate-id
                             (%make-decision store baseline-id candidate-id
-                                            (%actor actors :authorizer))))))
+                                            (%actor actors :authorizer)
+                                            :campaign-id "order")))))
          (multiple-value-bind (store-a baseline-a candidate-a decision-a)
              (one-store "forward" :forward)
            (check (= 600000 (getf decision-a :baseline-capability-mean-micros)))
            (check (= 600000 (getf decision-a :candidate-capability-mean-micros))
                   "the decision consumes the low fourth run")
            (check (= 0 (getf decision-a :capability-delta-micros)))
-           (check (= 240 (getf decision-a :runtime-cost-microusd))
-                  "runtime cost includes all eight held-out runs")
+           (check (= 120 (getf decision-a
+                                :baseline-runtime-cost-microusd-total)))
+           (check (= 120 (getf decision-a
+                                :candidate-runtime-cost-microusd-total))
+                  "separate cost totals include every held-out run")
            (check (= 1200 (getf decision-a :development-cost-microusd)))
            (check (not (getf decision-a :eligible-p)))
            (dolist (case '(("reverse" :reverse)
@@ -1175,6 +2284,7 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                    (lambda ()
                      (%evo-call "MAKE-DECISION!"
                                 store-a baseline-a candidate-a
+                                :campaign-id "order"
                                 :run-ids '("order-c1")
                                 :authorizer (%actor actors :authorizer))))
                   "callers cannot select an evidence subset")
@@ -1194,9 +2304,225 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
          (%record-comparison-matrix store actors baseline-id candidate-id)
          (let* ((decision (%make-decision store baseline-id candidate-id
                                           (%actor actors :authorizer)))
-                (validate (%evo-function "%VALIDATE-DECISION-EVENT")))
+                (validate (%evo-function "%VALIDATE-DECISION-EVENT"))
+                (validate-context
+                  (%evo-function "%VALIDATE-DECISION-AGAINST-EVENTS"))
+                (prior-events
+                  (butlast (%evo-call "READ-LEDGER" store))))
            (check (funcall validate decision)
                   "the emitted decision satisfies its semantic schema")
+           (check (funcall validate-context store decision prior-events)
+                  "the emitted decision exactly matches its evidence prefix")
+           (dolist (key
+                     '(:baseline-capability-mean-micros
+                       :candidate-capability-mean-micros
+                       :capability-delta-micros
+                       :replicate-capability-deltas
+                       :conservative-capability-delta-micros
+                       :executor-capability-deltas
+                       :baseline-execution-tokens-total
+                       :candidate-execution-tokens-total
+                       :baseline-execution-tokens-mean-per-event
+                       :candidate-execution-tokens-mean-per-event
+                       :execution-token-delta
+                       :baseline-runtime-cost-microusd-total
+                       :candidate-runtime-cost-microusd-total
+                       :baseline-runtime-cost-microusd-mean-per-event
+                       :candidate-runtime-cost-microusd-mean-per-event
+                       :runtime-cost-delta-microusd
+                       :development-cost-microusd))
+             (check (%signals-error-p
+                     (lambda ()
+                       (funcall validate (%plist-without decision key))))
+                    (format nil "derived decision field ~S is mandatory" key)))
+           (let ((gate-keys +evolution-decision-gate-keys+))
+             (dolist (key gate-keys)
+               (check (%signals-error-p
+                       (lambda ()
+                         (funcall
+                          validate
+                          (%plist-put
+                           decision :gates
+                           (%plist-without (getf decision :gates) key)))))
+                      (format nil "gate field ~S is mandatory" key))
+               (check (%signals-error-p
+                       (lambda ()
+                         (funcall
+                          validate
+                          (%plist-put
+                           decision :gates
+                           (%plist-put (getf decision :gates) key :invalid)))))
+                      (format nil "gate field ~S is exactly Boolean" key))))
+           (dolist (key '(:baseline-execution-tokens-mean-per-event
+                          :candidate-execution-tokens-mean-per-event
+                          :baseline-runtime-cost-microusd-mean-per-event
+                          :candidate-runtime-cost-microusd-mean-per-event
+                          :development-cost-microusd))
+             (let ((altered
+                     (%resign-decision-for-validation
+                      (%plist-put decision key (1+ (getf decision key)))
+                      (%actor actors :authorizer))))
+               (check (%signals-error-p
+                       (lambda ()
+                         (funcall validate-context store altered prior-events)))
+                      (format nil "derived value ~S is evidence-exact" key))))
+           (let ((altered
+                   (%resign-decision-for-validation
+                    (%plist-put
+                     (%plist-put decision
+                                 :baseline-capability-mean-micros
+                                 (1+ (getf decision
+                                          :baseline-capability-mean-micros)))
+                     :candidate-capability-mean-micros
+                     (1+ (getf decision
+                              :candidate-capability-mean-micros)))
+                    (%actor actors :authorizer))))
+             (check (%signals-error-p
+                     (lambda ()
+                       (funcall validate-context store altered prior-events)))
+                    "aggregate capability means are evidence-exact"))
+           (dolist (case
+                     '((:baseline-execution-tokens-total
+                        :candidate-execution-tokens-total)
+                       (:baseline-runtime-cost-microusd-total
+                        :candidate-runtime-cost-microusd-total)))
+             (let ((altered (copy-list decision)))
+               (dolist (key case)
+                 (setf (getf altered key) (1+ (getf altered key))))
+               (setf altered
+                     (%resign-decision-for-validation
+                      altered (%actor actors :authorizer)))
+               (check (%signals-error-p
+                       (lambda ()
+                         (funcall validate-context store altered prior-events)))
+                      (format nil "separate totals ~S are evidence-exact" case))))
+           (let* ((records (getf decision :replicate-capability-deltas))
+                  (record (copy-list (first records))))
+             (incf (getf record :baseline-capability-mean-micros))
+             (incf (getf record :candidate-capability-mean-micros))
+             (let ((altered
+                     (%resign-decision-for-validation
+                      (%plist-put decision :replicate-capability-deltas
+                                  (cons record (rest records)))
+                      (%actor actors :authorizer))))
+               (check (%signals-error-p
+                       (lambda ()
+                         (funcall validate-context store altered prior-events)))
+                      "replicate means are exact evidence-derived values")))
+           (let* ((records (getf decision :executor-capability-deltas))
+                  (record (copy-list (first records))))
+             (incf (getf record :baseline-capability-mean-micros))
+             (incf (getf record :candidate-capability-mean-micros))
+             (let ((altered
+                     (%resign-decision-for-validation
+                      (%plist-put decision :executor-capability-deltas
+                                  (cons record (rest records)))
+                      (%actor actors :authorizer))))
+               (check (%signals-error-p
+                       (lambda ()
+                         (funcall validate-context store altered prior-events)))
+                      "executor/config means are exact evidence-derived values")))
+           (dolist (key +evolution-decision-gate-keys+)
+             (let* ((gates (%plist-put (getf decision :gates) key nil))
+                    (altered
+                      (%resign-decision-for-validation
+                       (%plist-put
+                        (%plist-put
+                         (%plist-put decision :gates gates)
+                         :failed-gates (list key))
+                        :eligible-p nil)
+                       (%actor actors :authorizer))))
+               (check (%signals-error-p
+                       (lambda ()
+                         (funcall validate-context store altered prior-events)))
+                      (format nil "gate ~S is evidence-derived" key))))
+           (check (%signals-error-p
+                   (lambda ()
+                     (funcall validate
+                              (%plist-put decision :capability-delta-micros
+                                          (1+ (getf decision
+                                                   :capability-delta-micros))))))
+                  "the aggregate capability delta is derived")
+           (let* ((records (getf decision :replicate-capability-deltas))
+                  (record (%plist-put
+                           (first records) :capability-delta-micros
+                           (1+ (getf (first records)
+                                    :capability-delta-micros)))))
+             (check (%signals-error-p
+                     (lambda ()
+                       (funcall
+                        validate
+                        (%plist-put decision :replicate-capability-deltas
+                                    (cons record (rest records))))))
+                    "every per-replicate delta is derived"))
+           (check (%signals-error-p
+                   (lambda ()
+                     (funcall
+                      validate
+                      (%plist-put decision :replicate-capability-deltas
+                                  (reverse
+                                   (getf decision
+                                         :replicate-capability-deltas))))))
+                  "replicate delta records are deterministically sorted")
+           (check (%signals-error-p
+                   (lambda ()
+                     (funcall
+                      validate
+                      (%plist-put
+                       decision :conservative-capability-delta-micros
+                       (1+ (getf decision
+                                :conservative-capability-delta-micros))))))
+                  "the conservative delta is the minimum replicate delta")
+           (let* ((records (getf decision :executor-capability-deltas))
+                  (record (%plist-put
+                           (first records) :capability-delta-micros
+                           (1+ (getf (first records)
+                                    :capability-delta-micros)))))
+             (check (%signals-error-p
+                     (lambda ()
+                       (funcall
+                        validate
+                        (%plist-put decision :executor-capability-deltas
+                                    (cons record (rest records))))))
+                    "every executor/config delta is derived"))
+           (check (%signals-error-p
+                   (lambda ()
+                     (funcall
+                      validate
+                      (%plist-put decision :executor-capability-deltas
+                                  (reverse
+                                   (getf decision
+                                         :executor-capability-deltas))))))
+                  "executor/config delta records are deterministically sorted")
+           (check (%signals-error-p
+                   (lambda ()
+                     (funcall validate
+                              (%plist-put decision :execution-token-delta
+                                          (1+ (getf decision
+                                                   :execution-token-delta))))))
+                  "the execution-token delta is derived from separate totals")
+           (check (%signals-error-p
+                   (lambda ()
+                     (funcall
+                      validate
+                      (%plist-put decision :runtime-cost-delta-microusd
+                                  (1+ (getf decision
+                                           :runtime-cost-delta-microusd))))))
+                  "the runtime-cost delta is derived from separate totals")
+           (dolist (key '(:replicate-capability-delta-met
+                          :per-executor-config-capability-delta-met
+                          :execution-token-increase-within-limit
+                          :runtime-cost-increase-within-limit))
+             (let* ((gates (%plist-put (getf decision :gates) key nil))
+                    (altered
+                      (%plist-put
+                       (%plist-put
+                        (%plist-put decision :gates gates)
+                        :failed-gates (list key))
+                       :eligible-p nil)))
+               (check (%signals-error-p
+                       (lambda () (funcall validate altered)))
+                      (format nil "derived gate ~S follows report values" key))))
            (check (%signals-error-p
                    (lambda ()
                      (funcall validate
@@ -1207,7 +2533,7 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                    (lambda ()
                      (funcall validate
                               (%plist-put decision :failed-gates
-                                          '(:capability-delta-met)))))
+                                          '(:replicate-capability-delta-met)))))
                   "failed gates must exactly correspond to false gate values")
            (check (%signals-error-p
                    (lambda ()
@@ -1319,7 +2645,8 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
            (%record-comparison-matrix store actors baseline-id next-id
                                       :prefix "next")
            (let ((next-decision (%make-decision store baseline-id next-id
-                                                (%actor actors :authorizer))))
+                                                (%actor actors :authorizer)
+                                                :campaign-id "next")))
              (%promote-with-pointer-observer
               store next-decision candidate-id next-id
               (%actor actors :authorizer)))
@@ -1366,9 +2693,12 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
          (%record-comparison-matrix store actors baseline-id candidate-id)
          (let ((decision (%make-decision store baseline-id candidate-id
                                          (%actor actors :authorizer))))
-           (%record-evaluation store actors candidate-id "late-run" "task-late"
-                               900000 :executor :executor-2
-                               :evaluator :evaluator-1)
+           (%record-evaluation store actors baseline-id "late-run-b" "task-1"
+                               600000 :replicate-index 4
+                               :executor :executor-2 :evaluator :evaluator-1)
+           (%record-evaluation store actors candidate-id "late-run-c" "task-1"
+                               900000 :replicate-index 4
+                               :executor :executor-2 :evaluator :evaluator-1)
            (check (%signals-error-p
                    (lambda ()
                      (%evo-call "PROMOTE-CANDIDATE!" store decision
@@ -1606,6 +2936,36 @@ its managed name.  THUNK must reject the entry based on lstat, not content."
                            #'test-evolution-ledger-chain-head-and-replay)
       (%run-evolution-case "TEST-011/035 disjoint role rosters"
                            #'test-evolution-disjoint-role-rosters)
+      (%run-evolution-case "TEST-036 signed protocol envelope"
+                           #'test-evolution-signed-protocol-envelope)
+      (%run-evolution-case "TEST-037 unmatched comparison cells"
+                           #'test-evolution-unmatched-comparison-cells)
+      (%run-evolution-case "TEST-038 duplicate candidate cells"
+                           #'test-evolution-duplicate-candidate-cells)
+      (%run-evolution-case "TEST-039 campaign split isolation"
+                           #'test-evolution-campaign-split-isolation)
+      (%run-evolution-case "TEST-040 complete replicate counting"
+                           #'test-evolution-complete-replicate-counting)
+      (%run-evolution-case "TEST-041 conservative replicate noise gate"
+                           #'test-evolution-conservative-replicate-noise-gate)
+      (%run-evolution-case "TEST-042 separated efficiency report"
+                           #'test-evolution-separated-efficiency-report)
+      (%run-evolution-case "TEST-043 execution-token ceiling"
+                           #'test-evolution-execution-token-increase-ceiling)
+      (%run-evolution-case "TEST-044 runtime-cost ceiling"
+                           #'test-evolution-runtime-cost-increase-ceiling)
+      (%run-evolution-case "TEST-045 executor/config transfer gate"
+                           #'test-evolution-per-executor-config-transfer-gate)
+      (%run-evolution-case "TEST-046 changed-component activation coverage"
+                           #'test-evolution-changed-component-activation-coverage)
+      (%run-evolution-case "TEST-047 complete-run attestation"
+                           #'test-evolution-complete-run-attestation)
+      (%run-evolution-case "TEST-048 authorizer roster separation"
+                           #'test-evolution-authorizer-roster-separation)
+      (%run-evolution-case "TEST-049 creator-authorizer separation"
+                           #'test-evolution-creator-authorizer-separation)
+      (%run-evolution-case "TEST-050 single evaluation-plan context"
+                           #'test-evolution-single-evaluation-plan-context)
       (%run-evolution-case "TEST-012/014 correctness and metric separation"
                            #'test-evolution-held-out-metrics-correctness-and-diagnostics)
       (%run-evolution-case "TEST-020 actionable missing gates"

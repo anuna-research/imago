@@ -61,21 +61,45 @@
     :seq :previous-hash :event-hash))
 
 (defparameter +evaluation-event-keys+
-  '(:event :timestamp :candidate-id :run-id :split :task-id
-    :executor-did :evaluator-did :task-correct-p
+  '(:event :timestamp :candidate-id :run-id :campaign-id :benchmark-id
+    :split :task-id :replicate-index :evaluation-plan-sha256
+    :executor-config-sha256 :scorer-config-sha256
+    :executor-did :evaluator-did :run-complete-p :task-correct-p
     :capability-score-micros :activation-evidence :duration-ms
     :input-tokens :output-tokens :estimated-cost-microusd
     :executor-signature :evaluator-signature
     :seq :previous-hash :event-hash))
 
 (defparameter +decision-event-keys+
-  '(:event :timestamp :candidate-id :baseline-id :evidence-head
+  '(:event :timestamp :candidate-id :baseline-id :campaign-id :evidence-head
     :minimum-held-out-repetitions :minimum-distinct-executors
-    :minimum-capability-delta-micros :gates :failed-gates
+    :minimum-capability-delta-micros :maximum-execution-token-increase
+    :maximum-runtime-cost-increase-microusd :gates :failed-gates
     :baseline-capability-mean-micros :candidate-capability-mean-micros
-    :capability-delta-micros :runtime-cost-microusd
+    :capability-delta-micros :replicate-capability-deltas
+    :conservative-capability-delta-micros :executor-capability-deltas
+    :baseline-execution-tokens-total :candidate-execution-tokens-total
+    :baseline-execution-tokens-mean-per-event
+    :candidate-execution-tokens-mean-per-event :execution-token-delta
+    :baseline-runtime-cost-microusd-total
+    :candidate-runtime-cost-microusd-total
+    :baseline-runtime-cost-microusd-mean-per-event
+    :candidate-runtime-cost-microusd-mean-per-event
+    :runtime-cost-delta-microusd
     :development-cost-microusd :eligible-p :authorizer-did
     :authorization-signature :seq :previous-hash :event-hash))
+
+(defparameter +activation-record-keys+
+  '(:component :kind :artifact-sha256))
+
+(defparameter +replicate-delta-keys+
+  '(:replicate-index :baseline-capability-mean-micros
+    :candidate-capability-mean-micros :capability-delta-micros))
+
+(defparameter +executor-delta-keys+
+  '(:executor-did :executor-config-sha256
+    :baseline-capability-mean-micros :candidate-capability-mean-micros
+    :capability-delta-micros))
 
 (defparameter +pointer-event-keys+
   '(:event :timestamp :candidate-id :pointer :prior-candidate-id
@@ -84,14 +108,24 @@
 (defparameter +gate-keys+
   '(:candidate-digest-valid
     :baseline-digest-valid
+    :comparison-cells-match
+    :candidate-cells-unique
+    :single-evaluation-plan-context
+    :replicate-templates-match
     :minimum-held-out-repetitions-met
     :minimum-distinct-executors-met
     :correctness-retained
-    :activation-evidence-present
+    :changed-components-activated
+    :runs-complete
     :creator-evaluator-separated
     :roles-pairwise-distinct
-    :trusted-evaluator-signatures
-    :capability-delta-met
+    :trusted-actor-signatures
+    :replicate-capability-delta-met
+    :per-executor-config-capability-delta-met
+    :execution-token-increase-within-limit
+    :runtime-cost-increase-within-limit
+    :authorizer-rosters-disjoint
+    :authorizer-creators-separated
     :trusted-authorizer-signature))
 
 ;; Persisted forms are deliberately small and closed.  These bounds are
@@ -112,8 +146,11 @@
    (append +manifest-keys+ +budget-keys+ +head-keys+ +pointer-keys+
            +freeze-event-keys+ +evaluation-event-keys+
            +decision-event-keys+ +pointer-event-keys+ +gate-keys+
+           +activation-record-keys+ +replicate-delta-keys+
+           +executor-delta-keys+
            '(:freeze :evaluation :decision :promotion :rollback
-             :development :selection :held-out :canary :active))
+             :feedback :development :selection :held-out
+             :runtime-hit :reachable :canary :active))
    :test #'eq))
 
 ;; --------------------------------------------------------------- storage ---
@@ -354,6 +391,41 @@
        (loop for (left right) on value
              while right
              always (string< left right))))
+
+(defun %octets< (left right)
+  (loop for index below (min (length left) (length right))
+        for left-byte = (aref left index)
+        for right-byte = (aref right index)
+        when (< left-byte right-byte) do (return t)
+        when (> left-byte right-byte) do (return nil)
+        finally (return (< (length left) (length right)))))
+
+(defun %canonical-value< (left right)
+  (%octets< (canonical-bytes left) (canonical-bytes right)))
+
+(defun %canonical-sort (values)
+  (sort (copy-list values) #'%canonical-value<))
+
+(defun %validate-activation-record (record)
+  (%require-keys record +activation-record-keys+ "Activation record")
+  (unless (%safe-string-p (getf record :component))
+    (error "Activation component is invalid."))
+  (unless (member (getf record :kind) '(:runtime-hit :reachable))
+    (error "Activation kind is invalid."))
+  (unless (%sha256-p (getf record :artifact-sha256))
+    (error "Activation artifact digest is invalid."))
+  record)
+
+(defun %validate-activation-evidence (evidence)
+  (unless (%proper-list-p evidence)
+    (error "Activation evidence must be a proper list."))
+  (dolist (record evidence)
+    (%validate-activation-record record))
+  (unless (loop for (left right) on evidence
+                while right
+                always (%canonical-value< left right))
+    (error "Activation evidence must be unique and canonically sorted."))
+  evidence)
 
 (defun %plist-keys (plist)
   (unless (%proper-list-p plist)
@@ -841,23 +913,30 @@ returned."
   (%validate-event-common event +evaluation-event-keys+)
   (unless (eq (getf event :event) :evaluation)
     (error "Expected an evaluation event."))
-  (unless (%safe-string-p (getf event :run-id) :nonempty t :ascii t)
-    (error "Evaluation run identifier is invalid."))
-  (unless (member (getf event :split) '(:development :selection :held-out))
+  (dolist (key '(:run-id :campaign-id :benchmark-id :task-id))
+    (unless (%safe-string-p (getf event key) :nonempty t :ascii t)
+      (error "Evaluation identifier ~S is invalid." key)))
+  (unless (member (getf event :split)
+                  '(:feedback :development :selection :held-out))
     (error "Evaluation split is invalid."))
-  (unless (%safe-string-p (getf event :task-id) :nonempty t :ascii t)
-    (error "Evaluation task identifier is invalid."))
+  (unless (and (integerp (getf event :replicate-index))
+               (plusp (getf event :replicate-index)))
+    (error "Evaluation replicate index is invalid."))
+  (dolist (key '(:evaluation-plan-sha256 :executor-config-sha256
+                 :scorer-config-sha256))
+    (unless (%sha256-p (getf event key))
+      (error "Evaluation configuration ~S is invalid." key)))
   (unless (and (%did-key-p (getf event :executor-did))
                (%did-key-p (getf event :evaluator-did)))
     (error "Evaluation actor DID is invalid."))
-  (unless (member (getf event :task-correct-p) '(nil t))
-    (error "Task correctness must be Boolean."))
+  (dolist (key '(:run-complete-p :task-correct-p))
+    (unless (member (getf event key) '(nil t))
+      (error "Evaluation Boolean ~S is invalid." key)))
   (dolist (key '(:capability-score-micros :duration-ms :input-tokens
                  :output-tokens :estimated-cost-microusd))
     (unless (%nonnegative-integer-p (getf event key))
       (error "Evaluation metric ~S is invalid." key)))
-  (unless (%sorted-unique-strings-p (getf event :activation-evidence))
-    (error "Evaluation activation evidence is invalid."))
+  (%validate-activation-evidence (getf event :activation-evidence))
   (unless (and (%signature-p (getf event :executor-signature))
                (%signature-p (getf event :evaluator-signature)))
     (error "Evaluation actor signature is invalid."))
@@ -870,25 +949,160 @@ returned."
       (error "Decision gate ~S is not Boolean." key)))
   gates)
 
+(defun %validate-replicate-delta (record)
+  (%require-keys record +replicate-delta-keys+ "Replicate delta")
+  (unless (and (integerp (getf record :replicate-index))
+               (plusp (getf record :replicate-index)))
+    (error "Replicate delta index is invalid."))
+  (dolist (key '(:baseline-capability-mean-micros
+                 :candidate-capability-mean-micros))
+    (unless (%nonnegative-integer-p (getf record key))
+      (error "Replicate delta metric ~S is invalid." key)))
+  (unless (and (integerp (getf record :capability-delta-micros))
+               (= (getf record :capability-delta-micros)
+                  (- (getf record :candidate-capability-mean-micros)
+                     (getf record :baseline-capability-mean-micros))))
+    (error "Replicate capability delta is incoherent."))
+  record)
+
+(defun %validate-executor-delta (record)
+  (%require-keys record +executor-delta-keys+ "Executor/config delta")
+  (unless (%did-key-p (getf record :executor-did))
+    (error "Executor/config delta DID is invalid."))
+  (unless (%sha256-p (getf record :executor-config-sha256))
+    (error "Executor/config delta digest is invalid."))
+  (dolist (key '(:baseline-capability-mean-micros
+                 :candidate-capability-mean-micros))
+    (unless (%nonnegative-integer-p (getf record key))
+      (error "Executor/config delta metric ~S is invalid." key)))
+  (unless (and (integerp (getf record :capability-delta-micros))
+               (= (getf record :capability-delta-micros)
+                  (- (getf record :candidate-capability-mean-micros)
+                     (getf record :baseline-capability-mean-micros))))
+    (error "Executor/config capability delta is incoherent."))
+  record)
+
+(defun %executor-delta< (left right)
+  (let ((left-did (getf left :executor-did))
+        (right-did (getf right :executor-did)))
+    (or (string< left-did right-did)
+        (and (string= left-did right-did)
+             (string< (getf left :executor-config-sha256)
+                      (getf right :executor-config-sha256))))))
+
 (defun %validate-decision-event (event)
   (%validate-event-common event +decision-event-keys+)
   (unless (eq (getf event :event) :decision)
     (error "Expected a decision event."))
   (%require-candidate-id (getf event :baseline-id))
+  (when (string= (getf event :candidate-id) (getf event :baseline-id))
+    (error "Decision candidates must differ."))
+  (unless (%safe-string-p (getf event :campaign-id) :nonempty t :ascii t)
+    (error "Decision campaign identifier is invalid."))
   (unless (%sha256-p (getf event :evidence-head))
     (error "Decision evidence head is invalid."))
   (dolist (key '(:minimum-held-out-repetitions :minimum-distinct-executors))
     (unless (and (integerp (getf event key)) (>= (getf event key) 2))
       (error "Decision threshold ~S is invalid." key)))
-  (dolist (key '(:minimum-capability-delta-micros
+  (unless (and (integerp (getf event :minimum-capability-delta-micros))
+               (plusp (getf event :minimum-capability-delta-micros)))
+    (error "Decision capability threshold must be positive."))
+  (dolist (key '(:maximum-execution-token-increase
+                 :maximum-runtime-cost-increase-microusd
                  :baseline-capability-mean-micros
                  :candidate-capability-mean-micros
-                 :runtime-cost-microusd :development-cost-microusd))
+                 :baseline-execution-tokens-total
+                 :candidate-execution-tokens-total
+                 :baseline-execution-tokens-mean-per-event
+                 :candidate-execution-tokens-mean-per-event
+                 :baseline-runtime-cost-microusd-total
+                 :candidate-runtime-cost-microusd-total
+                 :baseline-runtime-cost-microusd-mean-per-event
+                 :candidate-runtime-cost-microusd-mean-per-event
+                 :development-cost-microusd))
     (unless (%nonnegative-integer-p (getf event key))
       (error "Decision metric ~S is invalid." key)))
-  (unless (integerp (getf event :capability-delta-micros))
-    (error "Decision capability delta is invalid."))
+  (dolist (key '(:capability-delta-micros
+                 :conservative-capability-delta-micros
+                 :execution-token-delta :runtime-cost-delta-microusd))
+    (unless (integerp (getf event key))
+      (error "Decision signed metric ~S is invalid." key)))
+  (unless (= (getf event :capability-delta-micros)
+             (- (getf event :candidate-capability-mean-micros)
+                (getf event :baseline-capability-mean-micros)))
+    (error "Decision aggregate capability delta is incoherent."))
+  (unless (= (getf event :execution-token-delta)
+             (- (getf event :candidate-execution-tokens-total)
+                (getf event :baseline-execution-tokens-total)))
+    (error "Decision execution-token delta is incoherent."))
+  (unless (= (getf event :runtime-cost-delta-microusd)
+             (- (getf event :candidate-runtime-cost-microusd-total)
+                (getf event :baseline-runtime-cost-microusd-total)))
+    (error "Decision runtime-cost delta is incoherent."))
+  (dolist (pair
+            '((:baseline-execution-tokens-mean-per-event
+               :baseline-execution-tokens-total)
+              (:candidate-execution-tokens-mean-per-event
+               :candidate-execution-tokens-total)
+              (:baseline-runtime-cost-microusd-mean-per-event
+               :baseline-runtime-cost-microusd-total)
+              (:candidate-runtime-cost-microusd-mean-per-event
+               :candidate-runtime-cost-microusd-total)))
+    (unless (<= (getf event (first pair)) (getf event (second pair)))
+      (error "Decision per-event mean ~S exceeds its total." (first pair))))
+  (let ((replicates (getf event :replicate-capability-deltas))
+        (executors (getf event :executor-capability-deltas)))
+    (unless (%proper-list-p replicates)
+      (error "Decision replicate deltas must be a proper list."))
+    (dolist (record replicates) (%validate-replicate-delta record))
+    (unless (loop for (left right) on replicates
+                  while right
+                  always (< (getf left :replicate-index)
+                            (getf right :replicate-index)))
+      (error "Decision replicate deltas must be uniquely sorted."))
+    (unless (= (getf event :conservative-capability-delta-micros)
+               (if replicates
+                   (reduce #'min replicates
+                           :key (lambda (record)
+                                  (getf record :capability-delta-micros)))
+                   0))
+      (error "Decision conservative capability delta is incoherent."))
+    (unless (%proper-list-p executors)
+      (error "Decision executor/config deltas must be a proper list."))
+    (dolist (record executors) (%validate-executor-delta record))
+    (unless (loop for (left right) on executors
+                  while right
+                  always (%executor-delta< left right))
+      (error "Decision executor/config deltas must be uniquely sorted.")))
   (%validate-gates (getf event :gates))
+  (let ((gates (getf event :gates)))
+    (unless (eq (getf gates :replicate-capability-delta-met)
+                (not (null
+                      (and (getf event :replicate-capability-deltas)
+                           (>= (getf event
+                                    :conservative-capability-delta-micros)
+                               (getf event
+                                     :minimum-capability-delta-micros))))))
+      (error "Replicate capability gate is incoherent."))
+    (unless (eq (getf gates :per-executor-config-capability-delta-met)
+                (not (null
+                      (and (getf event :executor-capability-deltas)
+                           (every
+                            (lambda (record)
+                              (>= (getf record :capability-delta-micros)
+                                  (getf event
+                                        :minimum-capability-delta-micros)))
+                            (getf event :executor-capability-deltas))))))
+      (error "Executor/config capability gate is incoherent."))
+    (unless (eq (getf gates :execution-token-increase-within-limit)
+                (<= (getf event :execution-token-delta)
+                    (getf event :maximum-execution-token-increase)))
+      (error "Execution-token gate is incoherent."))
+    (unless (eq (getf gates :runtime-cost-increase-within-limit)
+                (<= (getf event :runtime-cost-delta-microusd)
+                    (getf event
+                          :maximum-runtime-cost-increase-microusd)))
+      (error "Runtime-cost gate is incoherent.")))
   (let ((expected-failures
           (loop for (key value) on (getf event :gates) by #'cddr
                 unless value collect key)))
@@ -928,6 +1142,58 @@ returned."
     (:decision (%validate-decision-event event))
     ((:promotion :rollback) (%validate-pointer-event event))
     (otherwise (error "Unknown ledger event kind ~S." (getf event :event)))))
+
+(defun %exposed-split-p (split)
+  (member split '(:feedback :development :selection)))
+
+(defun %comparison-cell (event)
+  (list :benchmark-id (getf event :benchmark-id)
+        :task-id (getf event :task-id)
+        :replicate-index (getf event :replicate-index)
+        :executor-did (getf event :executor-did)
+        :evaluator-did (getf event :evaluator-did)
+        :evaluation-plan-sha256 (getf event :evaluation-plan-sha256)
+        :executor-config-sha256 (getf event :executor-config-sha256)
+        :scorer-config-sha256 (getf event :scorer-config-sha256)))
+
+(defun %storage-cell (event)
+  (list :campaign-id (getf event :campaign-id)
+        :evaluation-plan-sha256 (getf event :evaluation-plan-sha256)
+        :benchmark-id (getf event :benchmark-id)
+        :task-id (getf event :task-id)
+        :replicate-index (getf event :replicate-index)
+        :executor-did (getf event :executor-did)
+        :evaluator-did (getf event :evaluator-did)
+        :executor-config-sha256 (getf event :executor-config-sha256)
+        :scorer-config-sha256 (getf event :scorer-config-sha256)))
+
+(defun %same-campaign-benchmark-task-p (left right)
+  (and (string= (getf left :campaign-id) (getf right :campaign-id))
+       (string= (getf left :benchmark-id) (getf right :benchmark-id))
+       (string= (getf left :task-id) (getf right :task-id))))
+
+(defun %split-contamination-p (left right)
+  (and (%same-campaign-benchmark-task-p left right)
+       (or (and (eq (getf left :split) :held-out)
+                (%exposed-split-p (getf right :split)))
+           (and (eq (getf right :split) :held-out)
+                (%exposed-split-p (getf left :split))))))
+
+(defun %validate-evaluation-ledger-constraints (event prior-events)
+  (when (eq (getf event :event) :evaluation)
+    (dolist (prior prior-events)
+      (when (eq (getf prior :event) :evaluation)
+        (when (string= (getf event :run-id) (getf prior :run-id))
+          (error "Ledger contains duplicate run identifier ~S."
+                 (getf event :run-id)))
+        (when (and (string= (getf event :candidate-id)
+                            (getf prior :candidate-id))
+                   (equal (%storage-cell event) (%storage-cell prior)))
+          (error "Candidate ~A contains a duplicate evaluation cell."
+                 (getf event :candidate-id)))
+        (when (%split-contamination-p event prior)
+          (error "Campaign task crosses the exposed and held-out split classes.")))))
+  event)
 
 ;; --------------------------------------------------------------- ledger ---
 
@@ -1044,14 +1310,9 @@ returned."
                                  (getf event :evaluator-did))
                            :test #'string=)))
               (error "Held-out ledger roles are not pairwise distinct."))))
+        (%validate-evaluation-ledger-constraints event events)
         (unless (%verify-event-actors store event)
           (error "Ledger actor signature verification failed."))
-        (when (eq (getf event :event) :evaluation)
-          (when (find (getf event :run-id) events
-                      :key (lambda (prior) (getf prior :run-id))
-                      :test #'string=)
-            (error "Ledger contains duplicate run identifier ~S."
-                   (getf event :run-id))))
         (push event events)
         (setf previous-hash (getf event :event-hash))
         (incf expected-sequence)))
@@ -1082,6 +1343,9 @@ returned."
          (event (append with-chain
                         (list :event-hash (%sha256-value with-chain)))))
     (%validate-event event)
+    (when (eq (getf event :event) :decision)
+      (%validate-decision-against-events store event events))
+    (%validate-evaluation-ledger-constraints event events)
     (unless (%verify-event-actors store event)
       (error "Refusing to append an event with invalid actor evidence."))
     ;; Establish parser round-trip before pruning or writing anything.  A
@@ -1125,6 +1389,9 @@ returned."
       (error "Executor and evaluator trust rosters must be disjoint."))
     (unless authorizers
       (error "At least one trusted authorizer is required."))
+    (when (or (intersection authorizers executors :test #'string=)
+              (intersection authorizers evaluators :test #'string=))
+      (error "Authorizer trust roster must be disjoint from actor rosters."))
     (let* ((root (uiop:ensure-directory-pathname (merge-pathnames path)))
            (store (make-instance 'evolution-store
                                  :root root
@@ -1420,20 +1687,39 @@ returned."
       (error "~A DID is not enrolled in its trusted roster." role))
     did))
 
-(defun record-evaluation! (store &key run-id split task-id candidate-id
-                                      executor evaluator task-correct-p
+(defun record-evaluation! (store &key run-id campaign-id benchmark-id split
+                                      task-id replicate-index
+                                      evaluation-plan-sha256
+                                      executor-config-sha256
+                                      scorer-config-sha256 candidate-id
+                                      executor evaluator
+                                      (run-complete-p nil run-complete-p-supplied-p)
+                                      task-correct-p
                                       capability-score-micros activation-evidence
                                       duration-ms input-tokens output-tokens
                                       estimated-cost-microusd)
   (%require-candidate-id candidate-id)
-  (unless (%safe-string-p run-id :nonempty t :ascii t)
-    (error "Run identifier is invalid."))
-  (unless (member split '(:development :selection :held-out))
+  (dolist (pair (list (cons :run-id run-id)
+                      (cons :campaign-id campaign-id)
+                      (cons :benchmark-id benchmark-id)
+                      (cons :task-id task-id)))
+    (unless (%safe-string-p (cdr pair) :nonempty t :ascii t)
+      (error "Evaluation identifier ~S is invalid." (car pair))))
+  (unless (member split '(:feedback :development :selection :held-out))
     (error "Evaluation split is invalid."))
-  (unless (%safe-string-p task-id :nonempty t :ascii t)
-    (error "Task identifier is invalid."))
-  (unless (member task-correct-p '(nil t))
-    (error "Task correctness must be Boolean."))
+  (unless run-complete-p-supplied-p
+    (error "Evaluation requires :RUN-COMPLETE-P."))
+  (unless (and (integerp replicate-index) (plusp replicate-index))
+    (error "Replicate index must be positive."))
+  (dolist (pair (list (cons :evaluation-plan-sha256 evaluation-plan-sha256)
+                      (cons :executor-config-sha256 executor-config-sha256)
+                      (cons :scorer-config-sha256 scorer-config-sha256)))
+    (unless (%sha256-p (cdr pair))
+      (error "Evaluation configuration ~S must be SHA-256." (car pair))))
+  (dolist (pair (list (cons :run-complete-p run-complete-p)
+                      (cons :task-correct-p task-correct-p)))
+    (unless (member (cdr pair) '(nil t))
+      (error "Evaluation field ~S must be Boolean." (car pair))))
   (dolist (pair (list (cons :capability-score-micros capability-score-micros)
                       (cons :duration-ms duration-ms)
                       (cons :input-tokens input-tokens)
@@ -1441,8 +1727,7 @@ returned."
                       (cons :estimated-cost-microusd estimated-cost-microusd)))
     (unless (%nonnegative-integer-p (cdr pair))
       (error "Evaluation field ~S must be nonnegative." (car pair))))
-  (unless (%sorted-unique-strings-p activation-evidence)
-    (error "Evaluation activation evidence must be sorted and unique."))
+  (%validate-activation-evidence activation-evidence)
   (let ((executor-did (%trusted-identity-did
                        executor (store-trusted-executors store) "Executor"))
         (evaluator-did (%trusted-identity-did
@@ -1453,8 +1738,11 @@ returned."
              (creator-did (getf manifest :creator-did)))
         (unless (%verify-candidate-with-events store candidate-id events)
           (error "Candidate verification failed before evaluation."))
-        (when (find run-id events :key (lambda (event) (getf event :run-id))
-                                  :test #'string=)
+        (when (find-if
+               (lambda (event)
+                 (and (eq (getf event :event) :evaluation)
+                      (string= run-id (getf event :run-id))))
+               events)
           (error "Run identifier ~S already exists." run-id))
         (when (eq split :held-out)
           (unless (= 3 (length (remove-duplicates
@@ -1466,10 +1754,17 @@ returned."
                        :timestamp (anuna-imago:iso-8601-now)
                        :candidate-id candidate-id
                        :run-id run-id
+                       :campaign-id campaign-id
+                       :benchmark-id benchmark-id
                        :split split
                        :task-id task-id
+                       :replicate-index replicate-index
+                       :evaluation-plan-sha256 evaluation-plan-sha256
+                       :executor-config-sha256 executor-config-sha256
+                       :scorer-config-sha256 scorer-config-sha256
                        :executor-did executor-did
                        :evaluator-did evaluator-did
+                       :run-complete-p run-complete-p
                        :task-correct-p task-correct-p
                        :capability-score-micros capability-score-micros
                        :activation-evidence activation-evidence
@@ -1487,13 +1782,134 @@ returned."
 
 ;; -------------------------------------------------------------- decision ---
 
+(defun %sum-field (events key)
+  (reduce #'+ events :key (lambda (event) (getf event key))
+          :initial-value 0))
+
+(defun %integer-mean (total count)
+  (if (plusp count) (truncate total count) 0))
+
 (defun %mean-micros (events)
-  (if events
-      (truncate (reduce #'+ events
-                        :key (lambda (event)
-                               (getf event :capability-score-micros)))
-                (length events))
-      0))
+  (%integer-mean (%sum-field events :capability-score-micros)
+                 (length events)))
+
+(defun %execution-token-total (events)
+  (reduce #'+ events
+          :key (lambda (event)
+                 (+ (getf event :input-tokens)
+                    (getf event :output-tokens)))
+          :initial-value 0))
+
+(defun %canonical-multiset (values)
+  (%canonical-sort values))
+
+(defun %comparison-cell-multiset (events)
+  (%canonical-multiset (mapcar #'%comparison-cell events)))
+
+(defun %comparison-cells-match-p (baseline-events candidate-events)
+  (and baseline-events candidate-events
+       (equal (%comparison-cell-multiset baseline-events)
+              (%comparison-cell-multiset candidate-events))))
+
+(defun %candidate-cells-unique-p (events)
+  (= (length events)
+     (length (remove-duplicates events :key #'%comparison-cell
+                                       :test #'equal))))
+
+(defun %replicate-indices (events)
+  (sort (remove-duplicates
+         (mapcar (lambda (event) (getf event :replicate-index)) events))
+        #'<))
+
+(defun %events-for-replicate (events replicate-index)
+  (remove replicate-index events
+          :key (lambda (event) (getf event :replicate-index))
+          :test-not #'=))
+
+(defun %protocol-template-cell (event)
+  ;; Actor identities deliberately remain comparison-cell fields but are not
+  ;; protocol-template fields: actors may rotate between true replicates.
+  (list :campaign-id (getf event :campaign-id)
+        :evaluation-plan-sha256 (getf event :evaluation-plan-sha256)
+        :benchmark-id (getf event :benchmark-id)
+        :task-id (getf event :task-id)
+        :executor-config-sha256 (getf event :executor-config-sha256)
+        :scorer-config-sha256 (getf event :scorer-config-sha256)))
+
+(defun %replicate-template (events replicate-index)
+  (%canonical-multiset
+   (mapcar #'%protocol-template-cell
+           (%events-for-replicate events replicate-index))))
+
+(defun %replicate-templates-match-p (baseline-events candidate-events)
+  (let ((baseline-indices (%replicate-indices baseline-events))
+        (candidate-indices (%replicate-indices candidate-events)))
+    (and baseline-indices
+         (equal baseline-indices candidate-indices)
+         (let* ((indices baseline-indices)
+                (reference (%replicate-template baseline-events
+                                                (first indices))))
+           (and reference
+                (every (lambda (index)
+                         (and (equal reference
+                                     (%replicate-template baseline-events index))
+                              (equal reference
+                                     (%replicate-template candidate-events index))))
+                       indices))))))
+
+(defun %complete-replicate-indices (baseline-events candidate-events)
+  (when (and (%comparison-cells-match-p baseline-events candidate-events)
+             (%replicate-templates-match-p baseline-events candidate-events))
+    (let ((candidate-indices (%replicate-indices candidate-events)))
+      (loop for index in (%replicate-indices baseline-events)
+            for baseline = (%events-for-replicate baseline-events index)
+            for candidate = (%events-for-replicate candidate-events index)
+            when (and (member index candidate-indices)
+                      baseline candidate
+                      (every (lambda (event) (getf event :run-complete-p))
+                             baseline)
+                      (every (lambda (event) (getf event :run-complete-p))
+                             candidate))
+              collect index))))
+
+(defun %replicate-capability-deltas (baseline-events candidate-events)
+  (when (%comparison-cells-match-p baseline-events candidate-events)
+    (loop for index in (%replicate-indices baseline-events)
+          for baseline-mean = (%mean-micros
+                               (%events-for-replicate baseline-events index))
+          for candidate-mean = (%mean-micros
+                                (%events-for-replicate candidate-events index))
+          collect (list :replicate-index index
+                        :baseline-capability-mean-micros baseline-mean
+                        :candidate-capability-mean-micros candidate-mean
+                        :capability-delta-micros
+                        (- candidate-mean baseline-mean)))))
+
+(defun %executor-config-key (event)
+  (list (getf event :executor-did)
+        (getf event :executor-config-sha256)))
+
+(defun %events-for-executor-config (events key)
+  (remove key events :key #'%executor-config-key :test-not #'equal))
+
+(defun %executor-config-capability-deltas (baseline-events candidate-events)
+  (when (%comparison-cells-match-p baseline-events candidate-events)
+    (let ((keys (remove-duplicates
+                 (mapcar #'%executor-config-key baseline-events)
+                 :test #'equal)))
+      (sort
+       (loop for key in keys
+             for baseline-mean =
+               (%mean-micros (%events-for-executor-config baseline-events key))
+             for candidate-mean =
+               (%mean-micros (%events-for-executor-config candidate-events key))
+             collect (list :executor-did (first key)
+                           :executor-config-sha256 (second key)
+                           :baseline-capability-mean-micros baseline-mean
+                           :candidate-capability-mean-micros candidate-mean
+                           :capability-delta-micros
+                           (- candidate-mean baseline-mean)))
+       #'%executor-delta<))))
 
 (defun %distinct-executor-count (events)
   (length (remove-duplicates
@@ -1501,24 +1917,15 @@ returned."
            :test #'string=)))
 
 (defun %correctness-retained-p (baseline-events candidate-events)
-  (let ((baseline-correct-tasks
-          (remove-duplicates
-           (loop for event in baseline-events
-                 when (getf event :task-correct-p)
-                   collect (getf event :task-id))
-           :test #'string=)))
-    (and baseline-events candidate-events baseline-correct-tasks
-         (every
-          (lambda (task-id)
-            (let ((matches
-                    (remove-if-not
-                     (lambda (event)
-                       (string= task-id (getf event :task-id)))
-                     candidate-events)))
-              (and matches
-                   (every (lambda (event) (getf event :task-correct-p))
-                          matches))))
-          baseline-correct-tasks))))
+  (and baseline-events candidate-events
+       (every
+        (lambda (baseline)
+          (or (not (getf baseline :task-correct-p))
+              (let ((candidate
+                      (find (%comparison-cell baseline) candidate-events
+                            :key #'%comparison-cell :test #'equal)))
+                (and candidate (getf candidate :task-correct-p)))))
+        baseline-events)))
 
 (defun %event-role-separation-p (store event)
   (let* ((manifest (read-candidate-manifest store (getf event :candidate-id)))
@@ -1528,33 +1935,99 @@ returned."
     (= 3 (length (remove-duplicates (list creator executor evaluator)
                                      :test #'string=)))))
 
+(defun %candidate-valid-p (store candidate-id ledger-events)
+  (handler-case
+      (not (null (%verify-candidate-with-events
+                  store candidate-id ledger-events)))
+    (error () nil)))
+
+(defun %single-evaluation-plan-context-p (events)
+  (and events
+       (= 1 (length
+             (remove-duplicates
+              (mapcar (lambda (event)
+                        (getf event :evaluation-plan-sha256))
+                      events)
+              :test #'string=)))))
+
+(defun %changed-components-activated-p (store candidate-id selected-events)
+  (handler-case
+      (let* ((manifest (read-candidate-manifest store candidate-id))
+             (image-digest (getf manifest :image-sha256))
+             (candidate-events
+               (remove candidate-id selected-events
+                       :key (lambda (event) (getf event :candidate-id))
+                       :test-not #'string=))
+             (activated
+               (remove-duplicates
+                (loop for event in candidate-events
+                      append
+                      (loop for record in (getf event :activation-evidence)
+                            when (and (eq (getf record :kind) :runtime-hit)
+                                      (string=
+                                       (getf record :artifact-sha256)
+                                       image-digest))
+                              collect (getf record :component)))
+                :test #'string=)))
+        (every (lambda (component)
+                 (member component activated :test #'string=))
+               (getf manifest :changed-components)))
+    (error () nil)))
+
+(defun %authorizer-rosters-disjoint-p (store)
+  (and (null (intersection (store-trusted-authorizers store)
+                           (store-trusted-executors store) :test #'string=))
+       (null (intersection (store-trusted-authorizers store)
+                           (store-trusted-evaluators store) :test #'string=))))
+
+(defun %authorizer-creators-separated-p (store baseline-id candidate-id
+                                         authorizer-did)
+  (handler-case
+      (and (not (string= authorizer-did
+                         (getf (read-candidate-manifest store baseline-id)
+                               :creator-did)))
+           (not (string= authorizer-did
+                         (getf (read-candidate-manifest store candidate-id)
+                               :creator-did))))
+    (error () nil)))
+
 (defun %decision-gates (store baseline-id candidate-id ledger-events
                         baseline-events candidate-events minimum-repetitions
-                        minimum-executors minimum-delta authorizer-did)
+                        minimum-executors minimum-delta maximum-token-increase
+                        maximum-cost-increase authorizer-did replicate-deltas
+                        conservative-delta executor-deltas token-delta cost-delta
+                        trusted-authorizer-signature-p)
   (let* ((candidate-valid
-           (%verify-candidate-with-events store candidate-id ledger-events))
+           (%candidate-valid-p store candidate-id ledger-events))
          (baseline-valid
-           (%verify-candidate-with-events store baseline-id ledger-events))
-         (baseline-mean (%mean-micros baseline-events))
-         (candidate-mean (%mean-micros candidate-events))
-         (delta (- candidate-mean baseline-mean))
+           (%candidate-valid-p store baseline-id ledger-events))
          (selected (append baseline-events candidate-events)))
-    (values
-     (list
-      :candidate-digest-valid (not (null candidate-valid))
-      :baseline-digest-valid (not (null baseline-valid))
+    (list
+      :candidate-digest-valid candidate-valid
+      :baseline-digest-valid baseline-valid
+      :comparison-cells-match
+      (%comparison-cells-match-p baseline-events candidate-events)
+      :candidate-cells-unique
+      (and candidate-events (%candidate-cells-unique-p candidate-events))
+      :single-evaluation-plan-context
+      (%single-evaluation-plan-context-p selected)
+      :replicate-templates-match
+      (%replicate-templates-match-p baseline-events candidate-events)
       :minimum-held-out-repetitions-met
-      (and (>= (length baseline-events) minimum-repetitions)
-           (>= (length candidate-events) minimum-repetitions))
+      (and (%replicate-templates-match-p baseline-events candidate-events)
+           (>= (length (%complete-replicate-indices
+                        baseline-events candidate-events))
+               minimum-repetitions))
       :minimum-distinct-executors-met
-      (and (>= (%distinct-executor-count baseline-events) minimum-executors)
-           (>= (%distinct-executor-count candidate-events) minimum-executors))
+      (and (%comparison-cells-match-p baseline-events candidate-events)
+           (>= (%distinct-executor-count baseline-events) minimum-executors))
       :correctness-retained
       (%correctness-retained-p baseline-events candidate-events)
-      :activation-evidence-present
+      :changed-components-activated
+      (%changed-components-activated-p store candidate-id selected)
+      :runs-complete
       (and selected
-           (every (lambda (event) (not (null (getf event :activation-evidence))))
-                  selected))
+           (every (lambda (event) (getf event :run-complete-p)) selected))
       :creator-evaluator-separated
       (and selected
            (every (lambda (event)
@@ -1568,103 +2041,216 @@ returned."
       (and selected
            (every (lambda (event) (%event-role-separation-p store event))
                   selected))
-      :trusted-evaluator-signatures
+      :trusted-actor-signatures
       (and selected
            (every (lambda (event)
-                    (member (getf event :evaluator-did)
-                            (store-trusted-evaluators store) :test #'string=))
+                    (%verify-event-actors store event))
                   selected))
-      :capability-delta-met (>= delta minimum-delta)
+      :replicate-capability-delta-met
+      (and replicate-deltas (>= conservative-delta minimum-delta))
+      :per-executor-config-capability-delta-met
+      (and executor-deltas
+           (every (lambda (record)
+                    (>= (getf record :capability-delta-micros) minimum-delta))
+                  executor-deltas))
+      :execution-token-increase-within-limit
+      (<= token-delta maximum-token-increase)
+      :runtime-cost-increase-within-limit
+      (<= cost-delta maximum-cost-increase)
+      :authorizer-rosters-disjoint
+      (%authorizer-rosters-disjoint-p store)
+      :authorizer-creators-separated
+      (%authorizer-creators-separated-p store baseline-id candidate-id
+                                        authorizer-did)
       :trusted-authorizer-signature
-      (not (null (member authorizer-did (store-trusted-authorizers store)
-                         :test #'string=))))
-     baseline-mean candidate-mean delta)))
+      (not (null trusted-authorizer-signature-p)))))
+
+(defparameter +decision-derived-keys+
+  '(:gates :failed-gates
+    :baseline-capability-mean-micros :candidate-capability-mean-micros
+    :capability-delta-micros :replicate-capability-deltas
+    :conservative-capability-delta-micros :executor-capability-deltas
+    :baseline-execution-tokens-total :candidate-execution-tokens-total
+    :baseline-execution-tokens-mean-per-event
+    :candidate-execution-tokens-mean-per-event :execution-token-delta
+    :baseline-runtime-cost-microusd-total
+    :candidate-runtime-cost-microusd-total
+    :baseline-runtime-cost-microusd-mean-per-event
+    :candidate-runtime-cost-microusd-mean-per-event
+    :runtime-cost-delta-microusd :development-cost-microusd :eligible-p))
+
+(defun %held-out-comparison-events (events campaign-id baseline-id candidate-id)
+  (remove-if-not
+   (lambda (event)
+     (and (eq (getf event :event) :evaluation)
+          (eq (getf event :split) :held-out)
+          (string= (getf event :campaign-id) campaign-id)
+          (member (getf event :candidate-id)
+                  (list baseline-id candidate-id) :test #'string=)))
+   events))
+
+(defun %candidate-events (events candidate-id)
+  (remove candidate-id events
+          :key (lambda (event) (getf event :candidate-id))
+          :test-not #'string=))
+
+(defun %decision-analysis (store baseline-id candidate-id campaign-id events
+                           minimum-repetitions minimum-executors minimum-delta
+                           maximum-token-increase maximum-cost-increase
+                           authorizer-did trusted-authorizer-signature-p)
+  (let* ((held-out (%held-out-comparison-events
+                    events campaign-id baseline-id candidate-id))
+         (baseline-events (%candidate-events held-out baseline-id))
+         (candidate-events (%candidate-events held-out candidate-id))
+         (baseline-mean (%mean-micros baseline-events))
+         (candidate-mean (%mean-micros candidate-events))
+         (delta (- candidate-mean baseline-mean))
+         (replicate-deltas
+           (%replicate-capability-deltas baseline-events candidate-events))
+         (conservative-delta
+           (if replicate-deltas
+               (reduce #'min replicate-deltas
+                       :key (lambda (record)
+                              (getf record :capability-delta-micros)))
+               0))
+         (executor-deltas
+           (%executor-config-capability-deltas baseline-events candidate-events))
+         (baseline-tokens (%execution-token-total baseline-events))
+         (candidate-tokens (%execution-token-total candidate-events))
+         (baseline-token-mean
+           (%integer-mean baseline-tokens (length baseline-events)))
+         (candidate-token-mean
+           (%integer-mean candidate-tokens (length candidate-events)))
+         (token-delta (- candidate-tokens baseline-tokens))
+         (baseline-cost (%sum-field baseline-events :estimated-cost-microusd))
+         (candidate-cost (%sum-field candidate-events :estimated-cost-microusd))
+         (baseline-cost-mean
+           (%integer-mean baseline-cost (length baseline-events)))
+         (candidate-cost-mean
+           (%integer-mean candidate-cost (length candidate-events)))
+         (cost-delta (- candidate-cost baseline-cost))
+         (gates
+           (%decision-gates
+            store baseline-id candidate-id events baseline-events candidate-events
+            minimum-repetitions minimum-executors minimum-delta
+            maximum-token-increase maximum-cost-increase authorizer-did
+            replicate-deltas conservative-delta executor-deltas token-delta
+            cost-delta trusted-authorizer-signature-p))
+         (failed-gates
+           (loop for (key value) on gates by #'cddr
+                 unless value collect key))
+         (development-cost
+           (if (%candidate-valid-p store candidate-id events)
+               (getf (getf (read-candidate-manifest store candidate-id)
+                           :budgets)
+                     :development-cost-microusd)
+               0)))
+    (list :gates gates
+          :failed-gates failed-gates
+          :baseline-capability-mean-micros baseline-mean
+          :candidate-capability-mean-micros candidate-mean
+          :capability-delta-micros delta
+          :replicate-capability-deltas replicate-deltas
+          :conservative-capability-delta-micros conservative-delta
+          :executor-capability-deltas executor-deltas
+          :baseline-execution-tokens-total baseline-tokens
+          :candidate-execution-tokens-total candidate-tokens
+          :baseline-execution-tokens-mean-per-event baseline-token-mean
+          :candidate-execution-tokens-mean-per-event candidate-token-mean
+          :execution-token-delta token-delta
+          :baseline-runtime-cost-microusd-total baseline-cost
+          :candidate-runtime-cost-microusd-total candidate-cost
+          :baseline-runtime-cost-microusd-mean-per-event baseline-cost-mean
+          :candidate-runtime-cost-microusd-mean-per-event candidate-cost-mean
+          :runtime-cost-delta-microusd cost-delta
+          :development-cost-microusd development-cost
+          :eligible-p (null failed-gates))))
+
+(defun %validate-decision-against-events (store decision prior-events)
+  (%validate-decision-event decision)
+  (let ((expected
+          (%decision-analysis
+           store (getf decision :baseline-id) (getf decision :candidate-id)
+           (getf decision :campaign-id) prior-events
+           (getf decision :minimum-held-out-repetitions)
+           (getf decision :minimum-distinct-executors)
+           (getf decision :minimum-capability-delta-micros)
+           (getf decision :maximum-execution-token-increase)
+           (getf decision :maximum-runtime-cost-increase-microusd)
+           (getf decision :authorizer-did)
+           (%verify-event-actors store decision))))
+    (dolist (key +decision-derived-keys+)
+      (unless (equal (getf decision key) (getf expected key))
+        (error "Decision field ~S does not match its signed evidence prefix."
+               key))))
+  decision)
 
 (defun make-decision! (store baseline-id candidate-id
-                       &key (minimum-held-out-repetitions 3)
+                       &key campaign-id
+                            (minimum-held-out-repetitions 3)
                             (minimum-distinct-executors 2)
-                            (minimum-capability-delta-micros 0)
+                            (minimum-capability-delta-micros 1)
+                            (maximum-execution-token-increase 0)
+                            (maximum-runtime-cost-increase-microusd 0)
                             authorizer)
   (%require-candidate-id baseline-id)
   (%require-candidate-id candidate-id)
   (when (string= baseline-id candidate-id)
     (error "Baseline and candidate identifiers must differ."))
+  (unless (%safe-string-p campaign-id :nonempty t :ascii t)
+    (error "Decision campaign identifier is invalid."))
   (unless (and (integerp minimum-held-out-repetitions)
                (>= minimum-held-out-repetitions 2))
     (error "Held-out repetition minimum must be at least two."))
   (unless (and (integerp minimum-distinct-executors)
                (>= minimum-distinct-executors 2))
     (error "Distinct executor minimum must be at least two."))
-  (unless (%nonnegative-integer-p minimum-capability-delta-micros)
-    (error "Minimum capability delta must be nonnegative."))
+  (unless (and (integerp minimum-capability-delta-micros)
+               (plusp minimum-capability-delta-micros))
+    (error "Minimum capability delta must be positive."))
+  (unless (%nonnegative-integer-p maximum-execution-token-increase)
+    (error "Maximum execution-token increase must be nonnegative."))
+  (unless (%nonnegative-integer-p maximum-runtime-cost-increase-microusd)
+    (error "Maximum runtime-cost increase must be nonnegative."))
   (let ((authorizer-did
           (%trusted-identity-did authorizer
                                  (store-trusted-authorizers store)
                                  "Authorizer")))
     (sb-thread:with-mutex ((store-lock store))
       (let* ((events (%read-ledger-unlocked store))
-             (held-out (remove-if-not
-                        (lambda (event)
-                          (and (eq (getf event :event) :evaluation)
-                               (eq (getf event :split) :held-out)))
-                        events))
-             (baseline-events
-               (remove baseline-id held-out
-                       :key (lambda (event) (getf event :candidate-id))
-                       :test-not #'string=))
-             (candidate-events
-               (remove candidate-id held-out
-                       :key (lambda (event) (getf event :candidate-id))
-                       :test-not #'string=))
              (head (if events
                        (getf (car (last events)) :event-hash)
-                       +zero-sha256+)))
-        (multiple-value-bind (gates baseline-mean candidate-mean delta)
-            (%decision-gates store baseline-id candidate-id events
-                             baseline-events candidate-events
-                             minimum-held-out-repetitions
-                             minimum-distinct-executors
-                             minimum-capability-delta-micros
-                             authorizer-did)
-          (let* ((failed-gates
-                   (loop for (key value) on gates by #'cddr
-                         unless value collect key))
-                 (eligible-p (null failed-gates))
-                 (runtime-cost
-                   (reduce #'+ (append baseline-events candidate-events)
-                           :key (lambda (event)
-                                  (getf event :estimated-cost-microusd))
-                           :initial-value 0))
-                 (development-cost
-                   (if (%verify-candidate-with-events store candidate-id events)
-                       (getf (getf (read-candidate-manifest store candidate-id)
-                                   :budgets)
-                             :development-cost-microusd)
-                       0))
-                 (payload
-                   (list :event :decision
-                         :timestamp (anuna-imago:iso-8601-now)
-                         :candidate-id candidate-id
-                         :baseline-id baseline-id
-                         :evidence-head head
-                         :minimum-held-out-repetitions
-                         minimum-held-out-repetitions
-                         :minimum-distinct-executors minimum-distinct-executors
-                         :minimum-capability-delta-micros
-                         minimum-capability-delta-micros
-                         :gates gates
-                         :failed-gates failed-gates
-                         :baseline-capability-mean-micros baseline-mean
-                         :candidate-capability-mean-micros candidate-mean
-                         :capability-delta-micros delta
-                         :runtime-cost-microusd runtime-cost
-                         :development-cost-microusd development-cost
-                         :eligible-p eligible-p
-                         :authorizer-did authorizer-did))
-                 (signature (%sign-value authorizer payload))
-                 (actor-event
-                   (append payload (list :authorization-signature signature))))
-            (%append-event-unlocked store actor-event events)))))))
+                       +zero-sha256+))
+             (analysis
+               (%decision-analysis
+                store baseline-id candidate-id campaign-id events
+                minimum-held-out-repetitions minimum-distinct-executors
+                minimum-capability-delta-micros
+                maximum-execution-token-increase
+                maximum-runtime-cost-increase-microusd authorizer-did t))
+             (payload
+               (append
+                (list :event :decision
+                      :timestamp (anuna-imago:iso-8601-now)
+                      :candidate-id candidate-id
+                      :baseline-id baseline-id
+                      :campaign-id campaign-id
+                      :evidence-head head
+                      :minimum-held-out-repetitions
+                      minimum-held-out-repetitions
+                      :minimum-distinct-executors minimum-distinct-executors
+                      :minimum-capability-delta-micros
+                      minimum-capability-delta-micros
+                      :maximum-execution-token-increase
+                      maximum-execution-token-increase
+                      :maximum-runtime-cost-increase-microusd
+                      maximum-runtime-cost-increase-microusd)
+                analysis
+                (list :authorizer-did authorizer-did)))
+             (signature (%sign-value authorizer payload))
+             (actor-event
+               (append payload (list :authorization-signature signature))))
+        (%append-event-unlocked store actor-event events)))))
 
 ;; -------------------------------------------------------------- pointers ---
 
