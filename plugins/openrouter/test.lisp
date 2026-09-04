@@ -376,9 +376,14 @@
              (when (= 2 (length requests))
                (let* ((messages (gethash "messages" (second requests)))
                       (assistant
-                        (find "assistant" messages
-                              :key (lambda (message) (gethash "role" message))
-                              :test #'string=))
+                        (find-if
+                         (lambda (message)
+                           (let ((calls (gethash "tool_calls" message)))
+                             (and (string= "assistant"
+                                           (gethash "role" message))
+                                  calls
+                                  (plusp (length calls)))))
+                         messages))
                       (tool-message
                         (find "tool" messages
                               :key (lambda (message) (gethash "role" message))
