@@ -64,6 +64,13 @@ The second amendment included event signatures in their signed payload.
 The approved contract excludes signature and chain fields from actor payloads.
 Head and authorization signatures follow the same exclusion rule.
 
+### Finding 8 — Red Gate authorization and evidence gaps
+
+The first Red Gate called provider dispatch outside agent context.
+The corrected tests bind the actual agent path and exercise nested dispatch.
+They also recognize the complete proof-result grammar instead of tags alone.
+Malformed evidence now denies work in both invariant-controlled paths.
+
 Result: pass after amendments.
 
 ## Traceability findings
@@ -82,4 +89,3 @@ The new page has no dead links or syntax errors.
 The vault-wide check still reports unrelated pre-existing issues.
 Those include SPEC-013 dead links and one SPL error in
 `theories/self-modification-floor.spl`.
-

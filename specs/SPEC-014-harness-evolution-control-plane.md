@@ -2,7 +2,7 @@
 id: SPEC-014
 title: Harness Evolution Control Plane
 status: approved
-version: 0.1.0
+version: 0.1.1
 date: 2026-09-04
 audience:
   - agent-authors
@@ -194,6 +194,12 @@ Trace: [[SPEC-014-harness-evolution-control-plane#TEST-003]],
 An installed invariant filter SHALL veto when its reasoner query fails or
 returns malformed evidence. The self-modification port SHALL follow the same
 rule.
+
+A valid proof result is a finite proper property list containing exactly one
+each of `:tag`, `:derivation`, and `:time-ms`. The tag SHALL be one of the four
+documented positive or negative proof tags. Derivation SHALL be a proper list
+or `nil`, and time SHALL be a nonnegative integer. Every other shape is
+malformed and SHALL deny the guarded action.
 
 Trace: [[SPEC-014-harness-evolution-control-plane#TEST-004]],
 [[SPEC-014-harness-evolution-control-plane#TEST-025]].
