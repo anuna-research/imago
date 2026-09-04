@@ -23,7 +23,7 @@ if [[ "${TARGET}" == "all" ]]; then
   exit 0
 fi
 
-LOADS='(asdf:load-system :imago/test)'
+LOADS='(ql:quickload :imago/test)'
 
 case "${TARGET}" in
   m1)   RUNS='(anuna-imago.test:run-m1-tests)' ;;
@@ -44,11 +44,11 @@ case "${TARGET}" in
   identity) RUNS='(anuna-imago.test:run-identity-tests)' ;;
   m12)  RUNS='(anuna-imago.test:run-m12-tests)' ;;
   openrouter)
-        LOADS='(asdf:load-system :imago/openrouter/test)'
+        LOADS='(ql:quickload :imago/openrouter/test)'
         RUNS='(unless (anuna-imago.test:run-openrouter-tests)
                 (uiop:quit 1))' ;;
   evolution)
-        LOADS='(asdf:load-system :imago/evolution/test)'
+        LOADS='(ql:quickload :imago/evolution/test)'
         RUNS='(unless (anuna-imago.test:run-evolution-tests)
                 (uiop:quit 1))' ;;
   *)    echo "Unknown target: ${TARGET}" >&2; exit 2 ;;
