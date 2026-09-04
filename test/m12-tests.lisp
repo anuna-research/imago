@@ -92,6 +92,8 @@
          ("(let () (delete-package :m12-absent))" delete-package)
          ("(progn (uiop:getenv \"OPENROUTER_API_KEY\"))" uiop:getenv)
          ("(let () (uiop:run-program '(\"env\")))" uiop:run-program)
+         ("(progn (sb-ext:posix-environ))" sb-ext:posix-environ)
+         ("(progn (sb-posix:getenv \"ANTHROPIC_API_KEY\"))" sb-posix:getenv)
          ("(progn (sb-ext:exit))" sb-ext:exit)
          ("(progn (sb-ext:quit))" sb-ext:quit)
          ("(progn (sb-ext:save-lisp-and-die \"/tmp/never\"))"
@@ -625,7 +627,9 @@ Tests bind this to make the reasoner veto specific forms.")
                            source)))))
       (with-m12-handler-fixture ()
         (dolist (source '("(uiop:getenv \"OPENROUTER_API_KEY\")"
-                          "(sb-ext:posix-getenv \"ANTHROPIC_API_KEY\")"))
+                          "(sb-ext:posix-getenv \"ANTHROPIC_API_KEY\")"
+                          "(find-if (lambda (item) (search \"OPENROUTER_API_KEY=\" item)) (sb-ext:posix-environ))"
+                          "(sb-posix:getenv \"ANTHROPIC_API_KEY\")"))
           (let ((result (anuna-imago::%harness-eval-handler
                          (list :form source))))
             (check (member (getf result :status) '(:rejected :vetoed))
@@ -1755,6 +1759,12 @@ Tests bind this to make the reasoner veto specific forms.")
                       uiop:getenv-absolute-directory
                       uiop:getenv-absolute-directories
                       sb-ext:posix-getenv
+                      sb-ext:posix-environ
+                      sb-posix:getenv
+                      sb-posix:putenv
+                      sb-posix:setenv
+                      sb-posix:unsetenv
+                      sb-posix:fork
                       uiop:run-program
                       uiop:launch-program
                       sb-ext:run-program

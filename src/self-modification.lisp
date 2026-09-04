@@ -22,7 +22,8 @@
 (in-package #:anuna-imago)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (require :sb-md5))
+  (require :sb-md5)
+  (require :sb-posix))
 ;; sb-mop is always loaded in SBCL (no require needed); accessed via the
 ;; sb-mop: package below.
 
@@ -219,6 +220,12 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     (uiop:getenv-absolute-directory  . :environment-access)
     (uiop:getenv-absolute-directories . :environment-access)
     (sb-ext:posix-getenv             . :environment-access)
+    (sb-ext:posix-environ            . :environment-access)
+    (sb-posix:getenv                 . :environment-access)
+    (sb-posix:putenv                 . :environment-access)
+    (sb-posix:setenv                 . :environment-access)
+    (sb-posix:unsetenv               . :environment-access)
+    (sb-posix:fork                   . :process-launch)
     (uiop:run-program                . :process-launch)
     (uiop:launch-program             . :process-launch)
     (sb-ext:run-program              . :process-launch)
@@ -280,6 +287,13 @@ into *SAFETY-LAYER-SYMBOLS*, so burying an operator cannot bypass this gate.")
           when (and (consp node) (not (gethash node seen)))
             do (setf (gethash node seen) t)
                (let ((head (car node)))
+                 (let ((rule (and (symbolp head)
+                                  (cdr (assoc head *prefilter-denylist*
+                                              :test #'eq)))))
+                   (when (member rule '(:environment-access :process-launch))
+                     (return-from %protected-runtime-definition-rejection
+                       (list :status :rejected :rule rule
+                             :reason "Environment and process access is operator-only."))))
                  (cond
                    ((and (member head '(defmethod defgeneric defun defmacro)
                                  :test #'eq)
@@ -527,6 +541,12 @@ into *SAFETY-LAYER-SYMBOLS*, so burying an operator cannot bypass this gate.")
     uiop:getenv-absolute-directory
     uiop:getenv-absolute-directories
     sb-ext:posix-getenv
+    sb-ext:posix-environ
+    sb-posix:getenv
+    sb-posix:putenv
+    sb-posix:setenv
+    sb-posix:unsetenv
+    sb-posix:fork
     uiop:run-program
     uiop:launch-program
     sb-ext:run-program
