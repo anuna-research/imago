@@ -14,16 +14,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Core and saved-image behavior stay cross-platform. The SPEC-014
-        # safety, plugin, and generated-runtime gates run on Linux to keep
-        # the matrix proportional while still exercising their real paths.
+        # git.anuna.io currently provides the ubuntu-22.04 runner label.
+        # Keep every required gate schedulable on that runner fleet.
         include:
-          - os: macos-14
-            suite: core
           - os: ubuntu-22.04
             suite: core
-          - os: macos-14
-            suite: image
           - os: ubuntu-22.04
             suite: image
           - os: ubuntu-22.04
@@ -32,12 +27,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install SBCL (macOS)
-        if: matrix.os == 'macos-14'
-        run: brew install sbcl
-
       - name: Install SBCL (Linux)
-        if: matrix.os == 'ubuntu-22.04'
         run: |
           if [ "$(id -u)" -eq 0 ]; then
             apt-get update
