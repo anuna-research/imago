@@ -1254,7 +1254,8 @@ Load `imago/evolution` before resolving these symbols. They live in the
       `test/fixtures/`)
 - [x] SPEC-012 t12 — final adversarial review (SELF-MOD-REVIEW.md);
       fixed BLOCKER-1 setf/setq safety-variable bypass (ADR-014)
-- [ ] SPEC-014 hardening is implemented; independent final review remains pending
+- [x] SPEC-014 harness evolution and hardening; independent review approved
+      implementation commit `e48ffe9`
 - [ ] R4 frame-level signing on every CBCL message (needs cbcl-rs FFI)
 - [ ] Streaming SSE for the Anthropic provider
 - [ ] CI matrix M6 step (cbcl-rs cdylib build)

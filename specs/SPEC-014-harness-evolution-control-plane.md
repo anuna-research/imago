@@ -1,7 +1,7 @@
 ---
 id: SPEC-014
 title: Harness Evolution Control Plane
-status: implementing
+status: implemented
 version: 0.3.0
 date: 2026-09-04
 audience:
@@ -78,8 +78,9 @@ Arrows carry immutable identifiers or append-only evidence.
 - Persisted forms are at most 1 MiB, and the complete ledger is at most 64 MiB.
 - OpenRouter responses are at most 1 MiB, with at most 16 tool calls.
 
-**Open items:** Independent version 0.3 remediation review remains pending.
-Owner: `final-adversarial-review`.
+**Open items:** None for version 0.3.
+
+Reviewer `final-adversarial-review` approved implementation commit `e48ffe9`.
 
 **Detail:** Requirements start at
 [[SPEC-014-harness-evolution-control-plane#Functional requirements]].
@@ -1991,12 +1992,12 @@ strictly prior to its evaluation.
 |---|---|---|
 | Specification lint | `usdd-lint.sh --type descriptive --strict` reports zero errors and warnings | pass |
 | Reference integrity | `zetl check --syntax` and source-filtered dead-link output report zero SPEC-014 issues | pass |
-| Comprehension | fresh-context version 0.3 review | pending |
-| Fresh adversarial remediation | independent reviewer rechecks TEST-051 through TEST-065 | pending |
-| Independent final approval | reviewer identity and explicit approval verdict | pending |
-| Red Gate | recorded failures before each review remediation | pending evidence reconciliation |
-| Implementation | targeted and full test output for version 0.3 | pending |
-| Theory closure | Elephant task evidence and final fingerprint | pending |
+| Comprehension | fresh-context version 0.3 review | pass; see `architecture/SPEC-014-REVIEW.md` |
+| Fresh adversarial remediation | independent reviewer rechecks TEST-051 through TEST-065 | pass; six review cycles closed |
+| Independent final approval | reviewer identity and explicit approval verdict | pass; `final-adversarial-review` approved `e48ffe9` |
+| Red Gate | recorded failures before each review remediation | pass; every reproduced bypass gained a regression |
+| Implementation | targeted and full test output for version 0.3 | pass; closure suite includes M1 through M12 and evolution |
+| Theory closure | Elephant task evidence and final fingerprint | pass; `verified spec-014` derives after the final green assertion |
 
 ## References
 

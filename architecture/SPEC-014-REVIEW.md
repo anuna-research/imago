@@ -86,6 +86,35 @@ It adds independent scope, replay, stale-decision, signature, and roster tests.
 The controlled-language linter reports zero errors and zero warnings for SPEC-014.
 The new page has no dead links or syntax errors.
 
-The vault-wide check still reports unrelated pre-existing issues.
-Those include SPEC-013 dead links and one SPL error in
-`theories/self-modification-floor.spl`.
+The vault-wide syntax check now reports zero syntax errors.
+The remaining vault-wide dead links are outside SPEC-014.
+
+## Final remediation review
+
+- Reviewer: `final-adversarial-review`.
+- Reviewed implementation: `e48ffe982d9e07fa0f47a521a9c8e4008eadb20c`.
+- Verdict: approve.
+- Result: no unresolved correctness, security, or SPEC-014 conformance blocker.
+
+The independent reviewer reproduced six additional boundary families.
+Each reproduction preceded its production fix and permanent regression coverage.
+
+1. UIOP environment readers and escaped receipt strings bypassed pre-read bounds.
+2. SBCL environment reader aliases escaped the initial denylist.
+3. ASDF exposed a shell launcher outside the protected runtime set.
+4. CFFI-TOOLCHAIN exposed compiler and linker process launchers.
+5. CFFI-GROVEL exposed grovel and wrapper process launchers.
+6. Native FFI can construct same-process environment access at runtime.
+
+The implementation closes the first five families at the specified boundary.
+Direct and nested forms now fail before evaluation.
+Environment probes remain unreadable through protected runtime definitions.
+Escaped and unescaped receipt characters share the same pre-read limit.
+
+The sixth family remains an explicit threat-boundary limitation.
+SPEC-014 does not claim isolation from arbitrary trusted Lisp in one process.
+Native FFI therefore does not weaken the stated promotion-control guarantees.
+
+The reviewer reran M12 at the reviewed commit.
+The suite covered direct forms, nested forms, aliases, and boundary values.
+It also covered earlier ASDF, UIOP, SB-EXT, SB-POSIX, and CFFI paths.
