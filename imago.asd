@@ -143,6 +143,15 @@
   :components ((:module "plugins/zai"
                 :components ((:file "test")))))
 
+(defsystem #:imago/evolution
+  :name "imago/evolution"
+  :description "External, evidence-driven harness evolution control plane."
+  :version "0.1.0"
+  :license "Apache-2.0"
+  :depends-on (#:imago)
+  :components ((:module "plugins/evolution"
+                :components ((:file "evolution")))))
+
 (defsystem #:imago/evolution/test
   :name "imago/evolution/test"
   :description "SPEC-014 Red Gate for the optional harness evolution control plane."
