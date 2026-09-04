@@ -142,3 +142,14 @@
   :depends-on (#:imago/zai #:imago/test)
   :components ((:module "plugins/zai"
                 :components ((:file "test")))))
+
+(defsystem #:imago/evolution/test
+  :name "imago/evolution/test"
+  :description "SPEC-014 Red Gate for the optional harness evolution control plane."
+  :version "0.1.0"
+  :license "Apache-2.0"
+  ;; Deliberately do not depend on IMAGO/EVOLUTION.  The test file must load
+  ;; while the production subsystem is absent, then request it dynamically.
+  :depends-on (#:imago/test)
+  :components ((:module "plugins/evolution"
+                :components ((:file "test")))))
