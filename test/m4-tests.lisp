@@ -193,7 +193,10 @@ result would have been incorporated."
                  (declare (ignore message))
                  (list (list :tool-use "hidden-1"
                              'registered-but-hidden nil))))))
-           (reply (drive-stream agent (make-ask "try hidden")))
+           ;; PROCESS-TURN establishes the provider-call authorization context.
+           ;; Calling DRIVE-STREAM directly would exercise the documented
+           ;; unbound operator exemption instead of CON-003.
+           (reply (process-turn agent (make-ask "try hidden")))
            (results (getf reply :tool-results))
            (result (first results)))
       (check (= 1 (length results)) "one authorization result returned")
@@ -232,7 +235,7 @@ result would have been incorporated."
                (lambda (message)
                  (declare (ignore message))
                  (list (list :tool-use "allowed-1" 'advertised nil))))))
-           (reply (drive-stream agent (make-ask "use advertised")))
+           (reply (process-turn agent (make-ask "use advertised")))
            (results (getf reply :tool-results))
            (result (first results)))
       (check (= 1 (length results)) "one advertised result returned")
@@ -240,6 +243,110 @@ result would have been incorporated."
       (check (eq :advertised-result (getf result :value)))
       (check (= 1 allowed-calls) "advertised handler runs exactly once")
       (check (zerop bystander-calls) "other registered handlers do not run"))))
+
+(defun test-tool-call-authorizes-normalized-rewritten-name ()
+  "CON-003: authorize the post-hook name after canonical normalization."
+  (format t "~%-- tool-call-authorizes-normalized-rewritten-name (SPEC-014 CON-003) --~%")
+  (clear-all-hooks) (clear-all-tools)
+  (let ((advertised-calls 0)
+        (hidden-calls 0))
+    (define-tool anuna-imago::normalized-advertised
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf advertised-calls)
+                 :normalized-result))
+    (define-tool anuna-imago::normalized-hidden
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf hidden-calls)
+                 :hidden-result))
+    (register-hook
+     :on-tool-call
+     (lambda (agent call)
+       (declare (ignore agent))
+       (list :id (getf call :id)
+             :name (if (string= "rewrite-allowed" (getf call :id))
+                       "normalized-advertised"
+                       :normalized-hidden)
+             :args (getf call :args))))
+    (let* ((provider
+             (make-stub-provider
+              :responder
+              (lambda (message)
+                (list (list :tool-use
+                            (if (string= message "allowed")
+                                "rewrite-allowed"
+                                "rewrite-hidden")
+                            :provider-alias nil)))))
+           (agent
+             (make-instance 'agent
+                            :id 'normalized-rewrite-agent
+                            :capability "authorization:rewrite"
+                            ;; A keyword here deliberately differs from the
+                            ;; registered package-qualified symbol.
+                            :tools '(:normalized-advertised)
+                            :provider provider))
+           (allowed-reply (process-turn agent (make-ask "allowed")))
+           (hidden-reply (process-turn agent (make-ask "hidden")))
+           (allowed-result (first (getf allowed-reply :tool-results)))
+           (hidden-result (first (getf hidden-reply :tool-results))))
+      (check (eq :ok (getf allowed-result :status))
+             "normalized advertised rewrite is authorized")
+      (check (eq :normalized-result (getf allowed-result :value)))
+      (check (= 1 advertised-calls) "normalized handler runs exactly once")
+      (check (eq :unauthorized (getf hidden-result :status))
+             "post-hook rewrite to an unadvertised name is denied")
+      (check (zerop hidden-calls) "rewritten hidden handler remains untouched"))))
+
+(defun test-nested-tool-dispatch-retains-agent-authority ()
+  "CON-003: a tool cannot escape its caller's allowlist by nested dispatch."
+  (format t "~%-- nested-tool-dispatch-retains-agent-authority (SPEC-014 CON-003) --~%")
+  (clear-all-hooks) (clear-all-tools)
+  (let ((outer-calls 0)
+        (hidden-calls 0)
+        (observed-agent nil)
+        (agent nil))
+    (define-tool nested-hidden
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf hidden-calls)
+                 :hidden-ran))
+    (define-tool nested-entry
+      :schema ()
+      :handler (lambda (args)
+                 (declare (ignore args))
+                 (incf outer-calls)
+                 (setf observed-agent *current-agent*)
+                 (dispatch-tool! 'nested-hidden nil)))
+    (setf agent
+          (make-instance
+           'agent
+           :id 'nested-authority-agent
+           :capability "authorization:nested"
+           :tools '(nested-entry)
+           :provider
+           (make-stub-provider
+            :responder
+            (lambda (message)
+              (declare (ignore message))
+              (list (list :tool-use "nested-1" 'nested-entry nil))))))
+    (let* ((reply (process-turn agent (make-ask "nested")))
+           (result (first (getf reply :tool-results))))
+      (check (= 1 outer-calls) "advertised outer handler runs exactly once")
+      (check (eq agent observed-agent) "nested dispatch retains *current-agent*")
+      (check (zerop hidden-calls) "nested unadvertised handler remains untouched")
+      (check (member (getf result :status) '(:error :unauthorized))
+             "nested denial is observable on the outer tool result"))
+    ;; The same registered function remains callable in explicit operator
+    ;; scope, preventing an always-deny implementation from satisfying the
+    ;; prohibited-action assertion above.
+    (let ((*current-agent* nil))
+      (check (eq :hidden-ran (dispatch-tool! 'nested-hidden nil))
+             "unbound direct operator dispatch remains available"))
+    (check (= 1 hidden-calls) "only the explicit operator call reaches hidden tool")))
 
 ;; ----------------------------------------------- live redefinition ---
 
@@ -294,6 +401,8 @@ result would have been incorporated."
   (test-tool-veto)
   (test-tool-call-denies-unadvertised-registered-tool)
   (test-tool-call-allows-exactly-advertised-tool)
+  (test-tool-call-authorizes-normalized-rewritten-name)
+  (test-nested-tool-dispatch-retains-agent-authority)
   (test-process-turn-redefinable)
   (test-run-echo-demo)
   (format t "~%=== ~D failure(s) ===~%" *failures*)

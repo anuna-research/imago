@@ -99,8 +99,6 @@ expect_success "defines build-agent"                 grep -q '(defun build-agent
 expect_success "uses stub provider by default"       grep -q 'make-stub-provider' "$VENDOR_TARGET/src/agent.lisp"
 expect_success "registers greet tool"                grep -q "define-tool greet" "$VENDOR_TARGET/src/agent.lisp"
 expect_success "uses stamped capability"             grep -q '"vendor-test:reply"' "$VENDOR_TARGET/src/agent.lisp"
-expect_success "toplevel passes build-agent factory"  grep -Eq "\(anuna-imago:agent-main[[:space:]]+#'build-agent\)" "$VENDOR_TARGET/src/agent.lisp"
-expect_failure "toplevel does not pre-spawn an agent" grep -q '(anuna-imago:spawn-agent!' "$VENDOR_TARGET/src/agent.lisp"
 
 # ---------------------------------------------------------------------------
 echo "# bin/build.sh generation"
@@ -145,15 +143,19 @@ echo "# end-to-end (requires SBCL + Quicklisp)"
 QL_SETUP="${HOME}/quicklisp/setup.lisp"
 [[ -f "$QL_SETUP" ]] || QL_SETUP="${HOME}/.quicklisp/setup.lisp"
 
+expect_success "SBCL available for mandatory e2e" command -v sbcl
+expect_success "Quicklisp available for mandatory e2e" test -f "$QL_SETUP"
+
 if command -v sbcl >/dev/null 2>&1 && [[ -f "$QL_SETUP" ]]; then
   E2E="$TMP_ROOT/e2e"
   expect_success "scaffold e2e target"               bash "$SCAFFOLDER" e2e "$E2E"
   instrument_factory_count() {
-    perl -0pi -e 's/\(defun build-agent \(\)\n/\(defvar *factory-calls* 0\)\n\n\(defun build-agent \(\)\n  \(incf *factory-calls*\)\n/' \
+    perl -0pi -e 's/\(defun build-agent \(\)\n/\(defvar *factory-calls* 0\)\n\(defvar *spawn-calls* 0\)\n\n\(defun build-agent \(\)\n  \(incf *factory-calls*\)\n  \(anuna-imago:register-hook :on-agent-spawn\n    \(lambda \(agent value\)\n      \(declare \(ignore agent\)\)\n      \(incf *spawn-calls*\)\n      value\)\)\n/' \
       "$E2E/src/agent.lisp"
-    perl -0pi -e 's/\(anuna-imago:make-stub-provider\)/(anuna-imago:make-stub-provider :responder (lambda (message) (format nil "factory-agent-~D: ~A" *factory-calls* message)))/' \
+    perl -0pi -e 's/\(anuna-imago:make-stub-provider\)/(anuna-imago:make-stub-provider :responder (lambda (message) (format nil "factory=~D spawned=~D: ~A" *factory-calls* *spawn-calls* message)))/' \
       "$E2E/src/agent.lisp"
-    grep -q '(incf \*factory-calls\*)' "$E2E/src/agent.lisp"
+    grep -q '(incf \*factory-calls\*)' "$E2E/src/agent.lisp" &&
+      grep -q '(incf \*spawn-calls\*)' "$E2E/src/agent.lisp"
   }
   expect_success "instrument custom factory"          instrument_factory_count
   expect_success "build.sh runs"                     bash "$E2E/bin/build.sh"
@@ -163,9 +165,17 @@ if command -v sbcl >/dev/null 2>&1 && [[ -f "$QL_SETUP" ]]; then
   }
   expect_success "binary --version prints anuna-imago"  e2e_version_includes_imago
   e2e_echo_uses_factory_once() {
-    "$E2E/e2e" --echo "hello" 2>&1 | grep -q '^factory-agent-1: hello$'
+    local output
+    output="$("$E2E/e2e" --echo "hello" 2>/dev/null)"
+    [[ "$output" == "factory=1 spawned=1: hello" ]]
   }
-  expect_success "binary --echo uses factory exactly once" e2e_echo_uses_factory_once
+  expect_success "binary --echo uses one factory agent" e2e_echo_uses_factory_once
+  e2e_serve_uses_factory_once() {
+    local output
+    output="$(printf 'hello\n' | "$E2E/e2e" --serve 2>/dev/null)"
+    [[ "$output" == "factory=1 spawned=1: hello" ]]
+  }
+  expect_success "binary --serve uses one factory agent" e2e_serve_uses_factory_once
   expect_success "run-tests.sh passes"               bash "$E2E/bin/run-tests.sh"
 
   # Acceptance criterion #6: clean git status after scaffold (no fasls / binary leak).
@@ -182,8 +192,6 @@ if command -v sbcl >/dev/null 2>&1 && [[ -f "$QL_SETUP" ]]; then
     echo "  ✗ git status not clean after build"
     FAIL=$((FAIL + 1))
   }
-else
-  echo "  ⚠ skipped (sbcl or quicklisp not available)"
 fi
 
 # ---------------------------------------------------------------------------

@@ -429,14 +429,33 @@ Tests bind this to make the reasoner veto specific forms.")
    "query error"))
 
 (defun test-m12-handler-fails-closed-on-malformed-reasoner-evidence ()
-  "SPEC-014 TEST-025: missing and unknown proof tags cannot reach EVAL."
+  "SPEC-014 TEST-025: every malformed proof-result class cannot reach EVAL."
   (format t "~%-- m12-handler-fails-closed-on-malformed-reasoner-evidence (SPEC-014 TEST-025) --~%")
-  (%exercise-m12-reasoner-failure
-   (lambda () (list :derivation nil :time-ms 1))
-   "missing proof tag")
-  (%exercise-m12-reasoner-failure
-   (lambda () (list :tag :unknown-proof :derivation nil :time-ms 1))
-   "unknown proof tag"))
+  (dolist (case
+           (list
+            (list "nil evidence" nil)
+            (list "atomic evidence" :not-a-proof-result)
+            (list "odd plist" '(:tag :+delta :derivation))
+            (list "missing proof tag" '(:derivation nil :time-ms 1))
+            (list "unknown proof tag"
+                  '(:tag :unknown-proof :derivation nil :time-ms 1))
+            (list "duplicate key"
+                  '(:tag :-delta :tag :-partial-delta
+                    :derivation nil :time-ms 1))
+            (list "unknown extra key"
+                  '(:tag :-delta :derivation nil :time-ms 1 :extra t))
+            (list "atomic derivation"
+                  '(:tag :-delta :derivation rule-1 :time-ms 1))
+            (list "improper derivation"
+                  (list :tag :-delta :derivation (cons 'rule-1 'tail) :time-ms 1))
+            (list "non-integer time"
+                  '(:tag :-delta :derivation nil :time-ms 1.0))
+            (list "negative time"
+                  '(:tag :-delta :derivation nil :time-ms -1))))
+    (destructuring-bind (description evidence) case
+      (%exercise-m12-reasoner-failure
+       (lambda () evidence)
+       description))))
 
 (defun test-m12-handler-error-during-eval ()
   (format t "~%-- m12-handler-error-during-eval (TEST-003c) --~%")
@@ -970,4 +989,4 @@ a muffle-warning handler-bind because the eval thread would otherwise print
            t)
           (t
            (format t "~%~%FAIL — ~D failures in m12 component tests~%" *failures*)
-           nil))))
+           (error "M12 test suite failed with ~D failure~:P" *failures*)))))

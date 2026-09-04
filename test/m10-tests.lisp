@@ -173,7 +173,7 @@ agent runs in a child thread that doesn't see thread-local bindings."
                                (declare (ignore message))
                                (list (list :tool-use "guarded-1"
                                            'reasoner-guarded-tool nil))))))
-                         (reply (drive-stream agent (make-ask "guarded action")))
+                         (reply (process-turn agent (make-ask "guarded action")))
                          (result (first (getf reply :tool-results))))
                     (check (eq :vetoed (getf result :status))
                            (format nil "~A denies the guarded dispatch" test-id))
@@ -191,14 +191,33 @@ agent runs in a child thread that doesn't see thread-local bindings."
    "query error"))
 
 (defun test-invariant-filter-fails-closed-on-malformed-evidence ()
-  "SPEC-014 TEST-025: missing and unknown proof tags both deny."
+  "SPEC-014 TEST-025: every malformed proof-result class denies."
   (format t "~%-- invariant-filter-fails-closed-on-malformed-evidence (SPEC-014 TEST-025) --~%")
-  (%exercise-invariant-filter-failure
-   (lambda () (list :derivation nil :time-ms 1))
-   "missing proof tag")
-  (%exercise-invariant-filter-failure
-   (lambda () (list :tag :unknown-proof :derivation nil :time-ms 1))
-   "unknown proof tag"))
+  (dolist (case
+           (list
+            (list "nil evidence" nil)
+            (list "atomic evidence" :not-a-proof-result)
+            (list "odd plist" '(:tag :+delta :derivation))
+            (list "missing proof tag" '(:derivation nil :time-ms 1))
+            (list "unknown proof tag"
+                  '(:tag :unknown-proof :derivation nil :time-ms 1))
+            (list "duplicate key"
+                  '(:tag :-delta :tag :-partial-delta
+                    :derivation nil :time-ms 1))
+            (list "unknown extra key"
+                  '(:tag :-delta :derivation nil :time-ms 1 :extra t))
+            (list "atomic derivation"
+                  '(:tag :-delta :derivation rule-1 :time-ms 1))
+            (list "improper derivation"
+                  (list :tag :-delta :derivation (cons 'rule-1 'tail) :time-ms 1))
+            (list "non-integer time"
+                  '(:tag :-delta :derivation nil :time-ms 1.0))
+            (list "negative time"
+                  '(:tag :-delta :derivation nil :time-ms -1))))
+    (destructuring-bind (description evidence) case
+      (%exercise-invariant-filter-failure
+       (lambda () evidence)
+       description))))
 
 ;; ----------------------------------------------------- :clean integration ---
 

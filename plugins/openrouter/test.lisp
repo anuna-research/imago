@@ -83,29 +83,50 @@
 
 (defun test-openrouter-auth-headers-from-env ()
   (format t "~%-- openrouter-auth-headers-from-env --~%")
-  (let ((p (make-openrouter-provider :model "z-ai/glm-4.6")))
+  (let ((p (make-openrouter-provider :model "z-ai/glm-4.6"))
+        (prior-key (sb-ext:posix-getenv "OPENROUTER_API_KEY")))
     (sb-posix:setenv "OPENROUTER_API_KEY" "env-key" 1)
     (unwind-protect
          (let ((h (auth-headers p)))
            (check (string= "Bearer env-key"
                            (cdr (assoc "Authorization" h :test #'string=)))))
-      (sb-posix:unsetenv "OPENROUTER_API_KEY"))))
+      (if prior-key
+          (sb-posix:setenv "OPENROUTER_API_KEY" prior-key 1)
+          (sb-posix:unsetenv "OPENROUTER_API_KEY")))))
 
 (defun test-openrouter-auth-missing-key ()
   (format t "~%-- openrouter-auth-missing-key --~%")
-  (sb-posix:unsetenv "OPENROUTER_API_KEY")
-  (let ((p (make-openrouter-provider :model "z-ai/glm-4.6")))
-    (check (handler-case (progn (auth-headers p) nil)
-             (error () t))
-           "auth-headers signals when no key + no env")))
+  (let ((prior-key (sb-ext:posix-getenv "OPENROUTER_API_KEY")))
+    (unwind-protect
+         (progn
+           (sb-posix:unsetenv "OPENROUTER_API_KEY")
+           (let ((p (make-openrouter-provider :model "z-ai/glm-4.6")))
+             (check (handler-case (progn (auth-headers p) nil)
+                      (error () t))
+                    "auth-headers signals when no key + no env")))
+      (when prior-key
+        (sb-posix:setenv "OPENROUTER_API_KEY" prior-key 1)))))
 
 ;; ------------------------------------------------- response parsing ---
 
-(defun %drain-openrouter-stream (stream-fn)
-  "Collect frames through the first :DONE marker."
-  (loop for frame = (funcall stream-fn)
-        collect frame
-        until (or (eq frame :done) (null frame))))
+(defun %drain-openrouter-stream (stream-fn &key (limit 64))
+  "Collect through :DONE, but fail instead of hanging on a broken stream."
+  (let ((frames nil))
+    (loop repeat limit
+          for frame = (funcall stream-fn)
+          do (push frame frames)
+             (when (or (eq frame :done) (null frame))
+               (return-from %drain-openrouter-stream (nreverse frames))))
+    (error "OpenRouter stream exceeded ~D frames without terminating" limit)))
+
+(defun %openrouter-semantic-integer= (expected wire-content)
+  "Compare a tool-result content field after decoding its JSON scalar."
+  (handler-case
+      (let ((decoded (if (stringp wire-content)
+                         (com.inuoe.jzon:parse wire-content)
+                         wire-content)))
+        (and (integerp decoded) (= expected decoded)))
+    (error () nil)))
 
 (defun %frame-of-kind (kind frames)
   (find kind frames :key (lambda (frame)
@@ -275,7 +296,9 @@
                           "assistant tool call survives round trip")
                    (check (string= "tool" (gethash "role" tool-message)))
                    (check (string= "call_add" (gethash "tool_call_id" tool-message)))
-                   (check (string= "5" (gethash "content" tool-message)))))))
+                   (check (%openrouter-semantic-integer=
+                           5 (gethash "content" tool-message))
+                          "tool result decodes to the computed integer")))))
            (let ((history (agent-message-history agent)))
              (check (>= (length history) 4)
                     "persisted history retains both assistant turns and tool feedback")
@@ -287,7 +310,7 @@
   (format t "~%-- openrouter-malformed-tool-arguments (SPEC-014 TEST-023) --~%")
   (unregister-tool! 'anuna-imago::openrouter-malformed-target)
   (let ((handler-calls 0)
-        (request-count 0)
+        (requests nil)
         (responses
           (list
            (com.inuoe.jzon:stringify
@@ -325,8 +348,8 @@
       (unwind-protect
            (let* ((*openrouter-http-post*
                   (lambda (url &key headers content)
-                    (declare (ignore url headers content))
-                    (incf request-count)
+                    (declare (ignore url headers))
+                    (push (com.inuoe.jzon:parse content) requests)
                     (or (pop responses) (error "unexpected request"))))
                 (provider (make-openrouter-provider
                            :api-key "test-key" :model "test/model"))
@@ -343,11 +366,45 @@
            (let* ((reply (drive-stream agent (make-ask "malformed request")))
                   (results (getf reply :tool-results))
                   (result (first results)))
-             (check (= 2 request-count) "error tool result is returned to the provider")
+             (setf requests (nreverse requests))
+             (check (= 2 (length requests))
+                    "error tool result is returned to the provider")
              (check (= 1 (length results)) "one malformed-argument result")
              (check (eq :error (getf result :status)))
              (check (zerop handler-calls) "malformed arguments never reach handler")
              (check (string= "recovered" (getf reply :text)))
+             (when (= 2 (length requests))
+               (let* ((messages (gethash "messages" (second requests)))
+                      (assistant
+                        (find "assistant" messages
+                              :key (lambda (message) (gethash "role" message))
+                              :test #'string=))
+                      (tool-message
+                        (find "tool" messages
+                              :key (lambda (message) (gethash "role" message))
+                              :test #'string=)))
+                 (check assistant "second request retains the malformed assistant call")
+                 (when assistant
+                   (let* ((calls (gethash "tool_calls" assistant))
+                          (call (and calls (plusp (length calls)) (elt calls 0)))
+                          (function (and call (gethash "function" call))))
+                     (check (and call (string= "bad-call" (gethash "id" call)))
+                            "malformed call ID survives in assistant history")
+                     (check (and function
+                                 (string= "{not-json"
+                                          (gethash "arguments" function)))
+                            "original malformed arguments survive in assistant history")))
+                 (check tool-message "second request contains an error tool result")
+                 (when tool-message
+                   (let ((content (gethash "content" tool-message)))
+                     (check (string= "bad-call"
+                                     (gethash "tool_call_id" tool-message))
+                            "error result is correlated to the malformed call")
+                     (check (and (stringp content)
+                                 (search "error" content :test #'char-equal)
+                                 (or (search "malformed" content :test #'char-equal)
+                                     (search "invalid" content :test #'char-equal)))
+                            "tool result semantically reports malformed arguments")))))
              (check (equal seed-history
                            (subseq (agent-message-history agent) 0 2))
                     "valid history prefix survives malformed arguments")))
@@ -460,4 +517,5 @@
            t)
           (t
            (format t "~%~%FAIL — ~D failures in openrouter tests~%" *failures*)
-           nil))))
+           (error "OpenRouter test suite failed with ~D failure~:P"
+                  *failures*)))))
