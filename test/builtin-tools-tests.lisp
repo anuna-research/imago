@@ -145,13 +145,14 @@ trips up the dispatch machinery."
                               :id 'meta-agent
                               :capability "self:inspect"
                               :system-prompt "I introspect."
-                              :tools '(harness-now harness-version))))
+                              :tools '(harness-now harness-version
+                                       harness-describe-agent))))
     (let ((*current-agent* agent))
       (let ((result (dispatch-tool! 'harness-describe-agent nil)))
         (check (search "META-AGENT" (getf result :id)))
         (check (string= "self:inspect" (getf result :capability)))
         (check (string= "I introspect." (getf result :system-prompt)))
-        (check (= 2 (length (getf result :tools))))
+        (check (= 3 (length (getf result :tools))))
         (check (member "harness-now" (getf result :tools) :test #'string=))))))
 
 ;; ----------------------------------------------- harness-query-receipts ---
@@ -223,7 +224,8 @@ trips up the dispatch machinery."
 (defun test-builtin-stats-with-agent ()
   (format t "~%-- builtin-stats-with-agent --~%")
   (clear-all-tools) (install-builtin-tools!)
-  (let ((agent (make-instance 'agent :id 'a :capability "x")))
+  (let ((agent (make-instance 'agent :id 'a :capability "x"
+                              :tools '(harness-stats))))
     (send! (agent-mailbox agent) :a)
     (send! (agent-mailbox agent) :b)
     (let ((*current-agent* agent))
