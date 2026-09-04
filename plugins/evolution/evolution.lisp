@@ -94,6 +94,28 @@
     :capability-delta-met
     :trusted-authorizer-signature))
 
+;; Persisted forms are deliberately small and closed.  These bounds are
+;; security limits, not tuning hints: recognition rejects an input before it
+;; can allocate an attacker-selected symbol, bignum, deep tree, or unbounded
+;; file buffer.
+(defparameter +maximum-form-octets+ (* 1024 1024))
+(defparameter +maximum-ledger-octets+ (* 64 1024 1024))
+(defparameter +maximum-canonical-depth+ 64)
+(defparameter +maximum-canonical-nodes+ 16384)
+(defparameter +maximum-list-elements+ 4096)
+(defparameter +maximum-string-characters+ 65536)
+(defparameter +maximum-integer-digits+ 20)
+(defparameter +maximum-keyword-characters+ 64)
+
+(defparameter +persisted-keywords+
+  (remove-duplicates
+   (append +manifest-keys+ +budget-keys+ +head-keys+ +pointer-keys+
+           +freeze-event-keys+ +evaluation-event-keys+
+           +decision-event-keys+ +pointer-event-keys+ +gate-keys+
+           '(:freeze :evaluation :decision :promotion :rollback
+             :development :selection :held-out :canary :active))
+   :test #'eq))
+
 ;; --------------------------------------------------------------- storage ---
 
 (defclass evolution-store ()
@@ -134,6 +156,8 @@
 
 (defun candidate-directory (store candidate-id)
   (%require-candidate-id candidate-id)
+  (%assert-store-root store)
+  (%assert-managed-directory store "candidates/")
   (merge-pathnames (format nil "candidates/~A/" candidate-id)
                    (store-root store)))
 
@@ -149,6 +173,8 @@
     name))
 
 (defun pointer-path (store pointer)
+  (%assert-store-root store)
+  (%assert-managed-directory store "pointers/")
   (merge-pathnames (format nil "pointers/~A.sexp" (%pointer-name pointer))
                    (store-root store)))
 
@@ -351,14 +377,27 @@
         unless (member key keys)
           append (list key value)))
 
-(defun %read-file-string (path)
+(defun %read-file-string (path &key (maximum-octets +maximum-form-octets+))
+  ;; FILE-LENGTH is an octet count for SBCL's UTF-8 file streams, and is an
+  ;; upper bound on the number of decoded characters.  Check it before making
+  ;; the input buffer; the final READ-CHAR also detects a file that grew after
+  ;; the bound was checked.
+  (unless (%regular-file-p path)
+    (error "Persisted input ~A is absent or is not a regular file." path))
   (with-open-file (stream path :direction :input :external-format :utf-8)
-    (with-output-to-string (output)
-      (loop for character = (read-char stream nil nil)
-            while character
-            do (write-char character output)))))
+    (let ((octets (file-length stream)))
+      (unless (and (integerp octets) (<= 0 octets maximum-octets))
+        (error "Persisted input ~A exceeds the ~D-octet limit."
+               path maximum-octets))
+      (let* ((buffer (make-string octets))
+             (count (read-sequence buffer stream)))
+        (when (read-char stream nil nil)
+          (error "Persisted input ~A grew beyond its checked bound." path))
+        (if (= count octets) buffer (subseq buffer 0 count))))))
 
 (defun %write-file-string (path content &key (if-exists :supersede))
+  (when (and (%path-entry-exists-p path) (not (%regular-file-p path)))
+    (error "Refusing to open non-regular managed entry ~A." path))
   (ensure-directories-exist path)
   (with-open-file (stream path :direction :output
                                :if-exists if-exists
@@ -374,34 +413,272 @@
            (namestring path) (get-universal-time) (random 1000000000))))
 
 (defun %atomic-write-string (path content)
+  (when (and (%path-entry-exists-p path) (not (%regular-file-p path)))
+    (error "Refusing to replace non-regular managed entry ~A." path))
   (let ((temporary (%temporary-peer path)))
     (unwind-protect
          (progn
            (%write-file-string temporary content)
            (sb-posix:rename (namestring temporary) (namestring path))
            path)
-      (when (probe-file temporary)
+      (when (%path-entry-exists-p temporary)
         (ignore-errors (delete-file temporary))))))
 
 (defun %read-one-form-string (content context)
-  (let ((*read-eval* nil)
-        (*readtable* (copy-readtable nil))
-        (*read-base* 10)
-        (*package* (find-package :cl-user)))
-    (multiple-value-bind (form position)
-        (read-from-string content nil :eof)
-      (when (eq form :eof)
-        (error "~A is empty or incomplete." context))
-      (loop for index from position below (length content)
-            unless (member (char content index)
-                           '(#\Space #\Tab #\Newline #\Return))
-              do (error "~A contains trailing data." context))
-      form)))
+  "Recognize one bounded value from the closed canonical grammar.
 
-(defun %read-one-form-file (path context)
-  (%read-one-form-string (%read-file-string path) context))
+Unlike the Common Lisp reader, this recognizer never resolves packages or
+interns symbols.  Keyword slices are compared directly with an existing,
+schema-derived vocabulary and only the corresponding pre-existing keyword is
+returned."
+  (unless (stringp content)
+    (error "~A is not textual input." context))
+  (when (> (length content) +maximum-form-octets+)
+    (error "~A exceeds the canonical form size limit." context))
+  (let ((position 0)
+        (length (length content))
+        (nodes 0))
+    (labels
+        ((fail (control &rest arguments)
+           (error "~A at offset ~D near ~S: ~?"
+                  context position
+                  (and (< position length) (char content position))
+                  control arguments))
+         (whitespace-p (character)
+           (member character '(#\Space #\Tab #\Newline #\Return)))
+         (delimiter-p (index)
+           (or (= index length)
+               (let ((character (char content index)))
+                 (or (whitespace-p character)
+                     (char= character #\()
+                     (char= character #\))))))
+         (skip-whitespace ()
+           (loop while (and (< position length)
+                            (whitespace-p (char content position)))
+                 do (incf position)))
+         (note-node ()
+           (incf nodes)
+           (when (> nodes +maximum-canonical-nodes+)
+             (fail "canonical form contains too many values")))
+         (slice-equal-p (start end expected)
+           (and (= (- end start) (length expected))
+                (loop for index from start below end
+                      for expected-index from 0
+                      always (char= (char content index)
+                                    (char expected expected-index)))))
+         (known-keyword (start end)
+           (when (> (- end start) +maximum-keyword-characters+)
+             (fail "keyword token exceeds its length limit"))
+           (or (find-if
+                (lambda (keyword)
+                  (let ((name (symbol-name keyword)))
+                    (and (= (- end start) (length name))
+                         (loop for index from start below end
+                               for name-index from 0
+                               always (char-equal (char content index)
+                                                  (char name name-index))))))
+                +persisted-keywords+)
+               (fail "keyword token is outside the persisted schema")))
+         (parse-string-value ()
+           ;; Scan and validate first, then allocate exactly once at the known
+           ;; decoded length.  Canonical SBCL output escapes only quote and
+           ;; backslash in strings admitted by %SAFE-STRING-P.
+           (let ((scan (1+ position))
+                 (decoded-length 0)
+                 (closing nil))
+             (loop while (< scan length)
+                   for character = (char content scan)
+                   do (cond
+                        ((char= character #\")
+                         (setf closing scan)
+                         (return))
+                        ((char= character #\\)
+                         (incf scan)
+                         (when (= scan length)
+                           (fail "incomplete string escape"))
+                         (unless (member (char content scan) '(#\" #\\))
+                           (fail "non-canonical string escape"))
+                         (incf decoded-length))
+                        ((%control-character-p character)
+                         (fail "string contains a control character"))
+                        (t (incf decoded-length)))
+                      (when (> decoded-length +maximum-string-characters+)
+                        (fail "string exceeds its length limit"))
+                      (incf scan))
+             (unless closing (fail "unterminated string"))
+             (let ((result (make-string decoded-length))
+                   (source (1+ position))
+                   (target 0))
+               (loop while (< source closing)
+                     for character = (char content source)
+                     do (when (char= character #\\)
+                          (incf source)
+                          (setf character (char content source)))
+                        (setf (char result target) character)
+                        (incf source)
+                        (incf target))
+               (setf position (1+ closing))
+               result)))
+         (parse-integer-value ()
+           (let ((start position))
+             (when (char= (char content position) #\-)
+               (incf position)
+               (when (= position length)
+                 (fail "incomplete integer")))
+             (let ((digit-start position))
+               (loop while (and (< position length)
+                                (digit-char-p (char content position)))
+                     do (incf position)
+                        (when (> (- position digit-start)
+                                 +maximum-integer-digits+)
+                          (fail "integer exceeds its digit limit")))
+               (when (= position digit-start)
+                 (fail "invalid integer token"))
+               (unless (delimiter-p position)
+                 (fail "invalid character after integer"))
+               (when (and (> (- position digit-start) 1)
+                          (char= (char content digit-start) #\0))
+                 (fail "integer has a non-canonical leading zero"))
+               (when (and (char= (char content start) #\-)
+                          (= (- position digit-start) 1)
+                          (char= (char content digit-start) #\0))
+                 (fail "negative zero is not canonical"))
+               (parse-integer content :start start :end position))))
+         (parse-base-string-array ()
+           ;; With *PRINT-READABLY* true SBCL prints a SIMPLE-BASE-STRING as
+           ;; #A((N) COMMON-LISP:BASE-CHAR . "...").  It is still a string in
+           ;; CON-006's value grammar, so recognize precisely this one printer
+           ;; form without enabling dispatch macros or resolving CL symbols.
+           (let ((prefix "#A((")
+                 (type-marker ") common-lisp:base-char . "))
+             (unless (and (<= (+ position (length prefix)) length)
+                          (slice-equal-p position
+                                         (+ position (length prefix)) prefix))
+               (fail "unsupported dispatch syntax"))
+             (incf position (length prefix))
+             (let ((digit-start position))
+               (loop while (and (< position length)
+                                (digit-char-p (char content position)))
+                     do (incf position)
+                        (when (> (- position digit-start)
+                                 +maximum-integer-digits+)
+                          (fail "array string length exceeds its digit limit")))
+               (when (= position digit-start)
+                 (fail "array string has no declared length"))
+               (let ((declared-length
+                       (parse-integer content :start digit-start :end position)))
+                 (when (> declared-length +maximum-string-characters+)
+                   (fail "array string exceeds its length limit"))
+                 (unless (and (<= (+ position (length type-marker)) length)
+                              (slice-equal-p
+                               position (+ position (length type-marker))
+                               type-marker))
+                   (fail "array string has a non-canonical element type"))
+                 (incf position (length type-marker))
+                 (unless (and (< position length)
+                              (char= (char content position) #\"))
+                   (fail "array string has no string contents"))
+                 (let ((value (parse-string-value)))
+                   (unless (and (< position length)
+                                (char= (char content position) #\)))
+                     (fail "array string is incomplete"))
+                   (incf position)
+                   (unless (= declared-length (length value))
+                     (fail "array string length does not match its contents"))
+                   (let ((base-value
+                           (make-array declared-length
+                                       :element-type 'base-char)))
+                     (replace base-value value)
+                     base-value))))))
+         (parse-keyword-value ()
+           (let ((start (1+ position)))
+             (setf position start)
+             (loop while (and (< position length)
+                              (let ((character (char content position)))
+                                (or (and (char>= character #\a)
+                                         (char<= character #\z))
+                                    (and (char>= character #\A)
+                                         (char<= character #\Z))
+                                    (digit-char-p character)
+                                    (char= character #\-))))
+                   do (incf position)
+                      (when (> (- position start)
+                               +maximum-keyword-characters+)
+                        (fail "keyword token exceeds its length limit")))
+             (when (= start position) (fail "empty keyword token"))
+             (unless (delimiter-p position)
+               (fail "invalid character after keyword"))
+             (known-keyword start position)))
+         (parse-list-value (depth)
+           (incf position)
+           (let ((elements nil)
+                 (count 0))
+             (loop
+               (skip-whitespace)
+               (when (= position length) (fail "unterminated list"))
+               (when (char= (char content position) #\))
+                 (incf position)
+                 (return (nreverse elements)))
+               (incf count)
+               (when (> count +maximum-list-elements+)
+                 (fail "list contains too many elements"))
+               (push (parse-value (1+ depth)) elements)
+               (when (and (< position length)
+                          (not (or (whitespace-p (char content position))
+                                   (char= (char content position) #\)))))
+                 (fail "list elements require a delimiter")))))
+         (parse-value (depth)
+           (when (> depth +maximum-canonical-depth+)
+             (fail "canonical nesting exceeds its depth limit"))
+           (when (= position length) (fail "incomplete canonical value"))
+           (note-node)
+           (let ((character (char content position)))
+             (cond
+               ((char= character #\() (parse-list-value depth))
+               ((char= character #\") (parse-string-value))
+               ((char= character #\#) (parse-base-string-array))
+               ((char= character #\:) (parse-keyword-value))
+               ((or (digit-char-p character) (char= character #\-))
+                (parse-integer-value))
+               ((and (<= (+ position 3) length)
+                     (slice-equal-p position (+ position 3) "nil")
+                     (delimiter-p (+ position 3)))
+                (incf position 3)
+                nil)
+               ((and (< position length)
+                     (char= character #\t)
+                     (delimiter-p (1+ position)))
+                (incf position)
+                t)
+               (t (fail "token is outside the canonical grammar"))))))
+      (skip-whitespace)
+      (when (= position length)
+        (fail "input is empty"))
+      (let ((form (parse-value 0)))
+        (skip-whitespace)
+        (unless (= position length)
+          (fail "input contains trailing data"))
+        form))))
+
+(defun %read-one-form-file (path context &key
+                                           (maximum-octets
+                                             +maximum-form-octets+))
+  (%read-one-form-string
+   (%read-file-string path :maximum-octets maximum-octets)
+   context))
+
+(defun %persisted-form-string (value context)
+  "Serialize VALUE only if the closed recognizer can recover the same value."
+  (let ((content (%canonical-string value)))
+    (unless (equal value (%read-one-form-string content context))
+      (error "~A does not round-trip through the persisted grammar." context))
+    content))
 
 (defun %copy-binary-file (source target)
+  (unless (%regular-file-p source)
+    (error "Binary source ~A is not a regular file." source))
+  (when (%path-entry-exists-p target)
+    (error "Binary target ~A already exists." target))
   (ensure-directories-exist target)
   (with-open-file (input source :direction :input
                                 :element-type '(unsigned-byte 8))
@@ -433,6 +710,18 @@
        (sb-posix:stat-mode
         (sb-posix:lstat (string-right-trim "/" (namestring path)))))
     (sb-posix:syscall-error () nil)))
+
+(defun %assert-store-root (store)
+  (unless (%directory-entry-p (store-root store))
+    (error "Evolution store root is absent, replaced, or symlinked."))
+  t)
+
+(defun %assert-managed-directory (store relative)
+  (%assert-store-root store)
+  (let ((path (merge-pathnames relative (store-root store))))
+    (unless (%directory-entry-p path)
+      (error "Managed evolution directory ~A is absent or symlinked." path))
+    path))
 
 ;; ---------------------------------------------------------- strict forms ---
 
@@ -600,12 +889,19 @@
   (unless (integerp (getf event :capability-delta-micros))
     (error "Decision capability delta is invalid."))
   (%validate-gates (getf event :gates))
-  (unless (and (%proper-list-p (getf event :failed-gates))
-               (every (lambda (gate) (member gate +gate-keys+))
-                      (getf event :failed-gates)))
-    (error "Decision failed-gate list is invalid."))
+  (let ((expected-failures
+          (loop for (key value) on (getf event :gates) by #'cddr
+                unless value collect key)))
+    (unless (and (%proper-list-p (getf event :failed-gates))
+                 (equal (getf event :failed-gates) expected-failures))
+      (error "Decision failed gates do not exactly match gate results."))
+    (unless (eq (getf event :eligible-p) (null expected-failures))
+      (error "Decision eligibility does not match failed gates.")))
   (unless (member (getf event :eligible-p) '(nil t))
     (error "Decision eligibility must be Boolean."))
+  (unless (string= (getf event :evidence-head)
+                   (getf event :previous-hash))
+    (error "Decision evidence head must equal its previous event hash."))
   (unless (and (%did-key-p (getf event :authorizer-did))
                (%signature-p (getf event :authorization-signature)))
     (error "Decision authorization evidence is invalid."))
@@ -644,12 +940,16 @@
     (append payload (list :authority-signature signature))))
 
 (defun %write-head (store sequence hash)
+  (%assert-store-root store)
   (%atomic-write-string
    (ledger-head-path store)
-   (concatenate 'string (%canonical-string (%make-head store sequence hash))
+   (concatenate 'string
+                (%persisted-form-string
+                 (%make-head store sequence hash) "Generated ledger head")
                 (string #\Newline))))
 
 (defun %read-head-unlocked (store)
+  (%assert-store-root store)
   (let ((head (%validate-head
                (%read-one-form-file (ledger-head-path store) "Ledger head"))))
     (unless (string= (getf head :authority-did) (store-authority-did store))
@@ -669,6 +969,8 @@
   (loop with start = 0
         for newline = (position #\Newline content :start start)
         while newline
+        when (> (- newline start) +maximum-form-octets+)
+          do (error "Ledger event exceeds the canonical form size limit.")
         collect (subseq content start newline)
         do (setf start (1+ newline))))
 
@@ -706,11 +1008,14 @@
       (otherwise nil))))
 
 (defun %read-ledger-unlocked (store)
+  (%assert-store-root store)
   (let ((events nil)
         (expected-sequence 1)
         (previous-hash +zero-sha256+))
     (dolist (line (%complete-ledger-lines
-                   (%read-file-string (ledger-path store))))
+                   (%read-file-string
+                    (ledger-path store)
+                    :maximum-octets +maximum-ledger-octets+)))
       (when (zerop (length line))
         (error "Ledger contains an empty complete line."))
       (let ((event (%validate-event (%read-one-form-string line "Ledger event"))))
@@ -766,6 +1071,7 @@
     (error () nil)))
 
 (defun %append-event-unlocked (store actor-event &optional events)
+  (%assert-store-root store)
   (let* ((events (or events (%read-ledger-unlocked store)))
          (sequence (1+ (length events)))
          (previous-hash (if events
@@ -778,18 +1084,22 @@
     (%validate-event event)
     (unless (%verify-event-actors store event)
       (error "Refusing to append an event with invalid actor evidence."))
-    ;; A crash may leave an incomplete, unsigned final fragment.  Readers
-    ;; ignore it by contract; remove only that fragment before the next append.
-    (let* ((ledger (ledger-path store))
-           (content (%read-file-string ledger))
+    ;; Establish parser round-trip before pruning or writing anything.  A
+    ;; caller-supplied exotic string representation cannot poison the store.
+    (let* ((event-text (%persisted-form-string event "Generated ledger event"))
+           (ledger (ledger-path store))
+           (content (%read-file-string
+                     ledger :maximum-octets +maximum-ledger-octets+))
            (last-newline (position #\Newline content :from-end t))
            (complete-end (if last-newline (1+ last-newline) 0)))
+      ;; A crash may leave an incomplete, unsigned final fragment.  Readers
+      ;; ignore it by contract; remove only that fragment before the next append.
       (unless (= complete-end (length content))
-        (%atomic-write-string ledger (subseq content 0 complete-end))))
-    (%write-file-string
-     (ledger-path store)
-     (concatenate 'string (%canonical-string event) (string #\Newline))
-     :if-exists :append)
+        (%atomic-write-string ledger (subseq content 0 complete-end)))
+      (%write-file-string
+       ledger
+       (concatenate 'string event-text (string #\Newline))
+       :if-exists :append))
     (%write-head store sequence (getf event :event-hash))
     event))
 
@@ -823,10 +1133,28 @@
                                  :trusted-executors executors
                                  :trusted-evaluators evaluators
                                  :trusted-authorizers authorizers)))
-      (ensure-directories-exist (merge-pathnames "candidates/anchor" root))
-      (ensure-directories-exist (merge-pathnames "pointers/anchor" root))
-      (let ((ledger-exists (probe-file (ledger-path store)))
-            (head-exists (probe-file (ledger-head-path store))))
+      ;; Reject a pre-existing symlink before any managed path can be opened.
+      ;; If the root is absent, create it and immediately lstat the resulting
+      ;; entry.  Races with a hostile OS peer are outside the process boundary.
+      (let ((root-entry (string-right-trim "/" (namestring root))))
+        (if (%path-entry-exists-p root-entry)
+            (unless (%directory-entry-p root-entry)
+              (error "Evolution store root must be a real directory."))
+            (ensure-directories-exist (merge-pathnames "anchor" root))))
+      (%assert-store-root store)
+      (dolist (relative '("candidates/" "pointers/"))
+        (let* ((managed (merge-pathnames relative root))
+               (entry (string-right-trim "/" (namestring managed))))
+          (cond
+            ((%path-entry-exists-p entry)
+             (unless (%directory-entry-p entry)
+               (error "Managed evolution directory ~A is symlinked or invalid."
+                      managed)))
+            (t (sb-posix:mkdir entry #o700)))))
+      (%assert-managed-directory store "candidates/")
+      (%assert-managed-directory store "pointers/")
+      (let ((ledger-exists (%path-entry-exists-p (ledger-path store)))
+            (head-exists (%path-entry-exists-p (ledger-head-path store))))
         (cond
           ((and (null ledger-exists) (null head-exists))
            (%write-file-string (ledger-path store) "")
@@ -874,7 +1202,35 @@
     (merge-pathnames (getf manifest :image-file)
                      (candidate-directory store candidate-id))))
 
-(defun %verify-candidate-internal (store candidate-id seen)
+(defun %freeze-event-matches-manifest-p (store event manifest)
+  (and
+   (handler-case
+       (progn
+         (%validate-freeze-event event)
+         (%verify-event-actors store event))
+     (error () nil))
+   (string= (getf event :candidate-id) (getf manifest :candidate-id))
+   (equal (getf event :parent-id) (getf manifest :parent-id))
+   (string= (getf event :image-sha256) (getf manifest :image-sha256))
+   (string= (getf event :manifest-sha256) (%sha256-value manifest))
+   (string= (getf event :creator-did) (getf manifest :creator-did))
+   (string= (getf event :timestamp) (getf manifest :created-at))))
+
+(defun %candidate-freeze-evidence-valid-p (store manifest events)
+  (let ((candidate-events
+          (remove-if-not
+           (lambda (event)
+             (and (eq (getf event :event) :freeze)
+                  (stringp (getf event :candidate-id))
+                  (string= (getf event :candidate-id)
+                           (getf manifest :candidate-id))))
+           events)))
+    (and (= (length candidate-events) 1)
+         (%freeze-event-matches-manifest-p
+          store (first candidate-events) manifest))))
+
+(defun %verify-candidate-internal (store candidate-id seen events
+                                   require-freeze-evidence-p)
   (when (member candidate-id seen :test #'string=)
     (error "Candidate lineage contains a cycle."))
   (let* ((manifest (read-candidate-manifest store candidate-id))
@@ -885,6 +1241,8 @@
      (string= candidate-id (%candidate-id-for-manifest manifest))
      (%verify-value (getf manifest :creator-did) unsigned
                     (getf manifest :creator-signature))
+     (or (not require-freeze-evidence-p)
+         (%candidate-freeze-evidence-valid-p store manifest events))
      (%regular-file-p image-path)
      (string= (%sha256-file image-path) (getf manifest :image-sha256))
      (let ((parent (getf manifest :parent-id)))
@@ -894,10 +1252,24 @@
              (and (string= (getf parent-manifest :image-sha256)
                            (getf manifest :parent-image-sha256))
                   (%verify-candidate-internal store parent
-                                              (cons candidate-id seen)))))))))
+                                              (cons candidate-id seen)
+                                              events
+                                              require-freeze-evidence-p))))))))
+
+(defun %verify-candidate-with-events (store candidate-id events)
+  (%verify-candidate-internal store candidate-id nil events t))
+
+(defun %verify-candidate-files (store candidate-id)
+  ;; Used only after a new immutable directory is fully materialized but
+  ;; before its freeze event can exist.  Persisted callers must use the
+  ;; evidence-requiring verifier above.
+  (%verify-candidate-internal store candidate-id nil nil nil))
 
 (defun verify-candidate (store candidate-id)
-  (handler-case (%verify-candidate-internal store candidate-id nil)
+  (handler-case
+      (sb-thread:with-mutex ((store-lock store))
+        (%verify-candidate-with-events
+         store candidate-id (%read-ledger-unlocked store)))
     (error () nil)))
 
 (defun %require-freeze-field (present key)
@@ -947,7 +1319,7 @@
     (sb-thread:with-mutex ((store-lock store))
       (let ((events (%read-ledger-unlocked store)))
         (when parent-id
-          (unless (and (verify-candidate store parent-id)
+          (unless (and (%verify-candidate-with-events store parent-id events)
                        (string= parent-image-sha256
                                 (getf (read-candidate-manifest store parent-id)
                                       :image-sha256)))
@@ -992,6 +1364,13 @@
                (directory-name (string-right-trim "/" (namestring directory)))
                (created-directory nil))
           (%validate-manifest manifest)
+          (when (find-if
+                 (lambda (event)
+                   (and (eq (getf event :event) :freeze)
+                        (string= candidate-id (getf event :candidate-id))))
+                 events)
+            (error "Candidate ~A already has persisted freeze evidence."
+                   candidate-id))
           (when (%path-entry-exists-p directory-name)
             (error "Candidate ~A already exists." candidate-id))
           (unwind-protect
@@ -1006,8 +1385,12 @@
                      (error "Source image changed while the candidate was copied.")))
                  (%atomic-write-string
                   (merge-pathnames +manifest-file+ directory)
-                  (concatenate 'string (%canonical-string manifest)
+                  (concatenate 'string
+                               (%persisted-form-string
+                                manifest "Generated candidate manifest")
                                (string #\Newline)))
+                 (unless (%verify-candidate-files store candidate-id)
+                   (error "Materialized candidate failed pre-freeze verification."))
                  (let* ((event-payload
                           (list :event :freeze
                                 :timestamp created-at
@@ -1068,7 +1451,7 @@
       (let* ((events (%read-ledger-unlocked store))
              (manifest (read-candidate-manifest store candidate-id))
              (creator-did (getf manifest :creator-did)))
-        (unless (verify-candidate store candidate-id)
+        (unless (%verify-candidate-with-events store candidate-id events)
           (error "Candidate verification failed before evaluation."))
         (when (find run-id events :key (lambda (event) (getf event :run-id))
                                   :test #'string=)
@@ -1145,11 +1528,13 @@
     (= 3 (length (remove-duplicates (list creator executor evaluator)
                                      :test #'string=)))))
 
-(defun %decision-gates (store baseline-id candidate-id
+(defun %decision-gates (store baseline-id candidate-id ledger-events
                         baseline-events candidate-events minimum-repetitions
                         minimum-executors minimum-delta authorizer-did)
-  (let* ((candidate-valid (verify-candidate store candidate-id))
-         (baseline-valid (verify-candidate store baseline-id))
+  (let* ((candidate-valid
+           (%verify-candidate-with-events store candidate-id ledger-events))
+         (baseline-valid
+           (%verify-candidate-with-events store baseline-id ledger-events))
          (baseline-mean (%mean-micros baseline-events))
          (candidate-mean (%mean-micros candidate-events))
          (delta (- candidate-mean baseline-mean))
@@ -1235,7 +1620,7 @@
                        (getf (car (last events)) :event-hash)
                        +zero-sha256+)))
         (multiple-value-bind (gates baseline-mean candidate-mean delta)
-            (%decision-gates store baseline-id candidate-id
+            (%decision-gates store baseline-id candidate-id events
                              baseline-events candidate-events
                              minimum-held-out-repetitions
                              minimum-distinct-executors
@@ -1251,7 +1636,7 @@
                                   (getf event :estimated-cost-microusd))
                            :initial-value 0))
                  (development-cost
-                   (if (verify-candidate store candidate-id)
+                   (if (%verify-candidate-with-events store candidate-id events)
                        (getf (getf (read-candidate-manifest store candidate-id)
                                    :budgets)
                              :development-cost-microusd)
@@ -1284,7 +1669,10 @@
 ;; -------------------------------------------------------------- pointers ---
 
 (defun %pointer-keyword (pointer)
-  (intern (string-upcase (%pointer-name pointer)) :keyword))
+  (let ((name (%pointer-name pointer)))
+    (cond ((string= name "canary") :canary)
+          ((string= name "active") :active)
+          (t (error "Unsupported evolution pointer ~S." pointer)))))
 
 (defun %read-pointer-form (store pointer)
   (let* ((keyword (%pointer-keyword pointer))
@@ -1312,19 +1700,14 @@
 
 (defun read-pointer (store pointer)
   (sb-thread:with-mutex ((store-lock store))
-    (let ((form (%read-pointer-form store pointer)))
+    ;; Validate the signed evidence root even when the pointer is absent.  A
+    ;; corrupt ledger or head can never be downgraded into a diagnostic pointer
+    ;; success; this observer has no repair or write path.
+    (let ((events (%read-ledger-unlocked store))
+          (form (%read-pointer-form store pointer)))
       (when form
-        ;; A valid ledger gives the pointer cryptographic provenance.  If the
-        ;; ledger is corrupt, this read-only API still exposes the complete
-        ;; observed pointer for diagnosis; every effectful caller verifies the
-        ;; ledger first and therefore fails closed in that state.
-        (let ((correspondence
-                (handler-case
-                    (let ((events (%read-ledger-unlocked store)))
-                      (%pointer-corresponds-to-events-p form events))
-                  (error () :ledger-unavailable))))
-          (when (null correspondence)
-            (error "Pointer does not correspond to latest signed ledger evidence.")))
+        (unless (%pointer-corresponds-to-events-p form events)
+          (error "Pointer does not correspond to latest signed ledger evidence."))
         (getf form :candidate-id)))))
 
 (defun %write-pointer (store pointer candidate-id prior-id event-hash)
@@ -1332,12 +1715,13 @@
    (pointer-path store pointer)
    (concatenate
     'string
-    (%canonical-string
+    (%persisted-form-string
      (list :version 1
            :pointer (%pointer-keyword pointer)
            :candidate-id candidate-id
            :prior-candidate-id prior-id
-           :event-hash event-hash))
+           :event-hash event-hash)
+     "Generated evolution pointer")
     (string #\Newline))))
 
 (defun %require-external-authorizer (store identity)
@@ -1364,8 +1748,10 @@
           (error "An ineligible decision cannot be promoted."))
         (unless (string= authorizer-did (getf decision :authorizer-did))
           (error "Promotion authorizer differs from the decision signer."))
-        (unless (and (verify-candidate store (getf decision :candidate-id))
-                     (verify-candidate store (getf decision :baseline-id)))
+        (unless (and (%verify-candidate-with-events
+                      store (getf decision :candidate-id) events)
+                     (%verify-candidate-with-events
+                      store (getf decision :baseline-id) events))
           (error "Promotion candidate or baseline no longer verifies."))
         (let* ((prior-form (%read-pointer-form store pointer))
                (prior
@@ -1402,8 +1788,8 @@
               (prior (getf form :prior-candidate-id)))
           (unless prior
             (error "Pointer ~S has no recorded prior candidate." pointer))
-          (unless (and (verify-candidate store current)
-                       (verify-candidate store prior))
+          (unless (and (%verify-candidate-with-events store current events)
+                       (%verify-candidate-with-events store prior events))
             (error "Rollback candidate verification failed."))
           (let* ((payload
                    (list :event :rollback

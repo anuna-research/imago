@@ -110,6 +110,20 @@
       (let ((count (read-sequence result stream)))
         (if (= count (length result)) result (subseq result 0 count))))))
 
+(defun %call-with-entry-replaced-by-self-symlink (entry thunk)
+  "Temporarily move ENTRY aside and put a symlink to those same valid bytes at
+its managed name.  THUNK must reject the entry based on lstat, not content."
+  (let* ((entry-name (string-right-trim "/" (namestring entry)))
+         (backup-name
+           (format nil "~A.imago-backup-~D" entry-name (random 1000000000))))
+    (sb-posix:rename entry-name backup-name)
+    (unwind-protect
+         (progn
+           (sb-posix:symlink backup-name entry-name)
+           (funcall thunk))
+      (ignore-errors (sb-posix:unlink entry-name))
+      (sb-posix:rename backup-name entry-name))))
+
 (defun %write-form (path form &key (trailing-newline t))
   (%write-string
    path
@@ -134,6 +148,16 @@
   (let ((copy (copy-list plist)))
     (setf (getf copy key) value)
     copy))
+
+(defun %plist-without-keys (plist keys)
+  (reduce #'%plist-without keys :initial-value plist))
+
+(defun %package-registry-snapshot ()
+  (list
+   (sort (mapcar #'package-name (list-all-packages)) #'string<)
+   (sort (loop for symbol being the external-symbols of (find-package :keyword)
+               collect (symbol-name symbol))
+         #'string<)))
 
 (defun %valid-sha256-p (value)
   (and (stringp value)
@@ -464,6 +488,105 @@
          (%close-test-store probe-store)
          (%close-test-store attack-store))))))
 
+(defun test-evolution-managed-entry-symlink-confinement ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore baseline candidate))
+         (%record-comparison-matrix store actors baseline-id candidate-id)
+         (let ((decision (%make-decision store baseline-id candidate-id
+                                         (%actor actors :authorizer))))
+           (%evo-call "PROMOTE-CANDIDATE!" store decision
+                      :pointer :canary
+                      :authorizer (%actor actors :authorizer)))
+         (let* ((ledger (%evo-call "LEDGER-PATH" store))
+                (head (%evo-call "LEDGER-HEAD-PATH" store))
+                (manifest (%evo-call "CANDIDATE-MANIFEST-PATH"
+                                     store candidate-id))
+                (image (%evo-call "CANDIDATE-IMAGE-PATH" store candidate-id))
+                (pointer (%evo-call "POINTER-PATH" store :canary))
+                (candidates (merge-pathnames "candidates/" store-path))
+                (pointers (merge-pathnames "pointers/" store-path))
+                (ledger-before (%read-octets ledger))
+                (head-before (%read-octets head))
+                (manifest-before (%read-octets manifest))
+                (image-before (%read-octets image))
+                (pointer-before (%read-octets pointer)))
+           ;; Each symlink points to the exact valid bytes that were moved out
+           ;; of the managed name.  A content-following implementation would
+           ;; therefore succeed; rejection proves the lstat boundary.
+           (%call-with-entry-replaced-by-self-symlink
+            store-path
+            (lambda ()
+              (check (%signals-error-p
+                      (lambda () (%evo-call "READ-LEDGER" store)))
+                     "a symlinked store root is rejected before traversal")
+              (check (%signals-error-p
+                      (lambda () (%open-test-store store-path actors)))
+                     "opening a symlinked store root is rejected")))
+           (check (equalp ledger-before (%read-octets ledger))
+                  "root rejection leaves the moved outside ledger unchanged")
+           (%call-with-entry-replaced-by-self-symlink
+            candidates
+            (lambda ()
+              (check (%rejected-p
+                      (lambda ()
+                        (%evo-call "VERIFY-CANDIDATE" store candidate-id)))
+                     "a symlinked candidates ancestor is rejected")))
+           (check (equalp image-before (%read-octets image))
+                  "candidate ancestor rejection leaves outside bytes unchanged")
+           (%call-with-entry-replaced-by-self-symlink
+            pointers
+            (lambda ()
+              (check (%signals-error-p
+                      (lambda () (%evo-call "READ-POINTER" store :canary)))
+                     "a symlinked pointers ancestor is rejected")))
+           (check (equalp pointer-before (%read-octets pointer))
+                  "pointer ancestor rejection leaves outside bytes unchanged")
+           (%call-with-entry-replaced-by-self-symlink
+            ledger
+            (lambda ()
+              (check (%signals-error-p
+                      (lambda () (%evo-call "READ-LEDGER" store)))
+                     "a symlinked ledger leaf is rejected")))
+           (%call-with-entry-replaced-by-self-symlink
+            head
+            (lambda ()
+              (check (%signals-error-p
+                      (lambda () (%evo-call "READ-LEDGER-HEAD" store)))
+                     "a symlinked signed-head leaf is rejected")))
+           (%call-with-entry-replaced-by-self-symlink
+            manifest
+            (lambda ()
+              (check (%signals-error-p
+                      (lambda ()
+                        (%evo-call "READ-CANDIDATE-MANIFEST"
+                                   store candidate-id)))
+                     "a symlinked manifest leaf is rejected")))
+           (%call-with-entry-replaced-by-self-symlink
+            image
+            (lambda ()
+              (check (%rejected-p
+                      (lambda ()
+                        (%evo-call "VERIFY-CANDIDATE" store candidate-id)))
+                     "a symlinked candidate image leaf is rejected")))
+           (%call-with-entry-replaced-by-self-symlink
+            pointer
+            (lambda ()
+              (check (%signals-error-p
+                      (lambda () (%evo-call "READ-POINTER" store :canary)))
+                     "a symlinked pointer leaf is rejected")))
+           (check (equalp ledger-before (%read-octets ledger)))
+           (check (equalp head-before (%read-octets head)))
+           (check (equalp manifest-before (%read-octets manifest)))
+           (check (equalp image-before (%read-octets image)))
+           (check (equalp pointer-before (%read-octets pointer))
+                  "all symlink probes preserve the moved outside files"))
+         (%close-test-store store))))))
+
 ;; ----------------------------------------- TEST-008, TEST-009, TEST-032 ---
 
 (defun test-evolution-lineage-and-surface-round-trip ()
@@ -521,6 +644,62 @@
        (check (equalp (%read-octets root-image) #(1 3 3 7))
               "lineage validation does not mutate a source")
        (%close-test-store store)))))
+
+(defun test-evolution-persisted-freeze-evidence-required ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let* ((actors (%make-actors))
+            (source-store (%open-test-store (merge-pathnames "source/" directory)
+                                            actors))
+            (target-store (%open-test-store (merge-pathnames "target/" directory)
+                                            actors))
+            (image (%make-image directory "injected.core" #(90 91 92 93)))
+            (manifest (%freeze source-store image (%actor actors :creator)))
+            (candidate-id (%candidate-id manifest))
+            (source-image (%evo-call "CANDIDATE-IMAGE-PATH"
+                                     source-store candidate-id))
+            (source-manifest (%evo-call "CANDIDATE-MANIFEST-PATH"
+                                        source-store candidate-id))
+            (target-directory (%evo-call "CANDIDATE-DIRECTORY"
+                                         target-store candidate-id))
+            (target-name (string-right-trim "/" (namestring target-directory)))
+            (freeze-event
+              (find candidate-id (%evo-call "READ-LEDGER" source-store)
+                    :key (lambda (event) (getf event :candidate-id))
+                    :test #'string=))
+            (actor-event
+              (%plist-without-keys freeze-event
+                                   '(:seq :previous-hash :event-hash))))
+       (check (%evo-call "VERIFY-CANDIDATE" source-store candidate-id))
+       ;; Copying a fully valid, creator-signed immutable directory into a
+       ;; different store is not a freeze.  The target ledger is the root of
+       ;; persistence provenance and initially contains no matching evidence.
+       (sb-posix:mkdir target-name #o700)
+       (%write-octets (merge-pathnames "image.core" target-directory)
+                      (%read-octets source-image))
+       (%write-string (merge-pathnames "manifest.sexp" target-directory)
+                      (%read-string source-manifest))
+       (check (equal manifest
+                     (%evo-call "READ-CANDIDATE-MANIFEST"
+                                target-store candidate-id))
+              "the injected directory retains a correctly signed manifest")
+       (check (%rejected-p
+               (lambda ()
+                 (%evo-call "VERIFY-CANDIDATE" target-store candidate-id)))
+              "a signed candidate without a freeze event is not persisted")
+       ;; One exact creator-signed freeze record establishes provenance.  A
+       ;; second record for the same candidate makes provenance ambiguous and
+       ;; must fail the exactly-one invariant.
+       (%evo-call "%APPEND-EVENT-UNLOCKED" target-store actor-event)
+       (check (%evo-call "VERIFY-CANDIDATE" target-store candidate-id)
+              "one exact valid freeze event establishes provenance")
+       (%evo-call "%APPEND-EVENT-UNLOCKED" target-store actor-event)
+       (check (%rejected-p
+               (lambda ()
+                 (%evo-call "VERIFY-CANDIDATE" target-store candidate-id)))
+              "duplicate freeze evidence is rejected")
+       (%close-test-store source-store)
+       (%close-test-store target-store)))))
 
 ;; ----------------------------------------- TEST-006, TEST-033 / signing ---
 
@@ -707,7 +886,9 @@
                   (head-path (%evo-call "LEDGER-HEAD-PATH" store))
                   (ledger-before (%read-string ledger-path))
                   (head-before (%read-string head-path))
-                  (pointer-before (%evo-call "READ-POINTER" store :canary)))
+                  (pointer-path (%evo-call "POINTER-PATH" store :canary))
+                  (pointer-before (%evo-call "READ-POINTER" store :canary))
+                  (pointer-bytes-before (%read-octets pointer-path)))
              ;; Duplicate run IDs are rejected without changing either file.
              (check (%signals-error-p
                      (lambda ()
@@ -730,17 +911,31 @@
                (check (%signals-error-p
                        (lambda () (%evo-call "READ-LEDGER" store)))
                       "a complete chain corruption is rejected by the reader")
-               (check (equal pointer-before
-                             (%evo-call "READ-POINTER" store :canary))
-                      "verification never changes a pointer")
+               (check (%signals-error-p
+                       (lambda () (%evo-call "READ-POINTER" store :canary)))
+                      "pointer reads fail closed on corrupt ledger evidence")
+               (check (equalp pointer-bytes-before (%read-octets pointer-path))
+                      "failed pointer verification never changes pointer bytes")
                (check (string= head-before (%read-string head-path)))
                (%write-string ledger-path ledger-before))
+             ;; The detached signed head is part of every pointer read's trust
+             ;; root, not a diagnostic optional check.
+             (%write-string head-path (concatenate 'string head-before "junk"))
+             (check (%signals-error-p
+                     (lambda () (%evo-call "READ-POINTER" store :canary)))
+                    "pointer reads fail closed on corrupt signed head evidence")
+             (check (equalp pointer-bytes-before (%read-octets pointer-path)))
+             (%write-string head-path head-before)
              (%write-string ledger-path
                             (concatenate 'string ledger-before "(:event"))
              (check (%evo-call "VERIFY-LEDGER" store)
                     "an incomplete final line is ignored")
              (check (= (length events)
                        (length (%evo-call "READ-LEDGER" store))))
+             (check (string= pointer-before
+                             (%evo-call "READ-POINTER" store :canary))
+                    "an incomplete suffix preserves the signed pointer view")
+             (check (equalp pointer-bytes-before (%read-octets pointer-path)))
              (%write-string ledger-path ledger-before)
              (check (%evo-call "VERIFY-LEDGER" store))))
          (%close-test-store store))))))
@@ -988,6 +1183,39 @@
                   "the decision binds its evidence head and event hash")
            (%close-test-store store-a)))))))
 
+(defun test-evolution-decision-form-coherence ()
+  (%call-with-evolution-directory
+   (lambda (directory)
+     (let ((actors (%make-actors)))
+       (multiple-value-bind (store store-path baseline baseline-id
+                             candidate candidate-id)
+           (%make-candidate-pair directory actors)
+         (declare (ignore store-path baseline candidate))
+         (%record-comparison-matrix store actors baseline-id candidate-id)
+         (let* ((decision (%make-decision store baseline-id candidate-id
+                                          (%actor actors :authorizer)))
+                (validate (%evo-function "%VALIDATE-DECISION-EVENT")))
+           (check (funcall validate decision)
+                  "the emitted decision satisfies its semantic schema")
+           (check (%signals-error-p
+                   (lambda ()
+                     (funcall validate
+                              (%plist-put decision :evidence-head
+                                          +evolution-sha-a+))))
+                  "evidence-head must equal previous-hash")
+           (check (%signals-error-p
+                   (lambda ()
+                     (funcall validate
+                              (%plist-put decision :failed-gates
+                                          '(:capability-delta-met)))))
+                  "failed gates must exactly correspond to false gate values")
+           (check (%signals-error-p
+                   (lambda ()
+                     (funcall validate
+                              (%plist-put decision :eligible-p nil))))
+                  "eligibility is true exactly when no gate failed"))
+         (%close-test-store store))))))
+
 ;; ----------------------------- TEST-015, TEST-016, TEST-028, TEST-029 ---
 
 (defun %promote-with-pointer-observer (store decision old-id new-id authorizer)
@@ -1182,7 +1410,8 @@
             (manifest-path (%evo-call "CANDIDATE-MANIFEST-PATH" store candidate-id))
             (manifest-before (%read-string manifest-path))
             (ledger-before (%read-string (%evo-call "LEDGER-PATH" store)))
-            (tools-before (sort (mapcar #'symbol-name (list-tools)) #'string<)))
+            (tools-before (sort (mapcar #'symbol-name (list-tools)) #'string<))
+            (registry-before (%package-registry-snapshot)))
        (setf *evolution-reader-attack-fired* nil)
        (%write-string manifest-path
                       (format nil
@@ -1222,6 +1451,60 @@
        (check (%signals-error-p
                (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
                                      store candidate-id))))
+       ;; Reader recognition is closed and allocation-bounded.  In particular,
+       ;; an unknown keyword or package-qualified symbol must never intern an
+       ;; attacker-selected symbol or mutate the package registry.
+       (let ((attack-name
+               (format nil "IMAGO-EVOLUTION-ATTACK-~D-~D"
+                       (get-universal-time) (random 1000000000))))
+         (check (null (find-symbol attack-name :keyword)))
+         (%write-string manifest-path
+                        (format nil "(:~A nil)~%" attack-name))
+         (check (%signals-error-p
+                 (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
+                                       store candidate-id)))
+                "unknown keywords are rejected without reader interning")
+         (check (null (find-symbol attack-name :keyword))
+                "hostile keyword text is never interned")
+         (%write-string manifest-path
+                        (format nil "cl-user::~A~%" attack-name))
+         (check (%signals-error-p
+                 (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
+                                       store candidate-id)))
+                "package-qualified symbols are outside the grammar")
+         (check (null (find-symbol attack-name :cl-user))))
+       (%write-string
+        manifest-path
+        (concatenate 'string
+                     (make-string 80 :initial-element #\()
+                     "nil"
+                     (make-string 80 :initial-element #\))
+                     (string #\Newline)))
+       (check (%signals-error-p
+               (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
+                                     store candidate-id)))
+              "deep forms are rejected at the parser depth bound")
+       (%write-string manifest-path
+                      (format nil "(:version ~A)~%"
+                              (make-string 21 :initial-element #\9)))
+       (check (%signals-error-p
+               (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
+                                     store candidate-id)))
+              "oversized integers are rejected before bignum construction")
+       (%write-string manifest-path
+                      (format nil "(:version \"~A\")~%"
+                              (make-string 65537 :initial-element #\x)))
+       (check (%signals-error-p
+               (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
+                                     store candidate-id)))
+              "oversized strings are rejected before decoded allocation")
+       (%write-string manifest-path
+                      (make-string (1+ (* 1024 1024))
+                                   :initial-element #\Space))
+       (check (%signals-error-p
+               (lambda () (%evo-call "READ-CANDIDATE-MANIFEST"
+                                     store candidate-id)))
+              "oversized persisted forms are rejected before input buffering")
        (%write-string manifest-path manifest-before)
        (check (equal manifest
                      (%evo-call "READ-CANDIDATE-MANIFEST" store candidate-id)))
@@ -1250,6 +1533,8 @@
        (check (equal tools-before
                      (sort (mapcar #'symbol-name (list-tools)) #'string<))
               "readers cannot mutate the process tool registry")
+       (check (equal registry-before (%package-registry-snapshot))
+              "hostile readers cannot mutate the package registry")
        (%close-test-store store)))))
 
 ;; -------------------------------------------- TEST-006 / full round trip ---
@@ -1309,8 +1594,12 @@
                            #'test-evolution-freeze-copy-hash-immutability-and-identity)
       (%run-evolution-case "TEST-009/026 surface and filesystem scope"
                            #'test-evolution-freeze-surface-and-symlink-scope)
+      (%run-evolution-case "TEST-026 managed-entry symlink confinement"
+                           #'test-evolution-managed-entry-symlink-confinement)
       (%run-evolution-case "TEST-008/032 lineage round trip"
                            #'test-evolution-lineage-and-surface-round-trip)
+      (%run-evolution-case "TEST-008 persisted freeze evidence"
+                           #'test-evolution-persisted-freeze-evidence-required)
       (%run-evolution-case "TEST-006/033 canonical bytes and signatures"
                            #'test-evolution-canonical-bytes-and-actor-signatures)
       (%run-evolution-case "TEST-010/027/034 ledger chain and replay"
@@ -1325,6 +1614,8 @@
                            #'test-evolution-repetition-and-executor-boundaries)
       (%run-evolution-case "TEST-018/031 deterministic all-event decision"
                            #'test-evolution-decision-all-events-and-order-determinism)
+      (%run-evolution-case "TEST-020 decision semantic coherence"
+                           #'test-evolution-decision-form-coherence)
       (%run-evolution-case "TEST-015/016/028/029 trusted promotion and rollback"
                            #'test-evolution-trusted-promotion-pointers-and-rollback)
       (%run-evolution-case "TEST-017/034 stale and tampered candidate denial"
