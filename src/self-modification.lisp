@@ -237,6 +237,8 @@ When ACTIVE-P is true, callers must ignore dynamic agent/operator authority."
     (cffi-toolchain:link-shared-library . :process-launch)
     (cffi-toolchain:link-executable  . :process-launch)
     (cffi-toolchain:link-lisp-executable . :process-launch)
+    (cffi-grovel:process-grovel-file . :process-launch)
+    (cffi-grovel:process-wrapper-file . :process-launch)
     ;; ADR-012 §A1 — eval/load/read primitives at top level
     (eval                            . :eval-bypass)
     (compile                         . :compile-bypass)
@@ -566,6 +568,8 @@ into *SAFETY-LAYER-SYMBOLS*, so burying an operator cannot bypass this gate.")
     cffi-toolchain:link-shared-library
     cffi-toolchain:link-executable
     cffi-toolchain:link-lisp-executable
+    cffi-grovel:process-grovel-file
+    cffi-grovel:process-wrapper-file
     *clean-checklist*
     pre-save-clean!
     save-image!

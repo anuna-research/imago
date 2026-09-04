@@ -95,6 +95,10 @@
          ("(progn (asdf:run-shell-command \"true\"))" asdf:run-shell-command)
          ("(progn (cffi-toolchain:invoke \"/usr/bin/true\"))"
           cffi-toolchain:invoke)
+         ("(progn (cffi-grovel:process-grovel-file #p\"probe.grovel\"))"
+          cffi-grovel:process-grovel-file)
+         ("(progn (cffi-grovel:process-wrapper-file #p\"probe.wrapper\"))"
+          cffi-grovel:process-wrapper-file)
          ("(progn (sb-ext:posix-environ))" sb-ext:posix-environ)
          ("(progn (sb-posix:getenv \"ANTHROPIC_API_KEY\"))" sb-posix:getenv)
          ("(progn (sb-ext:exit))" sb-ext:exit)
@@ -1781,6 +1785,8 @@ Tests bind this to make the reasoner veto specific forms.")
                       cffi-toolchain:link-shared-library
                       cffi-toolchain:link-executable
                       cffi-toolchain:link-lisp-executable
+                      cffi-grovel:process-grovel-file
+                      cffi-grovel:process-wrapper-file
                       anuna-imago:*clean-checklist*
                       anuna-imago:pre-save-clean!
                       anuna-imago:save-image!
