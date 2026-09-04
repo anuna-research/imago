@@ -31,10 +31,10 @@
                  :provider (make-stub-provider)
                  :system-prompt "You are echo. Repeat the user's message."))
 
-(defun %run-echo (msg)
+(defun %run-echo (msg agent-factory)
   "Run one echo turn under a supervised agent and return the reply text."
   (let* ((sup   (make-supervisor 'main-sup :max-restarts 3))
-         (agent (%build-default-echo-agent)))
+         (agent (funcall agent-factory)))
     (spawn-agent! sup agent)
     (sleep 0.05)
     (let ((reply (ask-agent agent msg :timeout 5)))
@@ -75,12 +75,12 @@ The serve loop checks the flag between asks; when set it drains and exits."
 
 ;; ------------------------------------------------------ serve mode ---
 
-(defun %run-serve (max-seconds)
+(defun %run-serve (max-seconds agent-factory)
   "Stdin-driven serve loop. Each line is treated as an ask; reply printed.
 Exits cleanly on EOF, SIGTERM, or after MAX-SECONDS (NIL = forever)."
   (%install-shutdown-handler)
   (let* ((sup   (make-supervisor 'serve-sup :max-restarts 3))
-         (agent (%build-default-echo-agent))
+         (agent (funcall agent-factory))
          (deadline (when max-seconds
                      (+ (get-universal-time) max-seconds))))
     (setf *active-supervisor* sup)
@@ -119,8 +119,8 @@ Exits cleanly on EOF, SIGTERM, or after MAX-SECONDS (NIL = forever)."
 
 ;; ------------------------------------------------------ argv parser ---
 
-(defun agent-main ()
-  "Toplevel for the saved image."
+(defun agent-main (&optional (agent-factory #'%build-default-echo-agent))
+  "Toplevel for the saved image. AGENT-FACTORY supplies echo and serve agents."
   (let ((argv (rest sb-ext:*posix-argv*)))
     (cond
       ((null argv)
@@ -130,14 +130,14 @@ Exits cleanly on EOF, SIGTERM, or after MAX-SECONDS (NIL = forever)."
        (format t "anuna-imago ~A~%" *version*)
        (sb-ext:exit :code 0))
       ((and (string= (first argv) "--echo") (second argv))
-       (let ((reply-text (%run-echo (second argv))))
+       (let ((reply-text (%run-echo (second argv) agent-factory)))
          (format t "~A~%" reply-text)
          (sb-ext:exit :code 0)))
       ((string= (first argv) "--serve")
        (let ((seconds (when (second argv)
                         (handler-case (parse-integer (second argv))
                           (error () nil)))))
-         (%run-serve seconds)))
+         (%run-serve seconds agent-factory)))
       (t
        (format *error-output*
                "Usage: ~A [--version | --echo MSG | --serve [SECONDS]]~%"

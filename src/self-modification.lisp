@@ -859,7 +859,7 @@ load-theory and before the first harness-eval call."
       (error () nil))))
 
 (defun %query-forbidden (handle form-id)
-  "Returns the proof-result plist or NIL on IPC error."
+  "Return the proof-result plist, or NIL when the reasoner query fails."
   (handler-case (query handle (list 'forbidden 'eval-call form-id))
     (error () nil)))
 
@@ -1104,15 +1104,23 @@ Always returns a plist; never raises."
        (let ((veto-result nil))
          (unwind-protect
              (let ((proof (%query-forbidden handle form-id)))
-               (when (proof-result-positive-p proof)
-                 (let* ((derivation (getf proof :derivation))
-                        (hint       (%vetoed-hint derivation)))
-                   (setf veto-result
-                         (list :status :vetoed :phase :reasoner
-                               :goal (list 'forbidden 'eval-call form-id)
-                               :derivation derivation
-                               :hint hint
-                               :time-ms (or (getf proof :time-ms) 0))))))
+               (cond
+                 ((not (%proof-result-valid-p proof))
+                  (setf veto-result
+                        (list :status :vetoed :phase :reasoner
+                              :goal (list 'forbidden 'eval-call form-id)
+                              :derivation '((invalid-reasoner-evidence))
+                              :hint "Reasoner evidence was missing or malformed."
+                              :time-ms 0)))
+                 ((proof-result-positive-p proof)
+                  (let* ((derivation (getf proof :derivation))
+                         (hint       (%vetoed-hint derivation)))
+                    (setf veto-result
+                          (list :status :vetoed :phase :reasoner
+                                :goal (list 'forbidden 'eval-call form-id)
+                                :derivation derivation
+                                :hint hint
+                                :time-ms (or (getf proof :time-ms) 0)))))))
            (%retract-lift-facts! handle form-id lift))
          (cond
            (veto-result

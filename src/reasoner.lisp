@@ -55,25 +55,57 @@ Theory is unmodified."
 
 ;; ---------------------------------------------------- invariant filter ---
 
+(defun %proper-list-p (object)
+  "Recognize a finite proper list, rejecting atoms, dotted tails, and cycles."
+  (loop with slow = object
+        with fast = object
+        do (cond
+             ((null fast) (return t))
+             ((atom fast) (return nil))
+             ((null (cdr fast)) (return t))
+             ((atom (cdr fast)) (return nil)))
+           (setf slow (cdr slow)
+                 fast (cddr fast))
+           (when (eq slow fast) (return nil))))
+
 (defparameter *active-theory-handle* nil
   "Theory handle the default invariant filter consults at :on-tool-call.
 SET via INSTALL-INVARIANT-FILTER!; cleared by PRE-SAVE-CLEAN! through
 the credential-eraser registry so the handle does not leak into images.")
 
+(defun %proof-result-valid-p (result)
+  "Recognize the exact proof-result grammar before a guarded side effect."
+  (handler-case
+      (and (%proper-list-p result)
+           (= 6 (length result))
+           (let ((keys (loop for tail on result by #'cddr
+                             collect (first tail))))
+             (and (every (lambda (key)
+                           (member key '(:tag :derivation :time-ms)))
+                         keys)
+                  (= 1 (count :tag keys))
+                  (= 1 (count :derivation keys))
+                  (= 1 (count :time-ms keys))
+                  (member (getf result :tag)
+                          '(:+delta :+partial-delta :-delta :-partial-delta))
+                  (%proper-list-p (getf result :derivation))
+                  (let ((time-ms (getf result :time-ms)))
+                    (and (integerp time-ms) (not (minusp time-ms)))))))
+    (error () nil)))
+
 (defun proof-result-positive-p (result)
   "T if RESULT carries a positive tag (+Δ or +∂) — i.e., the reasoner
 concluded the goal IS provable."
-  (and (listp result)
-       (member (getf result :tag)
-               '(:+delta :+partial-delta))))
+  (and (%proof-result-valid-p result)
+       (member (getf result :tag) '(:+delta :+partial-delta))))
 
 (defun invariant-filter-hook (agent call)
   "Sync-transformative hook for :on-tool-call. Asks the active theory
 whether the call is FORBIDDEN; if the reasoner answers yes (+Δ or +∂),
-returns :VETO. Otherwise returns CALL unchanged."
+returns :VETO. Only a valid negative proof permits the call."
   (declare (ignore agent))
   (cond
-    ((null *active-theory-handle*) call)
+    ((null *active-theory-handle*) :veto)
     (t
      (let* ((tool-name (getf call :name))
             (args      (getf call :args))
@@ -81,6 +113,7 @@ returns :VETO. Otherwise returns CALL unchanged."
             (result    (handler-case (query *active-theory-handle* goal)
                          (error () nil))))
        (cond
+         ((not (%proof-result-valid-p result)) :veto)
          ((proof-result-positive-p result) :veto)
          (t call))))))
 

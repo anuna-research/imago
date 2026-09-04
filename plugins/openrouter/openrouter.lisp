@@ -112,22 +112,49 @@ env var if :api-key is omitted. :model accepts any OpenRouter model slug.
 
 ;; ----------------------------------------------- build-request ---
 
+(defun %openrouter-tool-results-content-p (content)
+  (and (consp content)
+       (eq :openrouter-tool-results (first content))))
+
+(defun %openrouter-message->wire (message)
+  "Translate one canonical history message to OpenAI wire messages."
+  (let ((role (getf message :role))
+        (content (getf message :content)))
+    (cond
+      ;; Response parsing retains the complete assistant message so its
+      ;; tool_calls array can be sent back byte-for-byte on the next step.
+      ((and (stringp role) (string= role "assistant")
+            (hash-table-p content))
+       (list content))
+      ;; DRIVE-STREAM represents provider feedback as a canonical user
+      ;; message. Expand our tagged content into OpenAI role=tool messages.
+      ((%openrouter-tool-results-content-p content)
+       (copy-list (rest content)))
+      (t
+       (list (%ht "role" role "content" content))))))
+
+(defun %openrouter-request-messages (message agent)
+  "Build the complete OpenAI messages vector without flattening history."
+  (let ((messages
+          (cond
+            ((%messages-list-p message)
+             (mapcan #'%openrouter-message->wire message))
+            (t
+             (list (%ht "role" "user"
+                        "content"
+                        (or (and (listp message) (ask-content message))
+                            (princ-to-string message))))))))
+    (when (and (slot-boundp agent 'system-prompt)
+               (stringp (agent-system-prompt agent))
+               (not (string= "" (agent-system-prompt agent))))
+      (push (%ht "role" "system" "content" (agent-system-prompt agent))
+            messages))
+    (coerce messages 'vector)))
+
 (defmethod build-request ((p openrouter-provider) message agent)
-  (let* ((content (or (and (listp message) (ask-content message))
-                      (princ-to-string message)))
-         (messages-vec
-           (let ((msgs nil))
-             ;; System prompt rides as a system message, NOT a separate field.
-             (when (and (slot-boundp agent 'system-prompt)
-                        (stringp (agent-system-prompt agent))
-                        (not (string= "" (agent-system-prompt agent))))
-               (push (%ht "role" "system" "content" (agent-system-prompt agent))
-                     msgs))
-             (push (%ht "role" "user" "content" content) msgs)
-             (coerce (nreverse msgs) 'vector)))
-         (req (%ht "model" (openrouter-model p)
+  (let* ((req (%ht "model" (openrouter-model p)
                    "max_tokens" (openrouter-max-tokens p)
-                   "messages" messages-vec)))
+                   "messages" (%openrouter-request-messages message agent))))
     (when (openrouter-temperature p)
       (setf (gethash "temperature" req) (openrouter-temperature p)))
     (let ((tool-specs
@@ -158,13 +185,32 @@ env var if :api-key is omitted. :model accepts any OpenRouter model slug.
 
 (defun %openai-args->plist (args-string)
   "Tool call arguments arrive as a JSON STRING (per OpenAI spec). Parse
-it back to a plist, gracefully degrading to (:_raw <string>) if the
-string isn't valid JSON."
+it back to a plist. Return an unforgeable invalid marker on any other shape."
   (cond
-    ((null args-string) nil)
-    ((not (stringp args-string)) nil)
-    (t (handler-case (%hash->plist (com.inuoe.jzon:parse args-string))
-         (error () (list :_raw args-string))))))
+    ((not (stringp args-string))
+     (list *invalid-tool-arguments-marker* args-string))
+    (t
+     (handler-case
+         (let ((parsed (com.inuoe.jzon:parse args-string)))
+           (if (hash-table-p parsed)
+               (%hash->plist parsed)
+               (list *invalid-tool-arguments-marker* args-string)))
+       (error ()
+         (list *invalid-tool-arguments-marker* args-string))))))
+
+(defun %openrouter-finish-reason (finish)
+  "Return canonical stop reason and whether FINISH was recognized."
+  (cond
+    ((and (stringp finish) (string= finish "stop"))
+     (values :end-turn t))
+    ((and (stringp finish) (string= finish "tool_calls"))
+     (values :tool-use t))
+    ((and (stringp finish) (string= finish "length"))
+     (values :max-tokens t))
+    ((and (stringp finish) (string= finish "error"))
+     (values :error t))
+    (t
+     (values :error nil))))
 
 (defun %openrouter-response->frames (response-ht)
   "Walk choices[0].message and produce canonical frames followed by :done.
@@ -172,10 +218,11 @@ string isn't valid JSON."
 OpenAI shape:
   choices[0].message.content       → (:text …)
   choices[0].message.tool_calls[*] → (:tool-use ID NAME ARGS)
-  choices[0].finish_reason='error' → (:error …)"
+  choices[0].finish_reason         → (:stop-reason CANONICAL)"
   (let* ((choices (gethash "choices" response-ht))
          (frames  nil))
-    (when (and choices (or (vectorp choices) (listp choices)))
+    (when (and choices (or (and (vectorp choices) (plusp (length choices)))
+                           (and (listp choices) (consp choices))))
       (let* ((choice (elt (if (listp choices) (coerce choices 'vector) choices) 0))
              (message (gethash "message" choice))
              (text (and message (gethash "content" message)))
@@ -196,9 +243,24 @@ OpenAI shape:
                                  (intern (string-upcase name) :keyword)
                                  (%openai-args->plist args-str))
                            frames)))
+        (when message
+          (push (list :assistant-content message) frames))
         (let ((finish (gethash "finish_reason" choice)))
-          (when (string= finish "error")
-            (push (list :error (gethash "error" response-ht)) frames)))))
+          (multiple-value-bind (stop-reason recognized-p)
+              (%openrouter-finish-reason finish)
+            (push (list :stop-reason stop-reason) frames)
+            (cond
+              ((not recognized-p)
+               (push (list :error
+                           (list :provider "openrouter"
+                                 :status :unknown-finish-reason
+                                 :finish-reason finish))
+                     frames))
+              ((eq stop-reason :error)
+               (push (list :error (or (gethash "error" response-ht)
+                                      (list :provider "openrouter"
+                                            :status :provider-error)))
+                     frames)))))))
     ;; Top-level error envelope (auth failure, model not found, etc.)
     (let ((err (gethash "error" response-ht)))
       (when err
@@ -209,6 +271,29 @@ OpenAI shape:
                                            err)))
               frames)))
     (nreverse (cons :done frames))))
+
+;; ------------------------------------------ tool results round-trip ---
+
+(defmethod tool-results-message-content ((p openrouter-provider) results)
+  "Tag OpenAI role=tool messages for expansion by BUILD-REQUEST."
+  (declare (ignore p))
+  (cons
+   :openrouter-tool-results
+   (mapcar
+    (lambda (result)
+      (let* ((status (getf result :status))
+             (content
+               (cond
+                 ((eq status :ok) (princ-to-string (getf result :value)))
+                 ((eq status :error)
+                  (format nil "ERROR: ~A" (getf result :error)))
+                 ((eq status :vetoed) "VETOED by safety policy")
+                 ((eq status :unauthorized) "UNAUTHORIZED by agent policy")
+                 (t (princ-to-string result)))))
+        (%ht "role" "tool"
+             "tool_call_id" (getf result :id)
+             "content" content)))
+    results)))
 
 ;; ----------------------------------------------- stream! ---
 

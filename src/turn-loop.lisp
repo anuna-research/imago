@@ -105,6 +105,14 @@ of the conversation history and just respond to the most recent prompt."
 this many provider round-trips the loop exits even if the model is still
 emitting tool_use blocks. Prevents accidental infinite spend.")
 
+(defparameter *invalid-tool-arguments-marker*
+  (gensym "INVALID-TOOL-ARGUMENTS-")
+  "Unforgeable marker used by provider decoders after argument failure.")
+
+(defun %invalid-tool-arguments-p (args)
+  (and (consp args)
+       (eq (first args) *invalid-tool-arguments-marker*)))
+
 (defun %consume-stream (stream)
   "Drain STREAM into a step plist:
   (:text-parts (\"...\" ...)        ; assistant text fragments in order
@@ -232,22 +240,35 @@ The plist shape is (:id ID :name NAME :status STATUS [...]) — even-length,
 suitable for GETF. The reply's :tool-results carries a list of these."
   (destructuring-bind (_ id name args) frame
     (declare (ignore _))
-    (let ((gated (run-hook :on-tool-call agent
-                           (list :id id :name name :args args))))
-      (cond
-        ((eq gated :veto)
-         (list :id id :name name :status :vetoed))
-        (t
-         (let ((args* (getf gated :args))
-               (name* (or (getf gated :name) name)))
-           (handler-case
-               (list :id id :name name*
-                     :status :ok
-                     :value (dispatch-tool! name* args*))
-             (error (c)
-               (list :id id :name name*
-                     :status :error
-                     :error (princ-to-string c))))))))))
+    (cond
+      ((%invalid-tool-arguments-p args)
+       (list :id id :name name :status :error
+             :error (format nil "Malformed tool arguments: ~A" (second args))))
+      (t
+       (let ((gated (run-hook :on-tool-call agent
+                              (list :id id :name name :args args))))
+         (cond
+           ((eq gated :veto)
+            (list :id id :name name :status :vetoed))
+           (t
+            (let ((args* (getf gated :args))
+                  (name* (or (getf gated :name) name)))
+              (multiple-value-bind (dispatch-name authorized-p)
+                  (%authorized-agent-tool-name name*)
+                (cond
+                  ((not authorized-p)
+                   (list :id id :name name* :status :unauthorized))
+                  (t
+                   (handler-case
+                       (list :id id :name name*
+                             :status :ok
+                             :value (dispatch-tool! dispatch-name args*))
+                     (unauthorized-tool-call ()
+                       (list :id id :name name* :status :unauthorized))
+                     (error (c)
+                       (list :id id :name name*
+                             :status :error
+                             :error (princ-to-string c)))))))))))))))
 
 ;; --------------------------------------------------------- turn-loop ---
 

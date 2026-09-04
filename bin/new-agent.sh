@@ -172,11 +172,7 @@ cat > "$TARGET_ABS/src/agent.lisp" <<EOF
 ;;; belongs in tools and hooks, not here.
 
 (defun toplevel ()
-  (let* ((sup   (anuna-imago:make-supervisor 'my-sup))
-         (agent (build-agent)))
-    (anuna-imago:spawn-agent! sup agent)
-    (sleep 0.05)
-    (anuna-imago:agent-main)))     ; reuses harness --echo / --serve / --version
+  (anuna-imago:agent-main #'build-agent)) ; reuses harness CLI with this agent
 EOF
 
 # Generate bin/build.sh.
