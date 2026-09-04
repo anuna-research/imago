@@ -133,37 +133,27 @@ Accepts symbol, keyword, or string — see %normalize-tool-name."
 
 (defun %tool-name-equal-p (left right)
   "Compare provider tool-name designators without trusting package identity."
-  (let ((left-name (typecase left
-                     (symbol (symbol-name left))
-                     (string left)))
-        (right-name (typecase right
-                      (symbol (symbol-name right))
-                      (string right))))
+  (let ((left-name (typecase left (symbol (symbol-name left)) (string left)))
+        (right-name (typecase right (symbol (symbol-name right)) (string right))))
     (and left-name right-name (string-equal left-name right-name))))
 
 (defun %authorized-agent-tool-name (tool-name)
   "Return the allowlisted registry designator and authorization status."
-  (cond
-    ((null *current-agent*) (values tool-name t))
-    (t
-     (let ((allowed (find tool-name (agent-tools *current-agent*)
-                          :test #'%tool-name-equal-p)))
-       (values (or allowed tool-name) (not (null allowed)))))))
+  (if (null *current-agent*)
+      (values tool-name t)
+      (let ((allowed (find tool-name (agent-tools *current-agent*)
+                           :test #'%tool-name-equal-p)))
+        (values (or allowed tool-name) (not (null allowed))))))
 
 (defun dispatch-tool! (name args)
-  "Look up tool NAME and invoke its handler with ARGS (a plist).
-Returns whatever the handler returns; signals if tool is not registered or
-has no handler."
-  (multiple-value-bind (dispatch-name authorized-p)
-      (%authorized-agent-tool-name name)
+  "Invoke tool NAME with plist ARGS; signal when unavailable or unauthorized."
+  (multiple-value-bind (dispatch-name authorized-p) (%authorized-agent-tool-name name)
     (unless authorized-p
       (error 'unauthorized-tool-call :name name))
     (let ((tool (find-tool dispatch-name)))
       (cond
-        ((null tool)
-         (error "dispatch-tool!: no tool registered as ~S" dispatch-name))
-        ((null (tool-handler tool))
-         (error "dispatch-tool!: tool ~S has no handler" dispatch-name))
+        ((null tool) (error "dispatch-tool!: no tool registered as ~S" dispatch-name))
+        ((null (tool-handler tool)) (error "dispatch-tool!: tool ~S has no handler" dispatch-name))
         (t (funcall (tool-handler tool) args))))))
 
 ;; ---------------------------------- schema → JSON-Schema (CL data) ---
